@@ -1,0 +1,2 @@
+package net.donutnetwork.client;
+public record TelemetryEvent(String kind,String fingerprint,String signature,long price,long latencyNanos,long observedAtMillis) {static TelemetryEvent observed(ParsedListing l,FlipEvaluator.Decision d,long started){return new TelemetryEvent(d.flip()?"FLIP_DETECTED":"LISTING_OBSERVED",l.listingId(),l.signature(),l.totalPrice(),d.latencyNanos(),System.currentTimeMillis());}}

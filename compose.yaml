@@ -1,0 +1,87 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: donut
+      POSTGRES_USER: donut
+      POSTGRES_PASSWORD: donut
+    volumes:
+      - donut-data:/var/lib/postgresql/data
+      - ./infra/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U donut -d donut"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  backend:
+    build:
+      context: .
+      target: backend
+    environment:
+      DN_HTTP_ADDR: :8080
+      DN_AUTH_TOKEN: local-worker-token
+      DN_COLLECTOR_TOKEN: local-collector-token
+      DN_ADMIN_TOKEN: local-admin-token
+      DN_DATA_MODE: ${DN_DATA_MODE:-live}
+      DN_DATABASE_URL: postgres://donut:donut@postgres:5432/donut?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports: ["8080:8080"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  simulator:
+    build:
+      context: .
+      target: simulator
+    command: ["-backend", "http://backend:8080", "-rate", "20", "-workers", "8"]
+    environment:
+      DN_AUTH_TOKEN: local-worker-token
+      DN_COLLECTOR_TOKEN: local-collector-token
+    depends_on:
+      backend:
+        condition: service_healthy
+    profiles: ["simulation"]
+
+  collector:
+    build:
+      context: .
+      target: collector
+    command: ["-backend", "http://backend:8080", "-listing-pages", "220", "-interval", "60s"]
+    environment:
+      DONUT_API_KEY: ${DONUT_API_KEY:-}
+      DONUT_API_BASE: https://api.donutsmp.net
+      DN_COLLECTOR_TOKEN: local-collector-token
+    depends_on:
+      backend:
+        condition: service_healthy
+    profiles: ["live"]
+
+  dashboard:
+    build: ./apps/dashboard
+    environment:
+      DN_BACKEND_URL: http://backend:8080
+      DN_ADMIN_TOKEN: local-admin-token
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports: ["3000:3000"]
+
+  prometheus:
+    image: prom/prometheus:v3.7.3
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    profiles: ["metrics"]
+    ports: ["9090:9090"]
+
+volumes:
+  donut-data:

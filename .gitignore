@@ -1,0 +1,14 @@
+.env
+*.exe
+*.test
+*.out
+coverage.html
+apps/dashboard/node_modules/
+apps/dashboard/.next/
+apps/dashboard/dist/
+apps/dashboard/.wrangler/
+minecraft/client-mod/.gradle/
+minecraft/client-mod/build/
+minecraft/client-mod/logs/
+work/
+*.log
