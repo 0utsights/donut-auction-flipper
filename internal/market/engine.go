@@ -16,33 +16,6 @@ type Snapshot struct {
 	Valuations  map[string]Valuation `json:"valuations"`
 }
 
-type PriceUpdate struct {
-	Version     uint64    `json:"version"`
-	GeneratedAt time.Time `json:"generated_at"`
-	Valuation   Valuation `json:"valuation"`
-}
-
-type ClientValue struct {
-	FairValue      int64 `json:"fair_value"`
-	QuickSellValue int64 `json:"quick_sell_value"`
-	ConfidenceBPS  int   `json:"confidence_bps"`
-	Volume24h      int   `json:"volume_24h"`
-}
-
-type ClientSnapshot struct {
-	Version     uint64                 `json:"version"`
-	GeneratedAt time.Time              `json:"generated_at"`
-	Values      map[string]ClientValue `json:"values"`
-}
-
-type SnapshotChunk struct {
-	Version     uint64               `json:"version"`
-	GeneratedAt time.Time            `json:"generated_at"`
-	Index       int                  `json:"index"`
-	Count       int                  `json:"count"`
-	Valuations  map[string]Valuation `json:"valuations"`
-}
-
 type Engine struct {
 	mu                   sync.RWMutex
 	transactions         map[string][]Transaction
@@ -419,67 +392,34 @@ func (e *Engine) Snapshot() Snapshot {
 	}
 	return Snapshot{Version: e.version, GeneratedAt: generatedAt, Valuations: vals}
 }
-func (e *Engine) ClientSnapshot() ClientSnapshot {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	values := make(map[string]ClientValue, len(e.valuations))
-	for signature, valuation := range e.valuations {
-		values[signature] = ClientValue{
-			FairValue: valuation.FairValue, QuickSellValue: valuation.QuickSellValue,
-			ConfidenceBPS: valuation.ConfidenceBPS, Volume24h: valuation.Volume24h,
-		}
-	}
-	generatedAt := e.updatedAt
-	if generatedAt.IsZero() {
-		generatedAt = e.now()
-	}
-	return ClientSnapshot{Version: e.version, GeneratedAt: generatedAt, Values: values}
-}
-func (e *Engine) Version() uint64 {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.version
-}
-func (e *Engine) PriceUpdate(signature string) (PriceUpdate, bool) {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	valuation, ok := e.valuations[signature]
-	generatedAt := e.updatedAt
-	if generatedAt.IsZero() {
-		generatedAt = e.now()
-	}
-	return PriceUpdate{Version: e.version, GeneratedAt: generatedAt, Valuation: valuation}, ok
-}
 func (e *Engine) Valuation(signature string) (Valuation, bool) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	v, ok := e.valuations[signature]
 	return v, ok
 }
-func (e *Engine) Listings(limit int) []Listing {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	out := make([]Listing, 0, len(e.listings))
-	for _, l := range e.listings {
-		out = append(out, l)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].LastSeen.After(out[j].LastSeen) })
-	if limit > 0 && len(out) > limit {
-		out = out[:limit]
-	}
-	return out
-}
 
 // Opportunities ranks active listings against conservative quick-sell values.
 // It deliberately uses completed-sale confidence and volume gates; active asks
 // alone can never create a client alert.
 func (e *Engine) Opportunities(thresholds Thresholds, limit int) []Opportunity {
+	opportunities, _ := e.AnalyzeOpportunities(thresholds, limit)
+	return opportunities
+}
+
+func (e *Engine) AnalyzeOpportunities(thresholds Thresholds, limit int) ([]Opportunity, OpportunityReport) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	now := e.now()
 	out := make([]Opportunity, 0)
+	report := OpportunityReport{Listings: len(e.listings)}
 	for _, listing := range e.listings {
-		if listing.TotalPrice <= 0 || listing.TotalPrice > thresholds.MaxPurchasePrice {
+		if listing.TotalPrice <= 0 {
+			report.InvalidPrice++
+			continue
+		}
+		if thresholds.MaxPurchasePrice > 0 && listing.TotalPrice > thresholds.MaxPurchasePrice {
+			report.OverBudget++
 			continue
 		}
 		deadline := listing.ExpiresAt
@@ -487,26 +427,43 @@ func (e *Engine) Opportunities(thresholds Thresholds, limit int) []Opportunity {
 			deadline = listing.LastSeen.Add(activeListingFallbackTTL)
 		}
 		if !deadline.After(now) {
+			report.Expired++
 			continue
 		}
 		valuation, ok := e.valuations[listing.Signature.Exact]
 		if !ok {
 			valuation, ok = e.valuations[listing.Signature.Base]
 		}
-		if !ok || valuation.QuickSellValue <= 0 || valuation.ConfidenceBPS < thresholds.MinConfidenceBPS || valuation.Volume24h < thresholds.MinVolume24h {
+		if !ok || valuation.QuickSellValue <= 0 {
+			report.NoValuation++
+			continue
+		}
+		if valuation.ConfidenceBPS < thresholds.MinConfidenceBPS {
+			report.LowConfidence++
+			continue
+		}
+		if valuation.Volume24h < thresholds.MinVolume24h {
+			report.LowVolume++
 			continue
 		}
 		if opportunityRiskBlocked(valuation.RiskFlags) {
+			report.RiskBlocked++
 			continue
 		}
 		quantity := int64(max(1, listing.Item.Quantity))
 		if valuation.QuickSellValue > math.MaxInt64/quantity {
+			report.Overflow++
 			continue
 		}
 		reference := valuation.QuickSellValue * quantity
 		profit := reference - listing.TotalPrice
 		margin := opportunityMarginBPS(profit, listing.TotalPrice)
-		if profit < thresholds.MinProfit || margin < thresholds.MinMarginBPS {
+		if profit < thresholds.MinProfit {
+			report.LowProfit++
+			continue
+		}
+		if margin < thresholds.MinMarginBPS {
+			report.LowMargin++
 			continue
 		}
 		out = append(out, Opportunity{Listing: listing, Valuation: valuation, Profit: profit, MarginBPS: margin})
@@ -527,16 +484,19 @@ func (e *Engine) Opportunities(thresholds Thresholds, limit int) []Opportunity {
 	for _, opportunity := range out {
 		signature := opportunity.Listing.Signature.Exact
 		if _, duplicate := seenSignatures[signature]; duplicate {
+			report.DuplicateSignature++
 			continue
 		}
 		seenSignatures[signature] = struct{}{}
 		diverse = append(diverse, opportunity)
 	}
 	out = diverse
+	report.Qualified = len(out)
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}
-	return out
+	report.Published = len(out)
+	return out, report
 }
 
 func opportunityRiskBlocked(flags []string) bool {
@@ -561,20 +521,6 @@ func opportunityMarginBPS(profit, price int64) int {
 	}
 	return int(ratio)
 }
-func (e *Engine) Transactions(limit int) []Transaction {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	out := []Transaction{}
-	for _, ts := range e.transactions {
-		out = append(out, ts...)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].SoldAt.After(out[j].SoldAt) })
-	if limit > 0 && len(out) > limit {
-		out = out[:limit]
-	}
-	return out
-}
-
 func (e *Engine) Explain(signature string) ValuationDebug {
 	e.mu.RLock()
 	defer e.mu.RUnlock()

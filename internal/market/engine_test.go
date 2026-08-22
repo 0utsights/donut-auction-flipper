@@ -93,6 +93,14 @@ func TestEngineRanksOnlyQualifiedActiveOpportunities(t *testing.T) {
 	if len(got) != 1 || got[0].Listing.AuthoritativeID != "best" {
 		t.Fatalf("unexpected ranked opportunities: %+v", got)
 	}
+	unlimited := e.Opportunities(Thresholds{MinProfit: 1_000_000, MinMarginBPS: 1_000, MaxPurchasePrice: 0, MinVolume24h: 1}, 10)
+	if len(unlimited) != 1 || unlimited[0].Listing.AuthoritativeID != "best" {
+		t.Fatalf("zero budget cap must mean unlimited: %+v", unlimited)
+	}
+	_, report := e.AnalyzeOpportunities(Thresholds{MinProfit: 1_000_000, MinMarginBPS: 1_000, MinVolume24h: 1}, 10)
+	if report.Listings != 3 || report.LowProfit != 1 || report.DuplicateSignature != 1 || report.Qualified != 1 || report.Published != 1 {
+		t.Fatalf("unexpected rejection report: %+v", report)
+	}
 }
 
 func BenchmarkObserveExistingMarket(b *testing.B) {

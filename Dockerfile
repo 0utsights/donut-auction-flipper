@@ -1,36 +1,15 @@
 FROM golang:1.26-alpine AS build
 WORKDIR /src
-COPY go.mod go.sum ./
-RUN go mod download
+COPY go.mod ./
 COPY cmd ./cmd
 COPY internal ./internal
-COPY infra ./infra
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/backend ./cmd/backend && \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/simulator ./cmd/simulator && \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/loadtest ./cmd/loadtest && \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/collector ./cmd/collector
+RUN CGO_ENABLED=0 go test ./... && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/donut-server ./cmd/server
 
-FROM alpine:3.22 AS backend
-RUN adduser -D -u 10001 app
+FROM alpine:3.22
+RUN adduser -D -u 10001 app && mkdir /data && chown app:app /data
 USER app
-COPY --from=build /out/backend /usr/local/bin/backend
+COPY --from=build /out/donut-server /usr/local/bin/donut-server
 EXPOSE 8080
-ENTRYPOINT ["backend"]
-
-FROM alpine:3.22 AS collector
-RUN adduser -D -u 10001 app
-USER app
-COPY --from=build /out/collector /usr/local/bin/collector
-ENTRYPOINT ["collector"]
-
-FROM alpine:3.22 AS simulator
-RUN adduser -D -u 10001 app
-USER app
-COPY --from=build /out/simulator /usr/local/bin/simulator
-ENTRYPOINT ["simulator"]
-
-FROM alpine:3.22 AS loadtest
-RUN adduser -D -u 10001 app
-USER app
-COPY --from=build /out/loadtest /usr/local/bin/loadtest
-ENTRYPOINT ["loadtest"]
+ENV DN_ADDRESS=0.0.0.0:8080 DN_HISTORY_FILE=/data/history.json.gz
+VOLUME ["/data"]
+ENTRYPOINT ["donut-server"]

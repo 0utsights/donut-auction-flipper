@@ -1,9 +1,0 @@
-global:
-  scrape_interval: 5s
-scrape_configs:
-  - job_name: donut-backend
-    authorization:
-      type: Bearer
-      credentials: local-admin-token
-    static_configs:
-      - targets: ["backend:8080"]

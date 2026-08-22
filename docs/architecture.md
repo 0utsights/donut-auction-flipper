@@ -1,48 +1,44 @@
 # Architecture
 
-The system is a modular monolith plus independently runnable collector, simulator, load generator, dashboard, and Fabric client. The monolith avoids premature distributed coordination while package boundaries preserve future split points.
+The runtime has one direction of data flow:
 
-## Runtime data flow
-
-```mermaid
-sequenceDiagram
-  participant S as Donut API / simulator
-  participant B as Backend
-  participant P as PostgreSQL
-  participant V as Valuation engine
-  participant W as Worker local cache
-  S->>B: listings + transactions
-  B->>P: normalized source records
-  B->>V: recompute affected signature
-  V-->>W: binary WebSocket snapshot
-  S-->>W: changed auction slot
-  Note over W: normalize → hash lookup → integer compare
-  W-->>B: async observation + decision telemetry
-  W-->>B: async simulated purchase result
+```text
+Official Donut API
+        |
+        v
+one rate-limited scan -> bounded sale history -> fresh robust-v2 model
+                                                |
+                                                v
+                                     immutable ranked flip feed
+                                                |
+                                      HTTP polling with ETag
+                                                |
+                                                v
+                                   Fabric chat + manual /ah search
 ```
 
-### Critical-path invariant
+## Backend cycle
 
-A worker never asks the backend to value an observed listing. `PriceSnapshotCache` atomically replaces an immutable map and `Evaluate` performs one lookup plus integer comparisons. Network and disk work happen after the decision.
+1. Fetch up to ten official completed-transaction pages.
+2. Fetch the newest active listings in recently-listed order until the first short 44-row page or the 220-page latency cap (9,680 rows).
+3. Merge transactions by stable fingerprint and sale timestamp; discard records older than 31 days and cap the archive at 100,000.
+4. Build a new market engine from history and the current active book.
+5. Publish a complete immutable snapshot through one atomic pointer.
+6. Persist history with a temporary file and backup rotation.
 
-### Backend modules
+An error changes the visible status and preserves the previous feed for inspection. The mod emits alerts only while status is `ready`.
 
-- `market`: canonical identity, FNV-1a fingerprints, transaction/listing state, stale-listing expiry, exact/base fallback models, robust statistics, snapshot versioning.
-- `network`: binary framing, three priority classes, bounded queues, chat isolation, worker scoring.
-- `platform`: validation, authentication, rate limiting, HTTP routes, WebSocket sessions, metrics and dashboard projections.
-- `persistence`: PostgreSQL source-record storage and bounded startup history restore.
-- `donutapi`: current official API mapping, authentication, pagination, rate control, retries and response bounds.
+## Trust boundaries
 
-### Failure behavior
+- The official API key ends at the Donut API client and is never serialized.
+- `/api/v1/flips` uses an optional bearer client token; one is mandatory for non-loopback binds.
+- `/api/v1/debug` and `/` contain market evidence and operational counters but no secrets.
+- Commands are generated from a restricted item-name alphabet on the backend and independently checked by the mod.
 
-- Database failure returns `503` rather than acknowledging unpersisted official ingest.
-- Slow WebSocket clients have bounded queues. P2 chat is discarded before P0/P1 market data; a client unable to accept critical frames is disconnected and recovers from a full snapshot.
-- Snapshots are versioned; clients reject older versions and receive a new full snapshot after reconnect. Read endpoints require a worker or admin token as appropriate.
-- Active asks expire at an explicit deadline or a bounded fallback TTL; `LISTING_GONE` removes them immediately.
-- The browser calls a same-origin dashboard proxy, which supplies the admin credential server-side.
-- A stale cache is explicit. Safe purchase adapters revalidate sync ID, slot, signature, seller and price.
-- Malformed, oversized and unauthorized input is rejected before reaching the market engine.
+## Valuation
 
-### Scaling path
+The model uses completed sales as the authority. It canonicalizes item modifiers, deduplicates seller/day influence, filters outliers with median absolute deviation, compares short and long windows, caps per-seller volume, estimates liquidity and sale time, and uses distinct active sellers only as a conservative market cap. A recommendation is blocked when evidence is stale or the official API cannot represent economically sensitive modifiers reliably.
 
-The first scale boundary is PostgreSQL write batching/partition maintenance, followed by snapshot serialization and single-node fanout. At that point: partition observations monthly, batch with `COPY`, store encoded snapshot blobs, add a NATS-backed event bus behind the hub interface, and run stateless gateways. The client remains unchanged.
+## Why polling
+
+The full upstream book has thousands of pages and cannot be exhaustively rescanned quickly under the published rate limit. The backend instead scans the newest 220 pages in about a minute; completed sales provide broad-market valuation. Two-second conditional polling gives the mod prompt delivery after publication with ordinary HTTP semantics, tiny unchanged responses (`304 Not Modified`), simple reconnection, and no WebSocket lifecycle or fanout machinery.

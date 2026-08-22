@@ -2,38 +2,42 @@ package net.donutnetwork.client;
 
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
-import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
+import net.minecraft.text.Text;
 import net.minecraft.util.Identifier;
 import org.lwjgl.glfw.GLFW;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.literal;
 
-/** Installs auction observation, backend alerts, and user-initiated navigation controls. */
+/** Thin API-only Fabric client: poll, alert, and open a manual auction search. */
 public final class DonutNetworkClient implements ClientModInitializer {
-    private static final ClientCore CORE = new ClientCore();
-    private BackendSnapshotClient backend;
-    private BackendOpportunityClient opportunities;
+    private static final Logger LOGGER = LoggerFactory.getLogger("donut-network-client");
+    private FlipFeedClient feed;
+
     @Override public void onInitializeClient() {
-        CORE.initialize();
-        new FabricAuctionScreenObserver(CORE).register();
-        ClientConfiguration.Settings settings = ClientConfiguration.load();
-        if (settings != null) {
-            backend = new BackendSnapshotClient(CORE.prices(), settings.backend());
-            opportunities = new BackendOpportunityClient(settings.backend(), settings.alertInterval(),
-                    settings.chatAlerts(), opportunity -> MinecraftClient.getInstance().execute(() ->
-                    FlipChatNotifier.send(MinecraftClient.getInstance(), opportunity)));
-            backend.start();
-            opportunities.start();
+        try {
+            ClientConfig.Settings settings = ClientConfig.load();
+            feed = new FlipFeedClient(settings, flip -> MinecraftClient.getInstance().execute(() ->
+                    FlipNotifier.send(MinecraftClient.getInstance(), flip)));
             registerControls();
-            ClientLifecycleEvents.CLIENT_STOPPING.register(client -> {
-                backend.close();
-                opportunities.close();
-            });
+            feed.start();
+            ClientLifecycleEvents.CLIENT_STOPPING.register(client -> feed.close());
+            LOGGER.info("Donut API-only client started; backend={}", settings.backend());
+        } catch (RuntimeException error) {
+            LOGGER.error("Donut client configuration is invalid: {}", error.getMessage());
+            ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) ->
+                    dispatcher.register(literal("dn").executes(context -> {
+                        MinecraftClient client = MinecraftClient.getInstance();
+                        if (client.player != null) client.player.sendMessage(Text.literal("[DN] Configuration error: " + error.getMessage()), false);
+                        return 0;
+                    })));
         }
     }
 
@@ -42,9 +46,7 @@ public final class DonutNetworkClient implements ClientModInitializer {
         KeyBinding open = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.donut-network.open", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_N, category));
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
-            while (open.wasPressed()) {
-                openScreen(client);
-            }
+            while (open.wasPressed()) openScreen(client);
         });
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) ->
                 dispatcher.register(literal("dn").executes(context -> {
@@ -54,6 +56,6 @@ public final class DonutNetworkClient implements ClientModInitializer {
     }
 
     private void openScreen(MinecraftClient client) {
-        client.setScreen(new DonutNetworkScreen(client.currentScreen, backend, opportunities));
+        client.setScreen(new DonutScreen(client.currentScreen, feed));
     }
 }

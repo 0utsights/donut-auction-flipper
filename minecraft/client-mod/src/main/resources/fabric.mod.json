@@ -2,10 +2,15 @@
   "schemaVersion": 1,
   "id": "donut-network-client",
   "version": "${version}",
-  "name": "Donut Network Client",
-  "description": "Low-overhead DonutSMP auction observation and local flip evaluation client.",
+  "name": "Donut Auction Flips",
+  "description": "Thin API-only DonutSMP auction flip notifier with manual auction navigation.",
   "authors": ["Donut Network contributors"],
   "environment": "client",
   "entrypoints": { "client": ["net.donutnetwork.client.DonutNetworkClient"] },
-  "depends": { "fabricloader": ">=0.19.2", "minecraft": "1.21.11", "java": ">=21", "fabric-api": "*" }
+  "depends": {
+    "fabricloader": ">=0.19.2",
+    "minecraft": "1.21.11",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
 }

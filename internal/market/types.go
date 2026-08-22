@@ -5,9 +5,7 @@ import "time"
 type Source string
 
 const (
-	SourceDonutAPI  Source = "donut_api"
-	SourceClient    Source = "client"
-	SourceSimulator Source = "simulator"
+	SourceDonutAPI Source = "donut_api"
 )
 
 type Item struct {
@@ -89,23 +87,6 @@ type Valuation struct {
 	GeneratedAt         time.Time `json:"generated_at"`
 }
 
-type CollectorStatus struct {
-	State               string    `json:"state"`
-	CycleStartedAt      time.Time `json:"cycle_started_at,omitempty"`
-	CycleCompletedAt    time.Time `json:"cycle_completed_at,omitempty"`
-	LastSuccessAt       time.Time `json:"last_success_at,omitempty"`
-	NextCollectionAt    time.Time `json:"next_collection_at,omitempty"`
-	ListingsFetched     int       `json:"listings_fetched"`
-	TransactionsFetched int       `json:"transactions_fetched"`
-	APIRequests         uint64    `json:"api_requests"`
-	APIErrors           uint64    `json:"api_errors"`
-	Retries             uint64    `json:"retries"`
-	RateLimitResponses  uint64    `json:"rate_limit_responses"`
-	LastAPILatencyMS    float64   `json:"last_api_latency_ms"`
-	CycleDurationMS     float64   `json:"cycle_duration_ms"`
-	Message             string    `json:"message,omitempty"`
-}
-
 type ValuationDebug struct {
 	Signature      string        `json:"signature"`
 	BaseSignature  string        `json:"base_signature,omitempty"`
@@ -132,4 +113,21 @@ type Opportunity struct {
 	Profit     int64     `json:"profit"`
 	MarginBPS  int       `json:"margin_bps"`
 	DecisionNS int64     `json:"decision_ns"`
+}
+
+type OpportunityReport struct {
+	Listings           int `json:"listings"`
+	InvalidPrice       int `json:"invalid_price"`
+	OverBudget         int `json:"over_budget"`
+	Expired            int `json:"expired"`
+	NoValuation        int `json:"no_valuation"`
+	LowConfidence      int `json:"low_confidence"`
+	LowVolume          int `json:"low_volume"`
+	RiskBlocked        int `json:"risk_blocked"`
+	Overflow           int `json:"overflow"`
+	LowProfit          int `json:"low_profit"`
+	LowMargin          int `json:"low_margin"`
+	DuplicateSignature int `json:"duplicate_signature"`
+	Qualified          int `json:"qualified"`
+	Published          int `json:"published"`
 }
