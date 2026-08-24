@@ -153,8 +153,10 @@ func New(cfg Config, upstream Upstream, history History, logger *slog.Logger) (*
 func (s *Server) Snapshot() Snapshot {
 	current := s.current.Load()
 	copy := *current
-	copy.Flips = append([]Flip(nil), current.Flips...)
-	copy.Valuations = append([]market.Valuation(nil), current.Valuations...)
+	// Keep initialized empty slices non-nil so the HTTP contract consistently
+	// emits JSON arrays ([]) rather than null while the first scan is running.
+	copy.Flips = append(make([]Flip, 0, len(current.Flips)), current.Flips...)
+	copy.Valuations = append(make([]market.Valuation, 0, len(current.Valuations)), current.Valuations...)
 	return copy
 }
 

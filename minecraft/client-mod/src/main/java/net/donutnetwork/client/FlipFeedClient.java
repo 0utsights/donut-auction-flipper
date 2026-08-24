@@ -159,8 +159,12 @@ final class FlipFeedClient implements AutoCloseable {
         if (!List.of("starting", "collecting", "ready", "error").contains(state)) {
             throw new IllegalArgumentException("invalid backend status");
         }
-        JsonArray raw = root.getAsJsonArray("flips");
-        if (raw == null || raw.size() > MAX_FLIPS) {
+        JsonElement flipsElement = root.get("flips");
+        // Treat a legacy/null empty feed as empty. The current backend always
+        // emits [], but this keeps startup resilient during rolling upgrades.
+        JsonArray raw = flipsElement == null || flipsElement.isJsonNull()
+                ? new JsonArray() : flipsElement.getAsJsonArray();
+        if (raw.size() > MAX_FLIPS) {
             throw new IllegalArgumentException("invalid flip count");
         }
         List<Flip> decoded = new ArrayList<>(raw.size());

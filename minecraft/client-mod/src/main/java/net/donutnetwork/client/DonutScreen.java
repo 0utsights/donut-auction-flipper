@@ -58,8 +58,10 @@ final class DonutScreen extends Screen {
         int top = Math.max(28, (height - 230) / 2);
         context.drawCenteredTextWithShadow(textRenderer, title, width / 2, top, 0xFFFFFF);
         FlipFeedClient.Status status = feed.status();
-        context.drawTextWithShadow(textRenderer, Text.literal("Backend: " + status.state()), left, top + 20,
-                "ready".equals(status.state()) ? 0x55FF55 : "error".equals(status.state()) ? 0xFF5555 : 0xFFFF55);
+        boolean usable = status.version() > 0 && !"error".equals(status.state());
+        String stateLabel = usable && "collecting".equals(status.state()) ? "updating (live)" : status.state();
+        context.drawTextWithShadow(textRenderer, Text.literal("Backend: " + stateLabel), left, top + 20,
+                usable || "ready".equals(status.state()) ? 0x55FF55 : "error".equals(status.state()) ? 0xFF5555 : 0xFFFF55);
         context.drawTextWithShadow(textRenderer, Text.literal("Last update: " + age(status.lastSuccess())
                 + " · flips: " + status.flipCount()), left + 110, top + 20, 0xB8B8B8);
         if (feed.flips().isEmpty()) {

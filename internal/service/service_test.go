@@ -42,13 +42,13 @@ func (m *memoryHistory) Save(values []market.Transaction) error {
 }
 
 func TestCollectBuildsAuthenticatedFlipFeed(t *testing.T) {
-	now := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC().Truncate(time.Second)
 	item := market.Item{ID: "minecraft:diamond", Quantity: 1, DisplayName: "Diamond"}
 	transactions := make([]market.Transaction, 0, 12)
 	for index := 0; index < 12; index++ {
 		transactions = append(transactions, market.Transaction{SellerName: "seller", Item: item, TotalPrice: 1_000_000 + int64(index*1_000), SoldAt: now.Add(-time.Duration(index+1) * time.Hour), Source: market.SourceDonutAPI})
 	}
-	listing := market.NormalizeListing(market.Listing{AuthoritativeID: "auction-1", SellerName: "cheap", Item: item, TotalPrice: 500_000, LastSeen: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour), Source: market.SourceDonutAPI})
+	listing := market.NormalizeListing(market.Listing{AuthoritativeID: "auction-1", SellerName: "cheap", Item: item, TotalPrice: 500_000, LastSeen: now, ExpiresAt: now.Add(time.Hour), Source: market.SourceDonutAPI})
 	upstream := &fakeUpstream{transactions: transactions, listings: []market.Listing{listing}}
 	server, err := New(Config{Address: "127.0.0.1:8080", ClientToken: "client-secret", ListingPages: 2, Thresholds: market.Thresholds{MinProfit: 1, MinMarginBPS: 1, MinConfidenceBPS: 1, MinVolume24h: 1}}, upstream, &memoryHistory{}, nil)
 	if err != nil {
@@ -119,6 +119,28 @@ func TestFailurePreservesPreviousFeed(t *testing.T) {
 	}
 	if server.Snapshot().Status.State != "error" {
 		t.Fatalf("status=%+v", server.Snapshot().Status)
+	}
+}
+
+func TestStartupFeedUsesJSONArray(t *testing.T) {
+	server, err := New(Config{Address: "127.0.0.1:8080"}, &fakeUpstream{}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/flips", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("startup feed code=%d", response.Code)
+	}
+	var payload struct {
+		Flips json.RawMessage `json:"flips"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if string(payload.Flips) != "[]" {
+		t.Fatalf("startup flips must be an array, got %s", payload.Flips)
 	}
 }
 

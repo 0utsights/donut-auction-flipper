@@ -11,6 +11,14 @@ There is no screen parser, worker network, sharding, WebSocket, PostgreSQL, Node
 
 Requirements: Go 1.26. The API key stays in the backend process and must never be placed in the mod config.
 
+On Windows, use the local launcher. The first run asks for the API key and stores it using Windows user-scoped encryption; later runs need no setup. Keep its terminal open while playing.
+
+```powershell
+.\scripts\start-local.ps1
+```
+
+Or start the backend directly with an environment variable:
+
 ```powershell
 $env:DONUT_API_KEY='your-key'
 go run ./cmd/server

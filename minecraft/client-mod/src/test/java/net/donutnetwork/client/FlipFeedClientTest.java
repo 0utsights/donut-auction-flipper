@@ -41,4 +41,11 @@ class FlipFeedClientTest {
         assertThrows(IllegalArgumentException.class,
                 () -> FlipFeedClient.decode(json.getBytes(StandardCharsets.UTF_8)));
     }
+
+    @Test void toleratesLegacyNullFeedDuringStartup() {
+        String json = "{\"version\":0,\"status\":\"collecting\",\"flips\":null}";
+        FlipFeedClient.DecodedFeed feed = FlipFeedClient.decode(json.getBytes(StandardCharsets.UTF_8));
+        assertTrue(feed.flips().isEmpty());
+        assertEquals("collecting", feed.state());
+    }
 }

@@ -12,6 +12,8 @@ The normal product is one Go backend plus one thin Fabric client. PostgreSQL, No
 
 `DONUT_API_KEY` exists only in the backend environment. It is excluded from Git, state files, logs, HTTP responses, debug HTML, Fabric resources, and mod configuration. The distributed mod only receives ranked flip records. A separate optional `DN_CLIENT_TOKEN` protects that downstream feed.
 
+For Windows local development, `scripts/start-local.ps1` may cache the key as a user-scoped DPAPI ciphertext under the Git-ignored `data/` directory. This keeps the normal launch one-command without placing the plaintext key in source, mod files, command arguments, or shell history.
+
 ## 2026-08-22 — Bounded file persistence before a database
 
 The only durable state needed now is recent completed-sale history. It is stored as a versioned gzip JSON document with safe rotation, 31-day retention, deduplication, and a 100,000-row cap. Active listings are always recollected. A database should be introduced only when multi-process operation, longer retention, or calibrated analytics actually requires one.
