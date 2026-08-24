@@ -103,6 +103,101 @@ func TestEngineRanksOnlyQualifiedActiveOpportunities(t *testing.T) {
 	}
 }
 
+func TestStackReferenceIsCappedBySingularUnitValue(t *testing.T) {
+	e := NewEngine()
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	e.now = func() time.Time { return now }
+	e.AddTransactions(quantitySales(now, "iron_ingot", 1, 100, 8, "single"))
+	e.AddTransactions(quantitySales(now, "iron_ingot", 64, 10_000, 8, "stack"))
+	e.Observe(Listing{AuthoritativeID: "overpriced-stack", SellerName: "candidate", Item: Item{ID: "iron_ingot", Quantity: 64}, TotalPrice: 9_000})
+
+	opportunities, report := e.AnalyzeOpportunities(Thresholds{MinProfit: 1, MinMarginBPS: 1, MinConfidenceBPS: 1, MinVolume24h: 1}, 10)
+	if len(opportunities) != 0 || report.LowProfit != 1 {
+		t.Fatalf("stack escaped singular-price cap: opportunities=%+v report=%+v", opportunities, report)
+	}
+}
+
+func TestStackReferenceUsesExactQuantityDiscount(t *testing.T) {
+	e := NewEngine()
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	e.now = func() time.Time { return now }
+	e.AddTransactions(quantitySales(now, "iron_ingot", 1, 100, 8, "single"))
+	e.AddTransactions(quantitySales(now, "iron_ingot", 64, 3_200, 8, "stack"))
+	e.Observe(Listing{AuthoritativeID: "not-a-flip", SellerName: "candidate-a", Item: Item{ID: "iron_ingot", Quantity: 64}, TotalPrice: 4_000})
+
+	opportunities, _ := e.AnalyzeOpportunities(Thresholds{MinProfit: 1, MinMarginBPS: 1, MinConfidenceBPS: 1, MinVolume24h: 1}, 10)
+	if len(opportunities) != 0 {
+		t.Fatalf("bulk discount was ignored: %+v", opportunities)
+	}
+
+	e = NewEngine()
+	e.now = func() time.Time { return now }
+	e.AddTransactions(quantitySales(now, "iron_ingot", 1, 100, 8, "single"))
+	e.AddTransactions(quantitySales(now, "iron_ingot", 64, 3_200, 8, "stack"))
+	e.Observe(Listing{AuthoritativeID: "real-stack-flip", SellerName: "candidate-b", Item: Item{ID: "iron_ingot", Quantity: 64}, TotalPrice: 2_000})
+	opportunities, _ = e.AnalyzeOpportunities(Thresholds{MinProfit: 1, MinMarginBPS: 1, MinConfidenceBPS: 1, MinVolume24h: 1}, 10)
+	if len(opportunities) != 1 {
+		t.Fatalf("same-quantity resale profit was not found: %+v", opportunities)
+	}
+	reference := opportunities[0].Listing.TotalPrice + opportunities[0].Profit
+	if reference > 3_200 || reference > 100*64 {
+		t.Fatalf("reference %d exceeds a conservative quantity basis", reference)
+	}
+	valuation := opportunities[0].Valuation
+	if valuation.PricingQuantity != 64 || valuation.QuickSellValue != min64(valuation.SingularQuickSell, valuation.QuantityQuickSell) {
+		t.Fatalf("quantity audit values are inconsistent: %+v", valuation)
+	}
+	if valuation.SingularVolume24h <= 0 || valuation.QuantityVolume24h <= 0 {
+		t.Fatalf("quantity evidence volumes are missing: %+v", valuation)
+	}
+}
+
+func TestStackWithoutBothQuantityCohortsIsRejected(t *testing.T) {
+	e := NewEngine()
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	e.now = func() time.Time { return now }
+	e.AddTransactions(quantitySales(now, "iron_ingot", 1, 100, 8, "single"))
+	e.Observe(Listing{AuthoritativeID: "unsupported-stack", SellerName: "candidate", Item: Item{ID: "iron_ingot", Quantity: 64}, TotalPrice: 1})
+
+	opportunities, report := e.AnalyzeOpportunities(Thresholds{MinProfit: 1, MinMarginBPS: 1, MinConfidenceBPS: 1, MinVolume24h: 1}, 10)
+	if len(opportunities) != 0 || report.NoQuantityEvidence != 1 {
+		t.Fatalf("stack without same-quantity sales was accepted: opportunities=%+v report=%+v", opportunities, report)
+	}
+}
+
+func TestStackReferenceUsesExactQuantityActiveCompetition(t *testing.T) {
+	e := NewEngine()
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	e.now = func() time.Time { return now }
+	e.AddTransactions(quantitySales(now, "iron_ingot", 1, 100, 8, "single"))
+	e.AddTransactions(quantitySales(now, "iron_ingot", 64, 6_400, 8, "stack"))
+	for index := 0; index < 3; index++ {
+		e.Observe(Listing{AuthoritativeID: fmt.Sprintf("competitor-%d", index), SellerName: fmt.Sprintf("competitor-%d", index), Item: Item{ID: "iron_ingot", Quantity: 64}, TotalPrice: 3_200})
+	}
+	e.Observe(Listing{AuthoritativeID: "candidate", SellerName: "candidate", Item: Item{ID: "iron_ingot", Quantity: 64}, TotalPrice: 1_000})
+
+	opportunities := e.Opportunities(Thresholds{MinProfit: 1, MinMarginBPS: 1, MinConfidenceBPS: 1, MinVolume24h: 1}, 10)
+	if len(opportunities) != 1 || opportunities[0].Listing.AuthoritativeID != "candidate" {
+		t.Fatalf("unexpected active-competition opportunities: %+v", opportunities)
+	}
+	reference := opportunities[0].Listing.TotalPrice + opportunities[0].Profit
+	if reference > 3_200 {
+		t.Fatalf("same-quantity active market did not cap reference: %d", reference)
+	}
+}
+
+func quantitySales(now time.Time, itemID string, quantity int, totalPrice int64, count int, sellerPrefix string) []Transaction {
+	transactions := make([]Transaction, 0, count)
+	for index := 0; index < count; index++ {
+		transactions = append(transactions, Transaction{
+			SellerName: fmt.Sprintf("%s-%d", sellerPrefix, index),
+			Item:       Item{ID: itemID, Quantity: quantity}, TotalPrice: totalPrice,
+			SoldAt: now.Add(-time.Duration(index) * time.Minute), Source: SourceDonutAPI,
+		})
+	}
+	return transactions
+}
+
 func BenchmarkObserveExistingMarket(b *testing.B) {
 	e := NewEngine()
 	now := time.Now().UTC()
@@ -116,5 +211,24 @@ func BenchmarkObserveExistingMarket(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		e.Observe(Listing{AuthoritativeID: "benchmark-listing", SellerName: "benchmark-seller",
 			Item: Item{ID: "elytra", Quantity: 1}, TotalPrice: 280_000_000 + int64(i%100)})
+	}
+}
+
+func BenchmarkAnalyzeQuantityAwareOpportunities(b *testing.B) {
+	e := NewEngine()
+	now := time.Now().UTC()
+	e.now = func() time.Time { return now }
+	e.AddTransactions(quantitySales(now, "iron_ingot", 1, 10_000, 24, "single"))
+	e.AddTransactions(quantitySales(now, "iron_ingot", 64, 500_000, 24, "stack"))
+	listings := make([]Listing, 1_000)
+	for index := range listings {
+		listings[index] = Listing{AuthoritativeID: fmt.Sprintf("listing-%d", index), SellerName: fmt.Sprintf("seller-%d", index), Item: Item{ID: "iron_ingot", Quantity: 64}, TotalPrice: 100_000 + int64(index)}
+	}
+	e.ObserveBatch(listings)
+	thresholds := Thresholds{MinProfit: 1, MinMarginBPS: 1, MinConfidenceBPS: 1, MinVolume24h: 1}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for index := 0; index < b.N; index++ {
+		e.AnalyzeOpportunities(thresholds, 100)
 	}
 }

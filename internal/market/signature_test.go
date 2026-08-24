@@ -28,6 +28,19 @@ func TestFingerprintStableAndSensitive(t *testing.T) {
 		t.Fatal("authoritative ID not preferred")
 	}
 }
+
+func TestNormalizeAlwaysConvertsTotalToPerItemPrice(t *testing.T) {
+	listing := NormalizeListing(Listing{Item: Item{ID: "iron_ingot", Quantity: 64}, TotalPrice: 10})
+	transaction := NormalizeTransaction(Transaction{Item: Item{ID: "iron_ingot", Quantity: 64}, TotalPrice: 10})
+	if listing.UnitPrice != 0 || transaction.UnitPrice != 0 {
+		t.Fatalf("fractional per-item values must floor conservatively, listing=%d transaction=%d", listing.UnitPrice, transaction.UnitPrice)
+	}
+	listing = NormalizeListing(Listing{Item: Item{ID: "iron_ingot", Quantity: 64}, TotalPrice: 6_400})
+	if listing.UnitPrice != 100 {
+		t.Fatalf("total was not normalized by quantity: %+v", listing)
+	}
+}
+
 func TestDurabilityBuckets(t *testing.T) {
 	a := CanonicalSignature(Item{ID: "elytra", Durability: 91, MaxDurability: 100})
 	b := CanonicalSignature(Item{ID: "elytra", Durability: 99, MaxDurability: 100})

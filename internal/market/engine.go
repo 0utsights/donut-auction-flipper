@@ -9,6 +9,7 @@ import (
 
 const activeListingFallbackTTL = 2 * time.Minute
 const transactionRetention = 31 * 24 * time.Hour
+const QuantityValuationModelVersion = "robust-v3-quantity"
 
 type Snapshot struct {
 	Version     uint64               `json:"version"`
@@ -36,6 +37,17 @@ type Engine struct {
 type activeStat struct {
 	depth   int
 	bestAsk int64
+}
+
+type quantityValuationKey struct {
+	signature string
+	quantity  int
+	base      bool
+}
+
+type quantityValuationResult struct {
+	valuation Valuation
+	ok        bool
 }
 
 func NewEngine() *Engine {
@@ -413,6 +425,7 @@ func (e *Engine) AnalyzeOpportunities(thresholds Thresholds, limit int) ([]Oppor
 	now := e.now()
 	out := make([]Opportunity, 0)
 	report := OpportunityReport{Listings: len(e.listings)}
+	quantityCache := make(map[quantityValuationKey]quantityValuationResult)
 	for _, listing := range e.listings {
 		if listing.TotalPrice <= 0 {
 			report.InvalidPrice++
@@ -430,12 +443,13 @@ func (e *Engine) AnalyzeOpportunities(thresholds Thresholds, limit int) ([]Oppor
 			report.Expired++
 			continue
 		}
-		valuation, ok := e.valuations[listing.Signature.Exact]
-		if !ok {
-			valuation, ok = e.valuations[listing.Signature.Base]
-		}
+		valuation, ok := e.opportunityValuationLocked(listing, quantityCache)
 		if !ok || valuation.QuickSellValue <= 0 {
-			report.NoValuation++
+			if listing.Item.Quantity > 1 {
+				report.NoQuantityEvidence++
+			} else {
+				report.NoValuation++
+			}
 			continue
 		}
 		if valuation.ConfidenceBPS < thresholds.MinConfidenceBPS {
@@ -497,6 +511,133 @@ func (e *Engine) AnalyzeOpportunities(thresholds Thresholds, limit int) ([]Oppor
 	}
 	report.Published = len(out)
 	return out, report
+}
+
+// opportunityValuationLocked enforces the executable resale quantity. Every
+// listing is anchored to completed quantity=1 sales. Stacks additionally need
+// completed sales at the exact listed quantity, and the lower per-unit value
+// wins. This prevents both accidental total-price multiplication and profits
+// that exist only if the buyer breaks a stack apart before relisting it.
+func (e *Engine) opportunityValuationLocked(listing Listing, cache map[quantityValuationKey]quantityValuationResult) (Valuation, bool) {
+	quantity := max(1, listing.Item.Quantity)
+	if valuation, ok := e.quantityPairValuationLocked(listing.Signature.Exact, listing.Signature.Base, quantity, false, cache); ok {
+		return valuation, true
+	}
+	if listing.Signature.Base != listing.Signature.Exact {
+		return e.quantityPairValuationLocked(listing.Signature.Base, listing.Signature.Base, quantity, true, cache)
+	}
+	return Valuation{}, false
+}
+
+func (e *Engine) quantityPairValuationLocked(signature, base string, quantity int, baseFallback bool, cache map[quantityValuationKey]quantityValuationResult) (Valuation, bool) {
+	singular, ok := e.quantityCohortValuationLocked(signature, base, 1, baseFallback, cache)
+	if !ok {
+		return Valuation{}, false
+	}
+	if quantity == 1 {
+		singular.SingularQuickSell = singular.QuickSellValue
+		singular.QuantityQuickSell = singular.QuickSellValue
+		singular.PricingQuantity = 1
+		singular.SingularVolume24h = singular.Volume24h
+		singular.QuantityVolume24h = singular.Volume24h
+		return singular, true
+	}
+	stacked, ok := e.quantityCohortValuationLocked(signature, base, quantity, baseFallback, cache)
+	if !ok {
+		return Valuation{}, false
+	}
+	return combineQuantityValuations(singular, stacked, quantity), true
+}
+
+func (e *Engine) quantityCohortValuationLocked(signature, base string, quantity int, baseFallback bool, cache map[quantityValuationKey]quantityValuationResult) (Valuation, bool) {
+	key := quantityValuationKey{signature: signature, quantity: quantity, base: baseFallback}
+	if cached, exists := cache[key]; exists {
+		return cached.valuation, cached.ok
+	}
+	transactions := e.transactions[signature]
+	activeListings := listingValues(e.activeBySignature[signature])
+	if baseFallback {
+		transactions = e.baseTransactions[signature]
+		activeListings = e.activeListingsForBaseLocked(signature)
+	}
+	transactions = transactionsAtQuantity(transactions, quantity)
+	activeListings = listingsAtQuantity(activeListings, quantity)
+	valuation, ok := CalculateValuation(ValuationInput{
+		Signature: signature, BaseSignature: base, Transactions: transactions,
+		ActiveListings: activeListings, Now: e.now(),
+	})
+	if ok {
+		valuation.ModelVersion = QuantityValuationModelVersion
+		if baseFallback {
+			valuation.FallbackLevel = "base-quantity"
+			valuation.ConfidenceBPS = valuation.ConfidenceBPS * 8 / 10
+		} else {
+			valuation.FallbackLevel = "exact-quantity"
+		}
+	}
+	cache[key] = quantityValuationResult{valuation: valuation, ok: ok}
+	return valuation, ok
+}
+
+func transactionsAtQuantity(values []Transaction, quantity int) []Transaction {
+	out := make([]Transaction, 0, len(values))
+	for _, value := range values {
+		if max(1, value.Item.Quantity) == quantity {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func listingsAtQuantity(values []Listing, quantity int) []Listing {
+	out := make([]Listing, 0, len(values))
+	for _, value := range values {
+		if max(1, value.Item.Quantity) == quantity {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func combineQuantityValuations(singular, stacked Valuation, quantity int) Valuation {
+	combined := stacked
+	combined.FairValue = min64(singular.FairValue, stacked.FairValue)
+	combined.QuickSellValue = min64(singular.QuickSellValue, stacked.QuickSellValue)
+	combined.ShortTermValue = min64(singular.ShortTermValue, stacked.ShortTermValue)
+	combined.LongTermValue = min64(singular.LongTermValue, stacked.LongTermValue)
+	combined.ConfidenceBPS = min(singular.ConfidenceBPS, stacked.ConfidenceBPS)
+	combined.Volume24h = min(singular.Volume24h, stacked.Volume24h)
+	combined.SampleCount = min(singular.SampleCount, stacked.SampleCount)
+	combined.RawSampleCount = min(singular.RawSampleCount, stacked.RawSampleCount)
+	combined.SellerCount = min(singular.SellerCount, stacked.SellerCount)
+	combined.FreshSampleCount = min(singular.FreshSampleCount, stacked.FreshSampleCount)
+	combined.VolatilityBPS = max(singular.VolatilityBPS, stacked.VolatilityBPS)
+	combined.ExpectedSellMinutes = max(singular.ExpectedSellMinutes, stacked.ExpectedSellMinutes)
+	combined.ReferenceAgeSeconds = max64(singular.ReferenceAgeSeconds, stacked.ReferenceAgeSeconds)
+	combined.RiskFlags = mergeRiskFlags(singular.RiskFlags, stacked.RiskFlags)
+	combined.ModelVersion = QuantityValuationModelVersion
+	combined.SingularQuickSell = singular.QuickSellValue
+	combined.QuantityQuickSell = stacked.QuickSellValue
+	combined.PricingQuantity = quantity
+	combined.SingularVolume24h = singular.Volume24h
+	combined.QuantityVolume24h = stacked.Volume24h
+	return combined
+}
+
+func mergeRiskFlags(groups ...[]string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0)
+	for _, group := range groups {
+		for _, flag := range group {
+			if _, exists := seen[flag]; exists {
+				continue
+			}
+			seen[flag] = struct{}{}
+			out = append(out, flag)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func opportunityRiskBlocked(flags []string) bool {

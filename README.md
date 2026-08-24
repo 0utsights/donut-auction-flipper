@@ -28,6 +28,8 @@ Open [http://127.0.0.1:8080](http://127.0.0.1:8080) for the live debug page. It 
 
 The default recent-listing window takes roughly a minute to scan because the client stays below Donut's published request limit. It covers the newest 9,680 rows (220 × 44), not the entire deep auction book. Completed-sale history is the broad-market authority and is retained in `data/history.json.gz`, capped at 100,000 rows and 31 days.
 
+Stacked listings are quantity-safe: the backend requires both quantity-one sales and completed sales at the exact listed quantity, uses the lower per-item quick-sell estimate, then multiplies by the unchanged resale quantity. It will not recommend a stack based on profit that only exists after splitting it.
+
 ## Install the mod
 
 Use Minecraft 1.21.11, Fabric Loader 0.19.2 or newer, Fabric API, and Java 21. Copy `outputs/donut-auction-flips-1.0.0-loader-0.19.2.jar` into the Prism instance's `mods` directory.

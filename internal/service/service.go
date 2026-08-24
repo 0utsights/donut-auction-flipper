@@ -53,13 +53,19 @@ type Flip struct {
 	Seller          string    `json:"seller"`
 	Price           int64     `json:"price"`
 	ReferenceValue  int64     `json:"reference_value"`
+	UnitReference   int64     `json:"unit_reference_value"`
+	SingularUnitRef int64     `json:"singular_unit_reference"`
+	QuantityUnitRef int64     `json:"quantity_unit_reference"`
 	Profit          int64     `json:"profit"`
 	MarginBPS       int       `json:"margin_bps"`
 	ConfidenceBPS   int       `json:"confidence_bps"`
 	Volume24h       int       `json:"volume_24h"`
+	SingularVolume  int       `json:"singular_volume_24h"`
+	QuantityVolume  int       `json:"quantity_volume_24h"`
 	ExpiresAt       time.Time `json:"expires_at,omitempty"`
 	SearchCommand   string    `json:"search_command"`
 	ModelVersion    string    `json:"model_version"`
+	PricingBasis    string    `json:"pricing_basis"`
 	ExpectedSellMin int       `json:"expected_sell_minutes"`
 	RiskFlags       []string  `json:"risk_flags,omitempty"`
 }
@@ -374,9 +380,13 @@ func mapFlip(opportunity market.Opportunity) Flip {
 	return Flip{
 		Key: key, AuctionID: listing.AuthoritativeID, ItemID: listing.Item.ID, ItemName: name,
 		Quantity: max(1, listing.Item.Quantity), Seller: listing.SellerName, Price: listing.TotalPrice,
-		ReferenceValue: listing.TotalPrice + opportunity.Profit, Profit: opportunity.Profit, MarginBPS: opportunity.MarginBPS,
+		ReferenceValue: listing.TotalPrice + opportunity.Profit, UnitReference: opportunity.Valuation.QuickSellValue,
+		SingularUnitRef: opportunity.Valuation.SingularQuickSell, QuantityUnitRef: opportunity.Valuation.QuantityQuickSell,
+		Profit: opportunity.Profit, MarginBPS: opportunity.MarginBPS,
 		ConfidenceBPS: opportunity.Valuation.ConfidenceBPS, Volume24h: opportunity.Valuation.Volume24h,
+		SingularVolume: opportunity.Valuation.SingularVolume24h, QuantityVolume: opportunity.Valuation.QuantityVolume24h,
 		ExpiresAt: listing.ExpiresAt, SearchCommand: "/ah " + safeSearch(name), ModelVersion: opportunity.Valuation.ModelVersion,
+		PricingBasis:    opportunity.Valuation.FallbackLevel,
 		ExpectedSellMin: opportunity.Valuation.ExpectedSellMinutes, RiskFlags: append([]string(nil), opportunity.Valuation.RiskFlags...),
 	}
 }
@@ -458,9 +468,9 @@ const debugHTML = `<!doctype html>
 <p>API requests {{.Status.API.Requests}} · errors {{.Status.API.Errors}} · retries {{.Status.API.Retries}} · last latency {{printf "%.0f" .Status.API.LastLatencyMS}}ms</p>
 <p>Thresholds: profit ≥ {{money .Thresholds.MinProfit}} · margin ≥ {{pct .Thresholds.MinMarginBPS}} · confidence ≥ {{pct .Thresholds.MinConfidenceBPS}} · 24h sales ≥ {{.Thresholds.MinVolume24h}}</p>
 <p class="muted">Refreshes every five seconds. The API key is backend-only and is never rendered.</p>
-<h2>Decision funnel</h2><p class="funnel">{{.Analysis.Listings}} listings → no valuation {{.Analysis.NoValuation}} · low confidence {{.Analysis.LowConfidence}} · low volume {{.Analysis.LowVolume}} · risk blocked {{.Analysis.RiskBlocked}} · low profit {{.Analysis.LowProfit}} · low margin {{.Analysis.LowMargin}} · over budget {{.Analysis.OverBudget}} · expired {{.Analysis.Expired}} · duplicate signature {{.Analysis.DuplicateSignature}} → <strong>{{.Analysis.Published}} published</strong></p>
-<h2>Current opportunities</h2><table><thead><tr><th>Item</th><th>Price</th><th>Reference</th><th>Profit</th><th>Margin</th><th>Confidence</th><th>24h sales</th><th>Command</th></tr></thead><tbody>
-{{range .Flips}}<tr><td>{{.Quantity}}× {{.ItemName}}</td><td>{{money .Price}}</td><td>{{money .ReferenceValue}}</td><td>{{money .Profit}}</td><td>{{pct .MarginBPS}}</td><td>{{pct .ConfidenceBPS}}</td><td>{{.Volume24h}}</td><td><code>{{.SearchCommand}}</code></td></tr>{{else}}<tr><td colspan="8">No flips currently pass the configured safety thresholds.</td></tr>{{end}}</tbody></table>
+<h2>Decision funnel</h2><p class="funnel">{{.Analysis.Listings}} listings → no valuation {{.Analysis.NoValuation}} · no singular/exact-quantity evidence {{.Analysis.NoQuantityEvidence}} · low confidence {{.Analysis.LowConfidence}} · low volume {{.Analysis.LowVolume}} · risk blocked {{.Analysis.RiskBlocked}} · low profit {{.Analysis.LowProfit}} · low margin {{.Analysis.LowMargin}} · over budget {{.Analysis.OverBudget}} · expired {{.Analysis.Expired}} · duplicate signature {{.Analysis.DuplicateSignature}} → <strong>{{.Analysis.Published}} published</strong></p>
+<h2>Current opportunities</h2><table><thead><tr><th>Item</th><th>Price</th><th>Unit refs (1 / exact / used)</th><th>Total ref</th><th>Profit</th><th>Margin</th><th>Confidence</th><th>24h sales (1 / exact)</th><th>Basis</th><th>Command</th></tr></thead><tbody>
+{{range .Flips}}<tr><td>{{.Quantity}}× {{.ItemName}}</td><td>{{money .Price}}</td><td>{{money .SingularUnitRef}} / {{money .QuantityUnitRef}} / <strong>{{money .UnitReference}}</strong></td><td>{{money .ReferenceValue}}</td><td>{{money .Profit}}</td><td>{{pct .MarginBPS}}</td><td>{{pct .ConfidenceBPS}}</td><td>{{.SingularVolume}} / {{.QuantityVolume}}</td><td>{{.PricingBasis}}</td><td><code>{{.SearchCommand}}</code></td></tr>{{else}}<tr><td colspan="10">No flips currently pass the configured safety thresholds.</td></tr>{{end}}</tbody></table>
 <h2>Highest-volume valuations</h2><table><thead><tr><th>Signature</th><th>Quick sell</th><th>Fair</th><th>Confidence</th><th>24h sales</th><th>Samples</th><th>Sell time</th><th>Risk flags</th></tr></thead><tbody>
 {{range .Valuations}}<tr><td><a href="/api/v1/debug/valuation?signature={{urlquery .Signature}}">{{.Signature}}</a></td><td>{{money .QuickSellValue}}</td><td>{{money .FairValue}}</td><td>{{pct .ConfidenceBPS}}</td><td>{{.Volume24h}}</td><td>{{.SampleCount}}</td><td>{{.ExpectedSellMinutes}}m</td><td>{{range .RiskFlags}}{{.}} {{end}}</td></tr>{{else}}<tr><td colspan="8">No completed-sale model is ready yet.</td></tr>{{end}}</tbody></table>
 </body></html>`

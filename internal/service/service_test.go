@@ -91,6 +91,9 @@ func TestCollectBuildsAuthenticatedFlipFeed(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil || len(payload.Flips) != 1 {
 		t.Fatalf("bad payload: %s error=%v", response.Body.String(), err)
 	}
+	if payload.Flips[0].UnitReference <= 0 || payload.Flips[0].SingularUnitRef != payload.Flips[0].UnitReference || payload.Flips[0].QuantityUnitRef != payload.Flips[0].UnitReference || payload.Flips[0].PricingBasis != "exact-quantity" || payload.Flips[0].ModelVersion != market.QuantityValuationModelVersion {
+		t.Fatalf("quantity pricing audit fields missing: %+v", payload.Flips[0])
+	}
 	request = httptest.NewRequest(http.MethodGet, "/api/v1/flips", nil)
 	request.Header.Set("Authorization", "Bearer client-secret")
 	request.Header.Set("If-None-Match", "\"1-ready\"")

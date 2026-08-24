@@ -63,6 +63,11 @@ type Valuation struct {
 	BaseSignature       string    `json:"base_signature"`
 	FairValue           int64     `json:"fair_value"`
 	QuickSellValue      int64     `json:"quick_sell_value"`
+	SingularQuickSell   int64     `json:"singular_quick_sell,omitempty"`
+	QuantityQuickSell   int64     `json:"quantity_quick_sell,omitempty"`
+	PricingQuantity     int       `json:"pricing_quantity,omitempty"`
+	SingularVolume24h   int       `json:"singular_volume_24h,omitempty"`
+	QuantityVolume24h   int       `json:"quantity_volume_24h,omitempty"`
 	ShortTermValue      int64     `json:"short_term_value"`
 	LongTermValue       int64     `json:"long_term_value"`
 	ActiveBestAsk       int64     `json:"active_best_ask"`
@@ -121,6 +126,7 @@ type OpportunityReport struct {
 	OverBudget         int `json:"over_budget"`
 	Expired            int `json:"expired"`
 	NoValuation        int `json:"no_valuation"`
+	NoQuantityEvidence int `json:"no_quantity_evidence"`
 	LowConfidence      int `json:"low_confidence"`
 	LowVolume          int `json:"low_volume"`
 	RiskBlocked        int `json:"risk_blocked"`

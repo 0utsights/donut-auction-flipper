@@ -39,6 +39,8 @@ An error changes the visible status and preserves the previous feed for inspecti
 
 The model uses completed sales as the authority. It canonicalizes item modifiers, deduplicates seller/day influence, filters outliers with median absolute deviation, compares short and long windows, caps per-seller volume, estimates liquidity and sale time, and uses distinct active sellers only as a conservative market cap. A recommendation is blocked when evidence is stale or the official API cannot represent economically sensitive modifiers reliably.
 
+Opportunity pricing uses `robust-v3-quantity`. Quantity-one completed sales establish the mandatory per-item ceiling. A stack also requires completed sales at its exact quantity, capturing real bulk discounts. The lower per-unit quick-sell value is multiplied by the unchanged resale quantity. The engine never assumes a stack will be split for resale and rejects stacks lacking either cohort.
+
 ## Why polling
 
 The full upstream book has thousands of pages and cannot be exhaustively rescanned quickly under the published rate limit. The backend instead scans the newest 220 pages in about a minute; completed sales provide broad-market valuation. Two-second conditional polling gives the mod prompt delivery after publication with ordinary HTTP semantics, tiny unchanged responses (`304 Not Modified`), simple reconnection, and no WebSocket lifecycle or fanout machinery.

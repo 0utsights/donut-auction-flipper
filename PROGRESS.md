@@ -1,11 +1,11 @@
 # Progress
 
-Last updated: 2026-08-22
+Last updated: 2026-08-23
 
 ## Current system
 
 - One rate-limited/retrying official API client reads up to ten transaction pages and the newest 220 44-row active-auction pages per cycle.
-- `robust-v2` calculates manipulation-resistant exact/base valuations and ranks opportunities behind profit, margin, confidence, liquidity, expiry, and risk gates.
+- `robust-v3-quantity` ranks opportunities using the lower of quantity-one and exact-resale-quantity per-item valuations, behind profit, margin, confidence, liquidity, expiry, and risk gates.
 - Recent transactions persist in a deduplicated, versioned, compressed, safely rotated, 31-day/100,000-row local archive.
 - One HTTP process exposes health, an ETag-enabled compact flip feed, JSON debug state, and a zero-dependency live debug page.
 - Fabric 1.0.0 polls only that feed, caps/deduplicates chat alerts, validates commands, opens manual auction searches, and provides a plain `N`/`/dn` screen without blur.
@@ -30,6 +30,8 @@ Last updated: 2026-08-22
 2. Fixed stale conditional-client state by including collection/error state in ETags, added corrupt-primary history recovery from backup, protected debug routes with downstream auth when configured, made command truncation Unicode-safe, and added regression tests.
 3. Added the missing decision/rejection funnel and per-signature evidence endpoint, removed unused simulator/client snapshot types, validated and bounded downstream tokens, returned real 404s for unknown paths, and re-ran tests/benchmarks.
 4. Live evidence disproved the assumed 220-page full-book boundary: valid rows exist past page 2,000. The system now truthfully defines 220 pages as a recent-listing latency window and uses accumulating completed sales for broad-market value.
+5. Rejected stack false positives by making quantity-one evidence mandatory, requiring an exact-quantity completed-sale cohort, conservatively combining both models, and exposing unit/total references in debug output.
+6. The follow-up quantity review added invariant tests for total-to-unit normalization, exact-quantity active competition, missing-cohort rejection, dual-reference audit fields, and a dedicated ranking benchmark. No further quantity-path issue in the current scope justified additional complexity.
 
 ## Intentional omissions
 
