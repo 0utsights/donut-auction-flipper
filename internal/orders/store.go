@@ -1,0 +1,709 @@
+package orders
+
+import (
+	"context"
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	_ "modernc.org/sqlite"
+)
+
+var memorySequence atomic.Uint64
+var ErrDiagnosticRateLimit = errors.New("diagnostic rate limit exceeded")
+
+type Store struct {
+	db   *sql.DB
+	now  func() time.Time
+	path string
+}
+
+func OpenStore(path string) (*Store, error) {
+	dsn := path
+	if strings.TrimSpace(path) == "" {
+		dsn = fmt.Sprintf("file:orders-memory-%d?mode=memory&cache=shared", memorySequence.Add(1))
+	} else {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return nil, fmt.Errorf("create order database directory: %w", err)
+		}
+	}
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open order database: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	store := &Store{db: db, now: func() time.Time { return time.Now().UTC() }, path: strings.TrimSpace(path)}
+	if err := store.migrate(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+func (s *Store) migrate() error {
+	statements := []string{
+		`PRAGMA journal_mode=WAL`,
+		`PRAGMA synchronous=NORMAL`,
+		`PRAGMA foreign_keys=ON`,
+		`PRAGMA busy_timeout=5000`,
+		`CREATE TABLE IF NOT EXISTS observers (
+			observer_id TEXT PRIMARY KEY, parser_version TEXT NOT NULL, proxy_label TEXT NOT NULL,
+			state TEXT NOT NULL, current_task_id TEXT NOT NULL DEFAULT '', current_page INTEGER NOT NULL DEFAULT 0,
+			latency_ms REAL NOT NULL DEFAULT 0, reconnect_count INTEGER NOT NULL DEFAULT 0,
+			last_seen_ms INTEGER NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS tasks (
+			id TEXT PRIMARY KEY, kind TEXT NOT NULL, signature TEXT NOT NULL DEFAULT '', priority INTEGER NOT NULL,
+			desired_freshness_ms INTEGER NOT NULL, parser_schema TEXT NOT NULL, state TEXT NOT NULL,
+			assigned_observer TEXT NOT NULL DEFAULT '', lease_expires_ms INTEGER NOT NULL DEFAULT 0,
+			lease_token TEXT NOT NULL DEFAULT '',
+			created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS tasks_ready ON tasks(state, priority DESC, created_ms)`,
+		`CREATE TABLE IF NOT EXISTS scans (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, observer_id TEXT NOT NULL, task_id TEXT NOT NULL DEFAULT '',
+			session_id TEXT NOT NULL, content_hash TEXT NOT NULL, screen_title TEXT NOT NULL,
+			page INTEGER NOT NULL, complete INTEGER NOT NULL, unknown_schema INTEGER NOT NULL DEFAULT 0,
+			schema_reason TEXT NOT NULL DEFAULT '', observed_ms INTEGER NOT NULL, received_ms INTEGER NOT NULL,
+			UNIQUE(observer_id, session_id, content_hash))`,
+		`CREATE INDEX IF NOT EXISTS scans_observed ON scans(observed_ms DESC)`,
+		`CREATE TABLE IF NOT EXISTS order_rows (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, scan_id INTEGER NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+			observer_id TEXT NOT NULL, order_key TEXT NOT NULL, item_id TEXT NOT NULL, signature TEXT NOT NULL,
+			display_name TEXT NOT NULL DEFAULT '', quantity INTEGER NOT NULL, max_stack_size INTEGER NOT NULL,
+			unit_reward INTEGER NOT NULL, requested_quantity INTEGER NOT NULL, remaining_quantity INTEGER NOT NULL,
+			owner TEXT NOT NULL DEFAULT '', expires_ms INTEGER NOT NULL DEFAULT 0, price_position INTEGER NOT NULL DEFAULT 0,
+			slot INTEGER NOT NULL, raw_field_hash TEXT NOT NULL, signature_complete INTEGER NOT NULL DEFAULT 0, observed_ms INTEGER NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS order_rows_signature_time ON order_rows(signature, observed_ms DESC)`,
+		`CREATE INDEX IF NOT EXISTS order_rows_order_time ON order_rows(observer_id, order_key, observed_ms DESC)`,
+		`CREATE TABLE IF NOT EXISTS fill_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, signature TEXT NOT NULL, order_key TEXT NOT NULL,
+			observer_id TEXT NOT NULL, units INTEGER NOT NULL, unit_reward INTEGER NOT NULL, observed_ms INTEGER NOT NULL,
+			UNIQUE(observer_id, order_key, observed_ms))`,
+		`CREATE INDEX IF NOT EXISTS fill_signature_time ON fill_events(signature, observed_ms DESC)`,
+		`CREATE TABLE IF NOT EXISTS watches (
+			id TEXT PRIMARY KEY, signature TEXT NOT NULL, created_ms INTEGER NOT NULL, expires_ms INTEGER NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS watches_expiry ON watches(expires_ms)`,
+		`CREATE TABLE IF NOT EXISTS diagnostics (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, install_id TEXT NOT NULL, version TEXT NOT NULL,
+			event TEXT NOT NULL, code TEXT NOT NULL DEFAULT '', duration_ms INTEGER NOT NULL DEFAULT 0,
+			fields_json TEXT NOT NULL DEFAULT '{}', created_ms INTEGER NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS diagnostics_created ON diagnostics(created_ms DESC)`,
+	}
+	for _, statement := range statements {
+		if _, err := s.db.Exec(statement); err != nil {
+			return fmt.Errorf("migrate order database: %w", err)
+		}
+	}
+	// Existing development databases predate authenticated leases.
+	if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN lease_token TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return fmt.Errorf("migrate task lease token: %w", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE order_rows ADD COLUMN signature_complete INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return fmt.Errorf("migrate signature completeness: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) Close() error { return s.db.Close() }
+
+func (s *Store) Register(ctx context.Context, registration ObserverRegistration) (Observer, error) {
+	now := s.now()
+	_, err := s.db.ExecContext(ctx, `INSERT INTO observers(observer_id,parser_version,proxy_label,state,last_seen_ms)
+		VALUES(?,?,?,'registered',?) ON CONFLICT(observer_id) DO UPDATE SET
+		parser_version=excluded.parser_version,proxy_label=excluded.proxy_label,state='registered',last_seen_ms=excluded.last_seen_ms`,
+		registration.ObserverID, registration.ParserVersion, registration.ProxyLabel, now.UnixMilli())
+	if err != nil {
+		return Observer{}, err
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE kind='discovery' AND assigned_observer=? AND state IN ('ready','leased')`, registration.ObserverID).Scan(&count); err != nil {
+		return Observer{}, err
+	}
+	if count == 0 {
+		id := newID("task")
+		_, err = s.db.ExecContext(ctx, `INSERT INTO tasks(id,kind,priority,desired_freshness_ms,parser_schema,state,assigned_observer,created_ms,updated_ms)
+			VALUES(?,'discovery',10,5000,?,'ready',?,?,?)`, id, SchemaVersion, registration.ObserverID, now.UnixMilli(), now.UnixMilli())
+		if err != nil {
+			return Observer{}, err
+		}
+	}
+	return s.observer(ctx, registration.ObserverID)
+}
+
+func (s *Store) Heartbeat(ctx context.Context, heartbeat Heartbeat) error {
+	now := s.now()
+	result, err := s.db.ExecContext(ctx, `UPDATE observers SET state=?,current_task_id=?,current_page=?,latency_ms=?,reconnect_count=?,last_seen_ms=? WHERE observer_id=?`,
+		heartbeat.State, heartbeat.TaskID, heartbeat.Page, heartbeat.LatencyMS, heartbeat.ReconnectCount, now.UnixMilli(), heartbeat.ObserverID)
+	if err != nil {
+		return err
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return errors.New("observer is not registered")
+	}
+	if heartbeat.TaskID != "" {
+		result, err := s.db.ExecContext(ctx, `UPDATE tasks SET lease_expires_ms=?,updated_ms=? WHERE id=? AND state='leased' AND assigned_observer=? AND lease_token=? AND lease_expires_ms>?`,
+			now.Add(30*time.Second).UnixMilli(), now.UnixMilli(), heartbeat.TaskID, heartbeat.ObserverID, heartbeat.LeaseToken, now.UnixMilli())
+		if err != nil {
+			return err
+		}
+		updated, _ := result.RowsAffected()
+		if updated != 1 {
+			return errors.New("task lease is invalid or expired")
+		}
+	}
+	return nil
+}
+
+func (s *Store) LeaseTask(ctx context.Context, observerID string, lease time.Duration) (*Task, error) {
+	now := s.now()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `UPDATE tasks SET state='ready',assigned_observer=CASE WHEN kind='discovery' THEN assigned_observer ELSE '' END,lease_expires_ms=0,lease_token='',updated_ms=? WHERE state='leased' AND lease_expires_ms<?`, now.UnixMilli(), now.UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	row := tx.QueryRowContext(ctx, `SELECT id,kind,signature,priority,desired_freshness_ms,parser_schema,lease_expires_ms,lease_token FROM tasks
+		WHERE state='leased' AND assigned_observer=? AND lease_expires_ms>? ORDER BY priority DESC LIMIT 1`, observerID, now.UnixMilli())
+	task, scanErr := scanTask(row)
+	if scanErr != nil && !errors.Is(scanErr, sql.ErrNoRows) {
+		return nil, scanErr
+	}
+	if task == nil {
+		row = tx.QueryRowContext(ctx, `SELECT id,kind,signature,priority,desired_freshness_ms,parser_schema,lease_expires_ms,lease_token FROM tasks
+			WHERE state='ready' AND (assigned_observer='' OR assigned_observer=?) ORDER BY priority DESC,created_ms LIMIT 1`, observerID)
+		task, scanErr = scanTask(row)
+		if errors.Is(scanErr, sql.ErrNoRows) {
+			if err := tx.Commit(); err != nil {
+				return nil, err
+			}
+			return nil, nil
+		}
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		task.LeaseExpiresAt = now.Add(lease)
+		task.LeaseToken = newID("lease")
+		result, updateErr := tx.ExecContext(ctx, `UPDATE tasks SET state='leased',assigned_observer=?,lease_expires_ms=?,lease_token=?,updated_ms=? WHERE id=? AND state='ready'`, observerID, task.LeaseExpiresAt.UnixMilli(), task.LeaseToken, now.UnixMilli(), task.ID)
+		if updateErr != nil {
+			return nil, updateErr
+		}
+		rows, _ := result.RowsAffected()
+		if rows != 1 {
+			return nil, errors.New("task lease raced")
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return task, nil
+}
+
+type rowScanner interface{ Scan(...any) error }
+
+func scanTask(row rowScanner) (*Task, error) {
+	var task Task
+	var expires int64
+	if err := row.Scan(&task.ID, &task.Kind, &task.Signature, &task.Priority, &task.DesiredFreshness, &task.ParserSchema, &expires, &task.LeaseToken); err != nil {
+		return nil, err
+	}
+	task.LeaseExpiresAt = time.UnixMilli(expires).UTC()
+	return &task, nil
+}
+
+func (s *Store) SaveScan(ctx context.Context, batch ScanBatch) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var registered int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM observers WHERE observer_id=?`, batch.ObserverID).Scan(&registered); err != nil {
+		return false, err
+	}
+	if registered != 1 {
+		return false, errors.New("observer is not registered")
+	}
+	if batch.TaskID != "" {
+		var leased int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE id=? AND state='leased' AND assigned_observer=? AND lease_token=? AND lease_expires_ms>?`,
+			batch.TaskID, batch.ObserverID, batch.LeaseToken, s.now().UnixMilli()).Scan(&leased); err != nil {
+			return false, err
+		}
+		if leased != 1 {
+			return false, errors.New("task lease is invalid or expired")
+		}
+	}
+	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO scans(observer_id,task_id,session_id,content_hash,screen_title,page,complete,unknown_schema,schema_reason,observed_ms,received_ms)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?)`, batch.ObserverID, batch.TaskID, batch.SessionID, batch.ContentHash, batch.ScreenTitle,
+		batch.Page, boolInt(batch.Complete), boolInt(batch.UnknownSchema), batch.SchemaReason, batch.ObservedAt.UnixMilli(), s.now().UnixMilli())
+	if err != nil {
+		return false, err
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return false, tx.Commit()
+	}
+	scanID, err := result.LastInsertId()
+	if err != nil {
+		return false, err
+	}
+	// Capture-only, partial, and unknown layouts are retained as scan diagnostics,
+	// but never enter economic evidence or fill inference.
+	if batch.Complete && !batch.UnknownSchema {
+		for _, order := range batch.Orders {
+			var previous int64
+			previousErr := tx.QueryRowContext(ctx, `SELECT remaining_quantity FROM order_rows WHERE observer_id=? AND order_key=? AND observed_ms<? ORDER BY observed_ms DESC LIMIT 1`,
+				batch.ObserverID, order.OrderKey, batch.ObservedAt.UnixMilli()).Scan(&previous)
+			_, err = tx.ExecContext(ctx, `INSERT INTO order_rows(scan_id,observer_id,order_key,item_id,signature,display_name,quantity,max_stack_size,unit_reward,requested_quantity,remaining_quantity,owner,expires_ms,price_position,slot,raw_field_hash,signature_complete,observed_ms)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, scanID, batch.ObserverID, order.OrderKey, order.ItemID, order.Signature,
+				order.DisplayName, order.Quantity, order.MaxStackSize, order.UnitReward, order.RequestedQuantity, order.RemainingQuantity,
+				order.Owner, timeMillis(order.ExpiresAt), order.PricePosition, order.Slot, order.RawFieldHash, boolInt(order.SignatureComplete), batch.ObservedAt.UnixMilli())
+			if err != nil {
+				return false, err
+			}
+			if previousErr == nil && previous > order.RemainingQuantity && batch.Complete {
+				_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO fill_events(signature,order_key,observer_id,units,unit_reward,observed_ms) VALUES(?,?,?,?,?,?)`,
+					order.Signature, order.OrderKey, batch.ObserverID, previous-order.RemainingQuantity, order.UnitReward, batch.ObservedAt.UnixMilli())
+				if err != nil {
+					return false, err
+				}
+			} else if previousErr != nil && !errors.Is(previousErr, sql.ErrNoRows) {
+				return false, previousErr
+			}
+		}
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE observers SET state=?,current_page=?,current_task_id=?,last_seen_ms=? WHERE observer_id=?`,
+		map[bool]string{true: "schema_hold", false: "scanning"}[batch.UnknownSchema], batch.Page, batch.TaskID, s.now().UnixMilli(), batch.ObserverID)
+	if err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
+func (s *Store) CompleteTask(ctx context.Context, result TaskResult) error {
+	now := s.now()
+	var kind, signature string
+	if err := s.db.QueryRowContext(ctx, `SELECT kind,signature FROM tasks WHERE id=? AND state='leased' AND assigned_observer=? AND lease_token=? AND lease_expires_ms>?`, result.TaskID, result.ObserverID, result.LeaseToken, now.UnixMilli()).Scan(&kind, &signature); err != nil {
+		return err
+	}
+	state := "completed"
+	assigned := result.ObserverID
+	if result.Status == "retry" || kind == "discovery" {
+		state = "ready"
+	}
+	if kind == "focused_watch" {
+		var active int
+		_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM watches WHERE signature=? AND expires_ms>?`, signature, now.UnixMilli()).Scan(&active)
+		if active > 0 {
+			state = "ready"
+			assigned = ""
+		}
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET state=?,assigned_observer=?,lease_expires_ms=0,lease_token='',updated_ms=? WHERE id=?`, state, assigned, now.UnixMilli(), result.TaskID)
+	return err
+}
+
+func (s *Store) AddWatch(ctx context.Context, signature string, lifetime time.Duration) (Watch, error) {
+	now := s.now()
+	watch := Watch{ID: newID("watch"), Signature: signature, CreatedAt: now, ExpiresAt: now.Add(lifetime)}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Watch{}, err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `INSERT INTO watches(id,signature,created_ms,expires_ms) VALUES(?,?,?,?)`, watch.ID, watch.Signature, watch.CreatedAt.UnixMilli(), watch.ExpiresAt.UnixMilli()); err != nil {
+		return Watch{}, err
+	}
+	var activeTask int
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE kind='focused_watch' AND signature=? AND state IN ('ready','leased')`, signature).Scan(&activeTask); err != nil {
+		return Watch{}, err
+	}
+	if activeTask == 0 {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO tasks(id,kind,signature,priority,desired_freshness_ms,parser_schema,state,created_ms,updated_ms)
+			VALUES(?,'focused_watch',?,100,1000,?,'ready',?,?)`, newID("task"), signature, SchemaVersion, now.UnixMilli(), now.UnixMilli()); err != nil {
+			return Watch{}, err
+		}
+	}
+	return watch, tx.Commit()
+}
+
+func (s *Store) DeleteWatch(ctx context.Context, id string) error {
+	var signature string
+	if err := s.db.QueryRowContext(ctx, `SELECT signature FROM watches WHERE id=?`, id).Scan(&signature); err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `DELETE FROM watches WHERE id=?`, id); err != nil {
+		return err
+	}
+	var remaining int
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM watches WHERE signature=? AND expires_ms>?`, signature, s.now().UnixMilli()).Scan(&remaining); err != nil {
+		return err
+	}
+	if remaining == 0 {
+		if _, err = tx.ExecContext(ctx, `UPDATE tasks SET state='completed',lease_expires_ms=0,lease_token='' WHERE kind='focused_watch' AND signature=?`, signature); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) SaveDiagnostic(ctx context.Context, diagnostic Diagnostic) error {
+	encoded, err := json.Marshal(diagnostic.Fields)
+	if err != nil {
+		return err
+	}
+	created := diagnostic.CreatedAt
+	if created.IsZero() {
+		created = s.now()
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var recent int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM diagnostics WHERE install_id=? AND created_ms>=?`, diagnostic.InstallID, s.now().Add(-time.Hour).UnixMilli()).Scan(&recent); err != nil {
+		return err
+	}
+	if recent >= 500 {
+		return ErrDiagnosticRateLimit
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO diagnostics(install_id,version,event,code,duration_ms,fields_json,created_ms) VALUES(?,?,?,?,?,?,?)`,
+		diagnostic.InstallID, diagnostic.Version, diagnostic.Event, diagnostic.Code, diagnostic.Duration, string(encoded), created.UnixMilli()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) Evidence(ctx context.Context) ([]Evidence, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT r.signature,MAX(r.item_id),MAX(r.display_name),COUNT(DISTINCT CASE WHEN s.complete=1 THEN s.id END),
+		MIN(r.observed_ms),MAX(r.observed_ms),COUNT(DISTINCT r.order_key),MAX(r.quantity),MAX(r.max_stack_size),MAX(r.unit_reward),COALESCE(MIN(CASE WHEN r.price_position>0 THEN r.price_position END),0),MIN(r.signature_complete)
+		FROM order_rows r JOIN scans s ON s.id=r.scan_id GROUP BY r.signature ORDER BY MAX(r.observed_ms) DESC LIMIT 500`)
+	if err != nil {
+		return nil, err
+	}
+	result := []Evidence{}
+	for rows.Next() {
+		var evidence Evidence
+		var first, last int64
+		if err := rows.Scan(&evidence.Signature, &evidence.ItemID, &evidence.DisplayName, &evidence.CompleteScans,
+			&first, &last, &evidence.DistinctOrders, &evidence.ObservedQuantity, &evidence.MaxStackSize, &evidence.BestUnitReward, &evidence.BestPricePosition, &evidence.SignatureComplete); err != nil {
+			return nil, err
+		}
+		evidence.FirstSeenAt = time.UnixMilli(first).UTC()
+		evidence.LastSeenAt = time.UnixMilli(last).UTC()
+		result = append(result, evidence)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for index := range result {
+		if err := s.fillEvidence(ctx, &result[index]); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+func (s *Store) fillEvidence(ctx context.Context, evidence *Evidence) error {
+	cutoff := s.now().Add(-24 * time.Hour).UnixMilli()
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(units),0),COUNT(DISTINCT order_key) FROM fill_events WHERE signature=? AND observed_ms>=?`, evidence.Signature, cutoff).
+		Scan(&evidence.FillEvents, &evidence.FilledUnits24h, &evidence.DistinctOrders); err != nil {
+		return err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(remaining_quantity),0) FROM order_rows WHERE signature=? AND observed_ms=(SELECT MAX(observed_ms) FROM order_rows WHERE signature=?)`, evidence.Signature, evidence.Signature).
+		Scan(&evidence.AvailableUnits); err != nil {
+		return err
+	}
+	priceRows, err := s.db.QueryContext(ctx, `SELECT MAX(unit_reward),COALESCE(MIN(CASE WHEN price_position>0 THEN price_position END),0),observer_id FROM order_rows WHERE signature=? AND observed_ms>=? GROUP BY scan_id,observer_id ORDER BY MAX(observed_ms) DESC LIMIT 32`, evidence.Signature, s.now().Add(-2*time.Minute).UnixMilli())
+	if err != nil {
+		return err
+	}
+	prices := []int64{}
+	byObserver := map[string]int64{}
+	evidence.BestUnitReward = 0
+	evidence.BestPricePosition = 0
+	for priceRows.Next() {
+		var price int64
+		var position int
+		var observer string
+		if err := priceRows.Scan(&price, &position, &observer); err != nil {
+			priceRows.Close()
+			return err
+		}
+		prices = append(prices, price)
+		evidence.BestUnitReward = max64(evidence.BestUnitReward, price)
+		if position > 0 && (evidence.BestPricePosition == 0 || position < evidence.BestPricePosition) {
+			evidence.BestPricePosition = position
+		}
+		if _, exists := byObserver[observer]; !exists {
+			byObserver[observer] = price
+		}
+	}
+	priceRows.Close()
+	evidence.Stable = stablePrices(prices)
+	for _, left := range byObserver {
+		for _, right := range byObserver {
+			if left > 0 && right > 0 && math.Abs(float64(left-right))/float64(max64(left, right)) > 0.10 {
+				evidence.Conflict = true
+			}
+		}
+	}
+	span := evidence.LastSeenAt.Sub(evidence.FirstSeenAt)
+	evidence.Tier = "captured"
+	evidence.Reason = "waiting for repeated complete scans"
+	if evidence.CompleteScans >= 3 && span >= 10*time.Minute {
+		evidence.Tier = "research"
+		evidence.Reason = "waiting for confirmed fills and independent orders"
+	}
+	if evidence.CompleteScans >= 3 && span >= 15*time.Minute && evidence.FillEvents >= 5 && evidence.DistinctOrders >= 3 && evidence.Stable && !evidence.Conflict {
+		evidence.Tier = "actionable"
+		evidence.Reason = ""
+	}
+	if !evidence.SignatureComplete {
+		evidence.Tier = "research"
+		evidence.Reason = "canonical modifier signature has not been verified"
+	}
+	if evidence.BestPricePosition <= 0 {
+		evidence.Tier = "research"
+		evidence.Reason = "order queue position has not been verified"
+	}
+	if evidence.Conflict {
+		evidence.Tier = "hold"
+		evidence.Reason = "observers disagree on current price"
+	}
+	if !evidence.Stable && len(prices) >= 3 {
+		evidence.Tier = "hold"
+		evidence.Reason = "order price is moving rapidly"
+	}
+	return nil
+}
+
+func stablePrices(values []int64) bool {
+	if len(values) < 3 {
+		return false
+	}
+	copyValues := append([]int64(nil), values...)
+	sort.Slice(copyValues, func(i, j int) bool { return copyValues[i] < copyValues[j] })
+	median := copyValues[len(copyValues)/2]
+	if median <= 0 {
+		return false
+	}
+	return copyValues[len(copyValues)-1]-copyValues[0] <= median/10
+}
+
+func (s *Store) Debug(ctx context.Context) (DebugSnapshot, error) {
+	evidence, err := s.Evidence(ctx)
+	if err != nil {
+		return DebugSnapshot{}, err
+	}
+	observers, err := s.Observers(ctx)
+	if err != nil {
+		return DebugSnapshot{}, err
+	}
+	watches, err := s.Watches(ctx)
+	if err != nil {
+		return DebugSnapshot{}, err
+	}
+	var diagnostics int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM diagnostics WHERE created_ms>=?`, s.now().Add(-14*24*time.Hour).UnixMilli()).Scan(&diagnostics); err != nil {
+		return DebugSnapshot{}, err
+	}
+	coverage, err := s.scanCoverage(ctx)
+	if err != nil {
+		return DebugSnapshot{}, err
+	}
+	fills, err := s.recentFills(ctx)
+	if err != nil {
+		return DebugSnapshot{}, err
+	}
+	return DebugSnapshot{Observers: observers, Evidence: evidence, Watches: watches, ScanCoverage: coverage, RecentFills: fills, Diagnostics: diagnostics, GeneratedAt: s.now()}, nil
+}
+
+func (s *Store) scanCoverage(ctx context.Context) (ScanCoverage, error) {
+	var value ScanCoverage
+	var last int64
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(complete),0),COALESCE(SUM(CASE WHEN complete=0 THEN 1 ELSE 0 END),0),COALESCE(SUM(unknown_schema),0),COUNT(DISTINCT page),COALESCE(MAX(page),0),COALESCE(MAX(observed_ms),0) FROM scans`).
+		Scan(&value.Total, &value.Complete, &value.Incomplete, &value.UnknownSchema, &value.DistinctPages, &value.HighestPage, &last)
+	if last > 0 {
+		value.LastScanAt = time.UnixMilli(last).UTC()
+	}
+	return value, err
+}
+
+func (s *Store) recentFills(ctx context.Context) ([]FillEvidence, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT signature,order_key,observer_id,units,unit_reward,observed_ms FROM fill_events ORDER BY observed_ms DESC LIMIT 100`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	values := []FillEvidence{}
+	for rows.Next() {
+		var value FillEvidence
+		var observed int64
+		if err := rows.Scan(&value.Signature, &value.OrderKey, &value.ObserverID, &value.Units, &value.UnitReward, &observed); err != nil {
+			return nil, err
+		}
+		value.ObservedAt = time.UnixMilli(observed).UTC()
+		values = append(values, value)
+	}
+	return values, rows.Err()
+}
+
+func (s *Store) Observers(ctx context.Context) ([]Observer, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT observer_id,parser_version,proxy_label,state,current_task_id,current_page,latency_ms,reconnect_count,last_seen_ms FROM observers ORDER BY observer_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []Observer{}
+	for rows.Next() {
+		var observer Observer
+		var last int64
+		if err := rows.Scan(&observer.ObserverID, &observer.ParserVersion, &observer.ProxyLabel, &observer.State, &observer.CurrentTaskID, &observer.CurrentPage, &observer.LatencyMS, &observer.ReconnectCount, &last); err != nil {
+			return nil, err
+		}
+		observer.LastSeenAt = time.UnixMilli(last).UTC()
+		result = append(result, observer)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) Watches(ctx context.Context) ([]Watch, error) {
+	now := s.now()
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM watches WHERE expires_ms<=?`, now.UnixMilli())
+	rows, err := s.db.QueryContext(ctx, `SELECT id,signature,created_ms,expires_ms FROM watches ORDER BY created_ms DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []Watch{}
+	for rows.Next() {
+		var watch Watch
+		var created, expires int64
+		if err := rows.Scan(&watch.ID, &watch.Signature, &created, &expires); err != nil {
+			return nil, err
+		}
+		watch.CreatedAt, watch.ExpiresAt = time.UnixMilli(created).UTC(), time.UnixMilli(expires).UTC()
+		result = append(result, watch)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) Cleanup(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `DELETE FROM scans WHERE observed_ms<?`, s.now().Add(-7*24*time.Hour).UnixMilli()); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM fill_events WHERE observed_ms<?`, s.now().Add(-90*24*time.Hour).UnixMilli()); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM diagnostics WHERE created_ms<?`, s.now().Add(-14*24*time.Hour).UnixMilli()); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM watches WHERE expires_ms<?`, s.now().UnixMilli()); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE tasks SET state='completed',lease_expires_ms=0,lease_token='' WHERE kind='focused_watch' AND signature NOT IN (SELECT signature FROM watches WHERE expires_ms>?)`, s.now().UnixMilli()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) Backup(ctx context.Context) (string, error) {
+	if s.path == "" {
+		return "", nil
+	}
+	directory := s.path + ".backups"
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return "", err
+	}
+	target := filepath.Join(directory, s.now().Format("20060102T150405Z")+".db")
+	if _, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, target); err != nil {
+		return "", fmt.Errorf("backup order database: %w", err)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return "", fmt.Errorf("list order backups: %w", err)
+	}
+	cutoff := s.now().Add(-7 * 24 * time.Hour)
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".db" {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			return "", fmt.Errorf("inspect order backup: %w", infoErr)
+		}
+		if info.ModTime().Before(cutoff) {
+			if removeErr := os.Remove(filepath.Join(directory, entry.Name())); removeErr != nil {
+				return "", fmt.Errorf("prune order backup: %w", removeErr)
+			}
+		}
+	}
+	return target, nil
+}
+
+func (s *Store) observer(ctx context.Context, id string) (Observer, error) {
+	var observer Observer
+	var last int64
+	err := s.db.QueryRowContext(ctx, `SELECT observer_id,parser_version,proxy_label,state,current_task_id,current_page,latency_ms,reconnect_count,last_seen_ms FROM observers WHERE observer_id=?`, id).
+		Scan(&observer.ObserverID, &observer.ParserVersion, &observer.ProxyLabel, &observer.State, &observer.CurrentTaskID, &observer.CurrentPage, &observer.LatencyMS, &observer.ReconnectCount, &last)
+	observer.LastSeenAt = time.UnixMilli(last).UTC()
+	return observer, err
+}
+
+func newID(prefix string) string {
+	raw := make([]byte, 12)
+	if _, err := rand.Read(raw); err != nil {
+		panic(err)
+	}
+	return prefix + "_" + hex.EncodeToString(raw)
+}
+
+func timeMillis(value time.Time) int64 {
+	if value.IsZero() {
+		return 0
+	}
+	return value.UTC().UnixMilli()
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+func max64(left, right int64) int64 {
+	if left > right {
+		return left
+	}
+	return right
+}

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -257,7 +258,7 @@ func TestStartupFeedUsesJSONArray(t *testing.T) {
 	}
 }
 
-func TestOrderAuctionPageReportsMissingOrderSourceWithoutFakeRows(t *testing.T) {
+func TestOrderAuctionPageReportsRealObserverStateWithoutFakeRows(t *testing.T) {
 	server, err := New(Config{Address: "127.0.0.1:8080"}, &fakeUpstream{}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -269,11 +270,56 @@ func TestOrderAuctionPageReportsMissingOrderSourceWithoutFakeRows(t *testing.T) 
 		t.Fatalf("order-auction page code=%d", response.Code)
 	}
 	body := response.Body.String()
-	for _, expected := range []string{"Order-auction flipper", "Order source:</strong> <span class=\"missing\">not connected", "Waiting for real order snapshots. No simulated rows."} {
+	for _, expected := range []string{"Order-auction flipper", "No Mineflayer observer has registered yet.", "Waiting for real order snapshots.", "No simulated market rows."} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("order-auction page missing %q", expected)
 		}
 	}
+}
+
+func TestScopedObserverAndFabricAPIs(t *testing.T) {
+	server, err := New(Config{Address: "127.0.0.1:8080", ClientToken: "admin-token-123456", ObserverToken: "observer-token-123456", FabricToken: "fabric-token-123456"}, &fakeUpstream{}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	register := `{"observer_id":"observer-1","parser_version":"p1","proxy_label":"proxy-1"}`
+	response := requestJSON(server, http.MethodPost, "/api/v1/observers/register", "observer-token-123456", register)
+	if response.Code != http.StatusOK {
+		t.Fatalf("register code=%d body=%s", response.Code, response.Body.String())
+	}
+	response = requestJSON(server, http.MethodPost, "/api/v1/observers/register", "fabric-token-123456", register)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("fabric token reached observer API: %d", response.Code)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/observers/tasks?observer_id=observer-1", nil)
+	request.Header.Set("Authorization", "Bearer observer-token-123456")
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"kind":"discovery"`) {
+		t.Fatalf("task code=%d body=%s", response.Code, response.Body.String())
+	}
+
+	response = requestJSON(server, http.MethodPost, "/api/v1/client/diagnostics", "fabric-token-123456",
+		`[{"install_id":"install-1","version":"1.0.0","event":"connection","fields":{"state":"ready"}}]`)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("diagnostic code=%d body=%s", response.Code, response.Body.String())
+	}
+	response = requestJSON(server, http.MethodPost, "/api/v1/client/diagnostics", "fabric-token-123456",
+		`[{"install_id":"install-1","version":"1.0.0","event":"connection","fields":{"chat":"private"}}]`)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("forbidden diagnostic accepted: %d", response.Code)
+	}
+}
+
+func requestJSON(server *Server, method, path, token, body string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	return response
 }
 
 func TestFeedETagChangesWithFailureState(t *testing.T) {
@@ -335,6 +381,21 @@ func TestValidateBindRequiresTokenOffLoopback(t *testing.T) {
 	}
 	if err := ValidateBind("127.0.0.1:8080", "short"); err == nil {
 		t.Fatal("weak configured token accepted")
+	}
+}
+
+func TestValidateScopedTokensRequireDistinctRemoteCredentials(t *testing.T) {
+	admin := "admin-token-123456"
+	observer := "observer-token-123456"
+	fabric := "fabric-token-123456"
+	if err := ValidateScopedTokens("0.0.0.0:8080", admin, observer, fabric); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateScopedTokens("0.0.0.0:8080", admin, "", fabric); err == nil {
+		t.Fatal("remote observer API accepted an empty credential")
+	}
+	if err := ValidateScopedTokens("0.0.0.0:8080", admin, admin, fabric); err == nil {
+		t.Fatal("cross-scope credential reuse was accepted")
 	}
 }
 

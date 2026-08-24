@@ -4,6 +4,8 @@ services:
     environment:
       DONUT_API_KEY: ${DONUT_API_KEY:?set DONUT_API_KEY}
       DN_CLIENT_TOKEN: ${DN_CLIENT_TOKEN:?set DN_CLIENT_TOKEN}
+      DN_OBSERVER_TOKEN: ${DN_OBSERVER_TOKEN:?set DN_OBSERVER_TOKEN}
+      DN_FABRIC_TOKEN: ${DN_FABRIC_TOKEN:?set DN_FABRIC_TOKEN}
       DN_LISTING_PAGES: ${DN_LISTING_PAGES:-220}
       DN_FAST_INTERVAL: ${DN_FAST_INTERVAL:-250ms}
       DN_COLLECTION_PAUSE: ${DN_COLLECTION_PAUSE:-5s}
@@ -12,9 +14,38 @@ services:
       DN_MIN_CONFIDENCE_BPS: ${DN_MIN_CONFIDENCE_BPS:-5000}
       DN_MIN_VOLUME_24H: ${DN_MIN_VOLUME_24H:-2}
       DN_MAX_PURCHASE_PRICE: ${DN_MAX_PURCHASE_PRICE:-0}
-    ports: ["8080:8080"]
-    volumes: ["auction-history:/data"]
+      DN_AUCTION_FEE_BPS: ${DN_AUCTION_FEE_BPS:-250}
+      DN_ORDER_FEE_BPS: ${DN_ORDER_FEE_BPS:-0}
+    volumes: ["market-data:/data"]
+    restart: unless-stopped
+
+  order-collector:
+    build: ./collector
+    depends_on: [auction-server]
+    environment:
+      DN_COLLECTOR_CONFIG: /run/secrets/collector-accounts.json
+    volumes:
+      - ./collector/accounts.json:/run/secrets/collector-accounts.json:ro
+      - ./collector/order-schemas.json:/app/order-schemas.json:ro
+      - collector-profiles:/data/profiles
+      - collector-captures:/app/captures
+    restart: unless-stopped
+
+  https:
+    image: caddy:2.10.2-alpine
+    depends_on: [auction-server]
+    environment:
+      DN_DOMAIN: ${DN_DOMAIN:-localhost}
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
     restart: unless-stopped
 
 volumes:
-  auction-history:
+  market-data:
+  collector-profiles:
+  collector-captures:
+  caddy-data:
+  caddy-config:

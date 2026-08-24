@@ -1,0 +1,19 @@
+{
+  "backendUrl": "http://auction-server:8080",
+  "observerToken": "replace-with-the-DN_OBSERVER_TOKEN-value",
+  "minecraftHost": "play.donutsmp.net",
+  "minecraftPort": 25565,
+  "version": "1.21.11",
+  "expectedEgressCheckUrl": "https://api.ipify.org?format=json",
+  "menuSchemasFile": "/app/order-schemas.json",
+  "accounts": [
+    {
+      "id": "observer-1",
+      "microsoftUsername": "account@example.com",
+      "proxyLabel": "proxy-1",
+      "proxyUrl": "socks5://username:password@proxy.example:1080",
+      "expectedEgressIp": "203.0.113.10",
+      "profilesFolder": "/data/profiles/observer-1"
+    }
+  ]
+}

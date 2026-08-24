@@ -165,6 +165,21 @@ func TestStackWithoutBothQuantityCohortsIsRejected(t *testing.T) {
 	}
 }
 
+func TestPublicQuantityValuationUsesExactBatchEvidence(t *testing.T) {
+	e := NewEngine()
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	e.now = func() time.Time { return now }
+	e.AddTransactions(quantitySales(now, "iron_ingot", 1, 100, 8, "single"))
+	if _, ok := e.QuantityValuation("minecraft:iron_ingot", 64); ok {
+		t.Fatal("quantity valuation accepted a stack without exact-batch sales")
+	}
+	e.AddTransactions(quantitySales(now, "iron_ingot", 64, 3_200, 8, "stack"))
+	valuation, ok := e.QuantityValuation("minecraft:iron_ingot", 64)
+	if !ok || valuation.PricingQuantity != 64 || valuation.QuickSellValue > 50 {
+		t.Fatalf("quantity valuation is not conservatively batch-safe: %+v", valuation)
+	}
+}
+
 func TestStackReferenceUsesExactQuantityActiveCompetition(t *testing.T) {
 	e := NewEngine()
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)

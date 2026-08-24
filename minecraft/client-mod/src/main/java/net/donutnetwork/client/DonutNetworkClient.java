@@ -4,6 +4,7 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.option.KeyBinding;
@@ -16,10 +17,11 @@ import org.slf4j.LoggerFactory;
 
 import static net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.literal;
 
-/** Thin API-only Fabric client: poll, alert, and open a manual auction search. */
+/** Thin player-facing client: consume backend candidates, allocate locally, and open manual market routes. */
 public final class DonutNetworkClient implements ClientModInitializer {
     private static final Logger LOGGER = LoggerFactory.getLogger("donut-network-client");
     private FlipFeedClient feed;
+	private CandidateFeedClient candidates;
     private boolean startupHintShown;
 
     @Override public void onInitializeClient() {
@@ -27,10 +29,14 @@ public final class DonutNetworkClient implements ClientModInitializer {
             ClientConfig.Settings settings = ClientConfig.load();
             feed = new FlipFeedClient(settings, flip -> MinecraftClient.getInstance().execute(() ->
                     FlipNotifier.send(MinecraftClient.getInstance(), flip)));
+			candidates = new CandidateFeedClient(settings, candidate -> MinecraftClient.getInstance().execute(() ->
+					CandidateNotifier.send(MinecraftClient.getInstance(), candidate)));
             registerControls();
             feed.start();
-            ClientLifecycleEvents.CLIENT_STOPPING.register(client -> feed.close());
-            LOGGER.info("Donut API-only client started; backend={}", settings.backend());
+			candidates.start();
+			ClientReceiveMessageEvents.GAME.register((message, overlay) -> candidates.observeBalance(message.getString()));
+            ClientLifecycleEvents.CLIENT_STOPPING.register(client -> { candidates.close(); feed.close(); });
+            LOGGER.info("Donut market client started; backend={}", settings.backend());
         } catch (RuntimeException error) {
             LOGGER.error("Donut client configuration is invalid: {}", error.getMessage());
             ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) ->
@@ -58,7 +64,7 @@ public final class DonutNetworkClient implements ClientModInitializer {
     }
 
     private void openScreen(MinecraftClient client) {
-        client.setScreen(new DonutScreen(client.currentScreen, feed));
+		client.setScreen(new DonutScreen(client.currentScreen, feed, candidates));
     }
 
     private void showStartupHint(MinecraftClient client) {
@@ -69,7 +75,7 @@ public final class DonutNetworkClient implements ClientModInitializer {
         if ("error".equals(status.state())) {
             client.player.sendMessage(Text.literal("[DN] Backend unavailable. Start the local backend; this mod will reconnect automatically."), false);
         } else {
-            client.player.sendMessage(Text.literal("[DN] Connected. Press N or use /dn to review auction flips."), false);
+			client.player.sendMessage(Text.literal("[DN] Connected. Press N or use /dn for API auctions and the local order portfolio."), false);
         }
     }
 }

@@ -1,0 +1,19 @@
+{
+  "backendUrl": "http://127.0.0.1:8080",
+  "observerToken": "replace-with-a-long-observer-token",
+  "minecraftHost": "play.donutsmp.net",
+  "minecraftPort": 25565,
+  "version": "1.21.11",
+  "expectedEgressCheckUrl": "https://api.ipify.org?format=json",
+  "menuSchemasFile": "./order-schemas.json",
+  "accounts": [
+    {
+      "id": "observer-1",
+      "microsoftUsername": "account@example.com",
+      "proxyLabel": "proxy-1",
+      "proxyUrl": "socks5://username:password@proxy.example:1080",
+      "expectedEgressIp": "203.0.113.10",
+      "profilesFolder": "./profiles/observer-1"
+    }
+  ]
+}

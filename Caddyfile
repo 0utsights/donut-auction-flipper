@@ -1,0 +1,4 @@
+{$DN_DOMAIN:localhost} {
+	encode zstd gzip
+	reverse_proxy auction-server:8080
+}

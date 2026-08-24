@@ -13,12 +13,14 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.Properties;
+import java.util.UUID;
 
 final class ClientConfig {
     private static final Logger LOGGER = LoggerFactory.getLogger("donut-network-client");
     private static final Path PATH = FabricLoader.getInstance().getConfigDir().resolve("donut-network.properties");
 
-    record Settings(URI backend, String token, Duration pollInterval, boolean chatAlerts) {}
+    record Settings(URI backend, String token, Duration pollInterval, boolean chatAlerts,
+                    long balance, int usedOrderSlots, int usedAuctionSlots, boolean diagnostics, String installId) {}
 
     private ClientConfig() {}
 
@@ -53,22 +55,51 @@ final class ClientConfig {
                 || token.chars().anyMatch(character -> character < 33 || character > 126))) {
             throw new IllegalArgumentException("client_token must be 16-512 printable ASCII characters without spaces");
         }
-        return new Settings(backend, token,
-                Duration.ofMillis(milliseconds), Boolean.parseBoolean(properties.getProperty("chat_alerts", "true")));
+        long balance = boundedLong(properties, "balance", 10_000_000L, 0, Long.MAX_VALUE);
+        int usedOrderSlots = (int) boundedLong(properties, "used_order_slots", 0, 0, 20);
+        int usedAuctionSlots = (int) boundedLong(properties, "used_auction_slots", 0, 0, 18);
+        String installId = properties.getProperty("install_id", "").strip();
+        if (!installId.matches("[A-Za-z0-9_-]{1,128}")) {
+            installId = UUID.randomUUID().toString();
+            properties.setProperty("install_id", installId);
+            save(properties);
+        }
+        return new Settings(backend, token, Duration.ofMillis(milliseconds),
+                Boolean.parseBoolean(properties.getProperty("chat_alerts", "true")), balance,
+                usedOrderSlots, usedAuctionSlots, Boolean.parseBoolean(properties.getProperty("diagnostics", "true")), installId);
     }
 
     static void saveChatAlerts(boolean enabled) {
+		update("chat_alerts", Boolean.toString(enabled));
+	}
+
+    static void saveLocalState(long balance, int usedOrderSlots, int usedAuctionSlots) {
+		Properties properties = readProperties();
+		properties.setProperty("balance", Long.toString(Math.max(0, balance)));
+		properties.setProperty("used_order_slots", Integer.toString(Math.max(0, Math.min(20, usedOrderSlots))));
+		properties.setProperty("used_auction_slots", Integer.toString(Math.max(0, Math.min(18, usedAuctionSlots))));
+		save(properties);
+	}
+
+    static void saveDiagnostics(boolean enabled) { update("diagnostics", Boolean.toString(enabled)); }
+
+    private static void update(String key, String value) {
+		Properties properties = readProperties();
+		properties.setProperty(key, value);
+		save(properties);
+	}
+
+    private static Properties readProperties() {
         Properties properties = defaults();
         if (Files.exists(PATH)) {
             try (InputStream input = Files.newInputStream(PATH)) {
                 properties.load(input);
             } catch (IOException error) {
                 LOGGER.warn("Could not update {}: {}", PATH, safeMessage(error));
-                return;
+				return properties;
             }
         }
-        properties.setProperty("chat_alerts", Boolean.toString(enabled));
-        save(properties);
+		return properties;
     }
 
     private static Properties defaults() {
@@ -77,8 +108,23 @@ final class ClientConfig {
         properties.setProperty("client_token", "");
         properties.setProperty("poll_millis", "250");
         properties.setProperty("chat_alerts", "true");
+		properties.setProperty("balance", "10000000");
+		properties.setProperty("used_order_slots", "0");
+		properties.setProperty("used_auction_slots", "0");
+		properties.setProperty("diagnostics", "true");
+		properties.setProperty("install_id", "");
         return properties;
     }
+
+	private static long boundedLong(Properties properties, String key, long fallback, long minimum, long maximum) {
+		try {
+			long value = Long.parseLong(properties.getProperty(key, Long.toString(fallback)).strip());
+			if (value < minimum || value > maximum) throw new IllegalArgumentException(key + " is outside its valid range");
+			return value;
+		} catch (NumberFormatException error) {
+			throw new IllegalArgumentException(key + " must be a whole number", error);
+		}
+	}
 
     private static void save(Properties properties) {
         try {

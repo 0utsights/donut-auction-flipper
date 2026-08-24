@@ -1,47 +1,95 @@
 # Architecture
 
-The runtime has one direction of data flow:
-
 ```text
-Official Donut API
-        |
-        v
-one shared rate limiter -> fast page-1 lane -----------+
-                        -> broad sale/book lane -> robust-v4 price-volume model
-                                                       |
-                                                       v
-                                            immutable ranked flip feed
-                                                       |
-                                             HTTP polling with ETag
-                                                       |
-                                                       v
-                                          Fabric chat + manual /ah search
+Mineflayer observer accounts -- order observations/tasks --+
+                                                           |
+Official Donut auction API -- fast + broad valuation ------+--> Go backend
+                                                                  |
+                                                        scored candidate pool
+                                                                  |
+                                                        ETag HTTP polling
+                                                                  |
+                                                                  v
+                                            Fabric local balance/slot allocator
+                                                                  |
+                                                     manual /orders or /ah use
 ```
 
-## Backend cycle
+## Permanent boundaries
 
-1. Load the retained completed-sale model immediately at startup.
-2. Continuously fetch recently-listed page 1 and publish its newest 44 rows without waiting for a broad scan.
-3. In parallel, fetch up to ten completed-transaction pages and the newest 220 active pages using the remaining shared rate-limit budget.
-4. Merge transactions by stable fingerprint and sale timestamp; discard records older than 31 days and cap the archive at 100,000.
-5. Atomically swap refreshed models and snapshots; readers never observe partial data.
-6. Persist history with a temporary file and backup rotation.
+Mineflayer is the only in-game **market parser**. It reads order menus and never buys, fulfills, creates, confirms, cancels, claims, lists, or transfers inventory. The official API is the only auction-data source. Fabric does not upload market prices; it consumes candidates and keeps personal balance, reserve, and slot allocation local. Position inference is also local, but remains disabled until real success/failure message fixtures can be recognized without guessing.
 
-An error changes the visible status and preserves the previous feed for inspection. The mod emits alerts only while status is `ready`.
+The backend and collector run together on the private host. Fabric connects over authenticated HTTPS. There are no WebSockets.
+
+## Auction model
+
+The existing two API lanes remain intact:
+
+1. The fast lane refreshes the newest auction page.
+2. The broad lane refreshes completed transactions and the configured recent active-book window.
+3. The immutable `robust-v4-price-volume-quantity` engine requires singular and exact-resale-quantity evidence for stacks.
+4. Confidence, liquidity, and sell time count only completed sales within ±10% of the intended resale price and require independent sellers.
+
+The API key never leaves the backend.
+
+## Observer coordination
+
+The Node manager starts one isolated child process per configured Microsoft account. Each uses its own profile directory and proxy. Proxy egress is verified before login.
+
+Observers register and long-poll leased tasks:
+
+- `discovery`: crawl the order market.
+- `focused_watch`: refresh an item selected by a Fabric portfolio.
+- `verification`: independently sample another observer's evidence.
+- `schema_probe`: capture an unknown layout without clicking.
+
+Direct page ranges are used only when a verified GUI supports them. Otherwise, one or more observers perform discovery while additional observers handle focused/verification tasks. Duplicate submissions are harmless because scans are keyed by observer, session, and content hash. Lease heartbeats prevent healthy long scans from being reassigned.
+
+Unknown screens fail closed. A checked-in schema must match title, listing slots, and exact control fingerprints. Unknown, incomplete, and capture-only rows are retained for coverage diagnostics but cannot enter price or fill evidence. The generic parser also marks canonical modifier equivalence incomplete; a fixture-specific, versioned mapping is required before evidence can become actionable. The collector's narrow navigation wrapper is the only code allowed to call chat/window APIs.
+
+## Order evidence and candidates
+
+SQLite WAL retains complete/incomplete scans, normalized order rows, proven quantity decreases, observers, leases, watches, diagnostics, and candidate evidence. Raw scans expire after seven days, derived fills after 90 days, diagnostics after 14 days, and daily database backups after seven days.
+
+An order disappearance is not a fill. A fill event requires a decrease in the same observer/order key. Evidence graduates through:
+
+- `captured`: at least one parsed observation.
+- `research`: at least three complete scans spanning ten minutes.
+- `actionable`: five fill events across three orders, at least 15 minutes of evidence, stable current pricing, no observer conflict, and a fresh snapshot.
+
+Combined actionability also requires five exact-quantity, near-target auction sales from three sellers in 24 hours.
+
+Routes are:
+
+- `ORDER_TO_AUCTION`: competitive order acquisition, unchanged-quantity auction exit.
+- `AUCTION_TO_ORDER`: current auction acquisition, existing order exit.
+
+Each candidate includes fees, capital, market/inventory slots, completion probability, expected cycle, executable batches, and:
+
+`risk-adjusted profit/day = conservative profit × completion probability ÷ cycle days`
+
+No absolute order-auction profit floor exists.
+
+## Fabric allocation
+
+The backend publishes at most 100 scored candidates. Fabric filters to `READY` candidates and solves an integer portfolio locally under a 100 ms budget.
+
+Constraints:
+
+- current balance after a dynamic 15–35% reserve;
+- 20 minus locally used order slots;
+- 18 minus locally used auction slots;
+- conservative executable batches;
+- 25% deployable-capital exposure per exact signature;
+- 40% per base item.
+
+Profit per inventory slot is a tie-breaker, not a hard capacity constraint. The valuable market valuation stays on the backend; only resource allocation is local.
 
 ## Trust boundaries
 
-- The official API key ends at the Donut API client and is never serialized.
-- `/api/v1/flips` uses an optional bearer client token; one is mandatory for non-loopback binds.
-- `/api/v1/debug` and `/` contain market evidence and operational counters but no secrets.
-- Seller and canonical item-ID commands are generated from restricted ASCII alphabets on the backend and independently checked by the mod. Backend auction fingerprints are never treated as server commands.
-
-## Valuation
-
-The model uses completed sales as the authority. It canonicalizes item modifiers, deduplicates seller/day influence, filters outliers with median absolute deviation, compares short and long windows, caps per-seller volume, estimates liquidity and sale time, and uses distinct active sellers only as a conservative market cap. Liquidity, confidence, and sell time use only completed sales within ±10% of the proposed quick-sell price; broad item volume is diagnostic context. A recommendation is blocked when evidence is stale or the official API cannot represent economically sensitive modifiers reliably.
-
-Opportunity pricing uses `robust-v4-price-volume-quantity`. Quantity-one completed sales establish the mandatory per-item ceiling. A stack also requires completed sales at its exact quantity, capturing real bulk discounts. The lower per-unit quick-sell value is multiplied by the unchanged resale quantity. The engine never assumes a stack will be split for resale and rejects stacks lacking either cohort.
-
-## Why polling
-
-The full upstream book has thousands of pages and cannot be exhaustively rescanned quickly under the published rate limit. Detection therefore uses the recently-listed first page at sub-second cadence while broad depth/history collection runs concurrently. The mod polls the local conditional feed every 250ms, giving near-immediate delivery without WebSocket lifecycle or fanout machinery.
+- Environment tokens are hashed in memory before request handling and must be distinct when configured.
+- Observer, Fabric, and administrative routes use separate credentials/scopes.
+- Collector account tokens and proxy credentials never enter backend storage.
+- Fabric diagnostics use a fixed allowlist and omit personal/game content.
+- Backend commands and Fabric commands are independently validated.
+- Debug pages contain real source state only; no simulated market rows are possible.

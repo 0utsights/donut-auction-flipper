@@ -4,9 +4,11 @@
 
 The complete pre-redesign repository was committed as `be6a624`, tagged `legacy-full-system-v0.4.0`, pushed to branch `archive/full-system-v0.4.0`, and stored in the private GitHub repository `0utsights/donut-auction-flipper`. The parser is not shipped now, but remains recoverable from that immutable tag and archive branch.
 
-## 2026-08-22 — API-only normal path
+## 2026-08-23 — Permanent Mineflayer/Fabric boundary
 
-The normal product is one Go backend plus one thin Fabric client. PostgreSQL, Node, WebSockets, workers, sharding, screen observation, local price caches, telemetry, simulation, and purchase scaffolding were removed. This is the smallest design that can collect official data, build a market model, notify a player quickly, and expose its reasoning.
+Mineflayer is the permanent order-market observation layer. It parses order menus, accepts only research assignments, and submits observations; it never buys, fulfills, creates, confirms, cancels, claims, collects, lists, or transfers inventory. Auctions remain sourced from the official Donut API. Fabric is the player-facing flipping client: it receives scored candidates, keeps personal state locally, and assists with manual actions. Adapting Fabric code to run in Mineflayer is deferred.
+
+Collector coordination uses authenticated HTTP long polling rather than WebSockets. Any number of isolated account processes may register with the Go backend, receive renewable observation leases, and deliberately overlap work for verification. The backend cannot issue transaction instructions.
 
 ## 2026-08-22 — Backend-only upstream credential
 
@@ -14,9 +16,9 @@ The normal product is one Go backend plus one thin Fabric client. PostgreSQL, No
 
 For Windows local development, `scripts/start-local.ps1` may cache the key as a user-scoped DPAPI ciphertext under the Git-ignored `data/` directory. This keeps the normal launch one-command without placing the plaintext key in source, mod files, command arguments, or shell history.
 
-## 2026-08-22 — Bounded file persistence before a database
+## 2026-08-23 — SQLite WAL for research state
 
-The only durable state needed now is recent completed-sale history. It is stored as a versioned gzip JSON document with safe rotation, 31-day retention, deduplication, and a 100,000-row cap. Active listings are always recollected. A database should be introduced only when multi-process operation, longer retention, or calibrated analytics actually requires one.
+Auction transaction history retains its bounded compressed archive, while order observations, fill evidence, observer health, leases, watches, diagnostics, and optimizer runs use embedded SQLite WAL storage. Submissions are idempotent, diagnostics expire after 14 days, and automated daily backups use SQLite's consistent `VACUUM INTO` path. This avoids premature external-database operations while giving multi-observer research durable transactional state.
 
 ## 2026-08-22 — Fresh immutable model per scan
 
@@ -46,11 +48,35 @@ A one-second 220-page scan is impossible under the upstream 250-request/minute l
 
 Total item sales can combine incompatible price regimes and do not prove that an item will clear at our proposed resale price. `robust-v4-price-volume` therefore counts completed 24-hour volume only inside a ±10% band around the quick-sell target for confidence, minimum-volume gating, and sell-time estimates. It also requires that qualifying target-price volume is not supplied by only one seller. Total 24-hour item volume remains visible as context but cannot qualify an alert. The active price cap uses the second-cheapest distinct seller, so two independent competing listings are treated as real market evidence while one bait listing cannot set the target alone.
 
-## 2026-08-23 — Freeze auction-only; research orders separately
+## 2026-08-23 — Freeze auction-only; develop combined research independently
 
-The verified API-only product is frozen at branch `codex/auction-only`, tag/release `auction-only-v1.0.0`. Auction-plus-orders development continues on `codex/auction-orders`. The official API has no order endpoints, so the new page must remain empty until a thin Fabric reader supplies real `/orders` menu observations. Order parsing is deliberately deferred until the creation/browse menus are reviewed. No third-party tracker, simulated row, automatic purchase, or inventory click is accepted as a substitute.
+The verified API-only product is frozen at branch `codex/auction-only`, tag/release `auction-only-v1.0.0`. Auction-plus-orders development continues on `codex/auction-orders`. The official API has no order endpoints, so order evidence comes only from capture-only Mineflayer observers. No third-party tracker, simulated row, automatic purchase, or Fabric market upload is accepted as a substitute.
 
-Order-auction ranking will require both absolute batch profit and margin, then prioritize executable daily profit, profit per scarce market slot, and observed liquidity. The initial batch-profit floor is $100,000, which rejects the example 64-sand spread ($16,496 total) while allowing a 64-block batch earning $5,000 per block ($320,000 total). Base planning assumes 20 auction and 20 order slots; the limit is rank-dependent and must remain configurable once captured in game.
+Combined ranking has no fixed dollar-profit floor. The backend publishes a bounded conservative frontier using exact-quantity evidence, fees, capital, completion probability, cycle time, executable volume, queue position, stability, and scarce market slots. A trade's score is `net profit × completion probability ÷ cycle days`. Profit per inventory slot remains visible as a tie-breaker.
+
+## 2026-08-23 — Player state and allocation remain local
+
+Fabric owns the player's parsed or manually overridden balance (default `$10M`), inferred positions, available 20 order slots and 18 auction slots, dynamic 15–35% reserve, and final deterministic integer allocation. The allocator cannot exceed deployable cash, slot limits, conservative executable volume, or per-item exposure bounds. Personal portfolios and complete inventories are never uploaded.
+
+Position/outcome inference is fail-closed during shadow rollout. Until real sanitized server-message fixtures are captured, Fabric exposes manual used-slot state and does not treat menu navigation as evidence that a purchase, fill, or listing occurred.
+
+## 2026-08-23 — Evidence graduation and unsafe-state semantics
+
+Order markets graduate through `captured`, `research`, and `actionable`. Actionability requires repeated complete scans, observed reductions of stable order identities across sessions, current focused observations, and stable exact-quantity auction exits. Disappearance alone is ambiguous. Observer disagreement, schema uncertainty, stale evidence, modifier blindness, or price shocks produce `HOLD`, `STALE`, or `RESEARCH`, never an optimistic recommendation.
+
+## 2026-08-23 — Collector isolation, routing, and secrets
+
+One Node manager launches one child process per configured Microsoft account. Every account has an isolated token cache, stable observer identity, parser version, reconnect state, and dedicated authenticated proxy. Egress must match the configured address before Minecraft login. Token caches and proxy credentials remain in permission-restricted collector-host files and are never sent to the backend or Fabric.
+
+The interaction adapter is deny-by-default. Only `/orders` plus controls explicitly verified by a captured schema may be used; unknown screens are capture-only. Mineflayer and protocol dependencies are pinned for the 1.21.11 compatibility baseline, but live authentication, signed-command, menu-schema, and proxy verification still require operator accounts and real server fixtures before navigation can be enabled.
+
+## 2026-08-23 — Scoped credentials and sanitized diagnostics
+
+Administrator, observer, and Fabric credentials use separate permission scopes and are stored as hashes in the running backend. The upstream Donut API key remains backend-only. Fabric keeps full logs locally and uploads only allowlisted, batched operational diagnostics by default, with a visible opt-out. Raw chat, usernames, server addresses, complete inventories, raw NBT, credentials, and secret-bearing API responses are forbidden; accepted diagnostics expire after 14 days.
+
+## 2026-08-23 — Remote topology and shadow rollout
+
+Production uses one Compose topology for the Go backend, Mineflayer manager, persistent storage, backups, and Caddy HTTPS termination on the second PC or Oracle host. Loopback HTTP is development-only. Collectors launch in shadow/capture mode, and combined `READY` recommendations remain unavailable until real order schemas, fill-rate calibration, observer agreement, and stability checks pass.
 
 ## 2026-08-22 — Barebones client and debug UI
 
@@ -69,5 +95,6 @@ The official Donut API schema remains the primary contract, and the retained in-
 - The official API retains its bearer-authenticated listing and transaction endpoints and 250 requests/minute published limit.
 - Live verification found 44 entries per page and valid results beyond page 2,000. The normal scan deliberately caps at the newest 220 pages (9,680 listings) to keep detection near one minute and below the 250-request/minute key limit. It does not claim full-book coverage.
 - `/ah <item>` remains a supported manual search command; there is no relied-upon direct-auction-ID command.
-- The first production goal is useful notify-only flipping, not automated purchasing or distributed scale.
+- DonutSMP permits passive market observation by authenticated accounts. If server-team rules disallow it, collectors must remain disabled.
+- The first combined-product goal is evidence collection and notify-only, player-confirmed flipping; not automated purchasing.
 - Loopback is the default deployment. Public binding without a downstream client token is rejected at startup.

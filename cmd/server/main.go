@@ -36,6 +36,11 @@ func run(logger *slog.Logger) error {
 	if err := service.ValidateBind(address, clientToken); err != nil {
 		return err
 	}
+	observerToken := strings.TrimSpace(os.Getenv("DN_OBSERVER_TOKEN"))
+	fabricToken := strings.TrimSpace(os.Getenv("DN_FABRIC_TOKEN"))
+	if err := service.ValidateScopedTokens(address, clientToken, observerToken, fabricToken); err != nil {
+		return err
+	}
 	listingPages, err := envInt("DN_LISTING_PAGES", 220, 1, 220)
 	if err != nil {
 		return err
@@ -64,6 +69,14 @@ func run(logger *slog.Logger) error {
 	if thresholds.MaxPurchasePrice, err = envInt64("DN_MAX_PURCHASE_PRICE", 0, 0, 9_000_000_000_000_000_000); err != nil {
 		return err
 	}
+	auctionFeeBPS, err := envInt("DN_AUCTION_FEE_BPS", 250, 0, 5_000)
+	if err != nil {
+		return err
+	}
+	orderFeeBPS, err := envInt("DN_ORDER_FEE_BPS", 0, 0, 5_000)
+	if err != nil {
+		return err
+	}
 
 	upstream := donutapi.New(donutapi.Config{
 		BaseURL: env("DONUT_API_BASE", "https://api.donutsmp.net"), APIKey: apiKey,
@@ -71,12 +84,14 @@ func run(logger *slog.Logger) error {
 	})
 	history := state.NewFile(env("DN_HISTORY_FILE", "data/history.json.gz"), 31*24*time.Hour, 100_000)
 	application, err := service.New(service.Config{
-		Address: address, ClientToken: clientToken, ListingPages: listingPages, CollectionPause: pause, FastInterval: fastInterval,
-		OpportunityLimit: 100, Thresholds: thresholds,
+		Address: address, ClientToken: clientToken, ObserverToken: observerToken, FabricToken: fabricToken,
+		DatabasePath: env("DN_DATABASE_FILE", "data/market.db"), AuctionFeeBPS: auctionFeeBPS, OrderFeeBPS: orderFeeBPS,
+		ListingPages: listingPages, CollectionPause: pause, FastInterval: fastInterval, OpportunityLimit: 100, Thresholds: thresholds,
 	}, upstream, history, logger)
 	if err != nil {
 		return err
 	}
+	defer application.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()

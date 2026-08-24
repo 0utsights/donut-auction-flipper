@@ -1,0 +1,39 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { SafeNavigator, type NavigationBot } from './safe-navigation.js'
+import type { MenuSchema } from './types.js'
+
+function fixture(): { bot: NavigationBot & { commands: string[]; clicks: number[] }; schemas: MenuSchema[]; slots: Array<{ name?: string; displayName?: string } | null> } {
+  const slots: Array<{ name?: string; displayName?: string } | null> = Array.from({ length: 54 }, () => null)
+  const bot = {
+    commands: [] as string[], clicks: [] as number[],
+    currentWindow: { title: 'Orders - Page 1/3', slots },
+    chat(command: string) { this.commands.push(command) },
+    async clickWindow(slot: number) { this.clicks.push(slot) }
+  }
+  slots[50] = { name: 'minecraft:arrow', displayName: 'Next Page' }
+  return { bot, slots, schemas: [{ id: 'fixture', title: /^Orders/, listingSlots: new Set([0, 1]), controls: new Map([[50, { kind: 'next_page', itemName: 'minecraft:arrow', label: /^Next Page$/i }]]) }] }
+}
+
+test('only the exact orders command is allowed', () => {
+  const { bot, schemas } = fixture(); const navigator = new SafeNavigator(bot, schemas)
+  navigator.sendCommand('/orders')
+  assert.deepEqual(bot.commands, ['/orders'])
+  assert.throws(() => navigator.sendCommand('/orders buy diamond'), /not allowlisted/)
+  assert.throws(() => navigator.sendCommand('/ah'), /not allowlisted/)
+})
+
+test('clicks only a verified non-transactional control', async () => {
+  const { bot, schemas, slots } = fixture(); const navigator = new SafeNavigator(bot, schemas)
+  await navigator.clickControl('next_page')
+  assert.deepEqual(bot.clicks, [50])
+  slots[50] = { name: 'minecraft:diamond', displayName: 'Buy Now' }
+  await assert.rejects(navigator.clickControl('next_page'), /navigation denied/)
+  assert.deepEqual(bot.clicks, [50])
+})
+
+test('unknown windows are capture-only', async () => {
+  const { bot } = fixture(); const navigator = new SafeNavigator(bot, [])
+  await assert.rejects(navigator.clickControl('next_page'), /unknown order screen/)
+  assert.deepEqual(bot.clicks, [])
+})

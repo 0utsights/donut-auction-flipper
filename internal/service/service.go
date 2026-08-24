@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,7 @@ import (
 
 	"donut-network/internal/donutapi"
 	"donut-network/internal/market"
+	"donut-network/internal/orders"
 	"donut-network/internal/state"
 )
 
@@ -37,6 +39,11 @@ type History interface {
 type Config struct {
 	Address          string
 	ClientToken      string
+	ObserverToken    string
+	FabricToken      string
+	DatabasePath     string
+	AuctionFeeBPS    int
+	OrderFeeBPS      int
 	ListingPages     int
 	CollectionPause  time.Duration
 	FastInterval     time.Duration
@@ -106,17 +113,26 @@ type Snapshot struct {
 }
 
 type Server struct {
-	cfg       Config
-	upstream  Upstream
-	history   History
-	logger    *slog.Logger
-	now       func() time.Time
-	current   atomic.Pointer[Snapshot]
-	engine    atomic.Pointer[market.Engine]
-	version   atomic.Uint64
-	cycleMu   sync.Mutex
-	publishMu sync.Mutex
-	stored    []market.Transaction
+	cfg          Config
+	upstream     Upstream
+	history      History
+	logger       *slog.Logger
+	now          func() time.Time
+	current      atomic.Pointer[Snapshot]
+	engine       atomic.Pointer[market.Engine]
+	version      atomic.Uint64
+	cycleMu      sync.Mutex
+	publishMu    sync.Mutex
+	stored       []market.Transaction
+	orders       *orders.System
+	adminAuth    credential
+	observerAuth credential
+	fabricAuth   credential
+}
+
+type credential struct {
+	enabled bool
+	digest  [32]byte
 }
 
 func New(cfg Config, upstream Upstream, history History, logger *slog.Logger) (*Server, error) {
@@ -156,10 +172,18 @@ func New(cfg Config, upstream Upstream, history History, logger *slog.Logger) (*
 	if logger == nil {
 		logger = slog.Default()
 	}
-	server := &Server{cfg: cfg, upstream: upstream, history: history, logger: logger, now: func() time.Time { return time.Now().UTC() }}
+	adminAuth, observerAuth, fabricAuth := newCredential(cfg.ClientToken), newCredential(cfg.ObserverToken), newCredential(cfg.FabricToken)
+	cfg.ClientToken, cfg.ObserverToken, cfg.FabricToken = "", "", ""
+	orderSystem, err := orders.NewSystem(orders.Config{DatabasePath: cfg.DatabasePath, AuctionFeeBPS: cfg.AuctionFeeBPS, OrderFeeBPS: cfg.OrderFeeBPS, CandidateLimit: cfg.OpportunityLimit})
+	if err != nil {
+		return nil, fmt.Errorf("open order system: %w", err)
+	}
+	server := &Server{cfg: cfg, upstream: upstream, history: history, logger: logger, now: func() time.Time { return time.Now().UTC() }, orders: orderSystem,
+		adminAuth: adminAuth, observerAuth: observerAuth, fabricAuth: fabricAuth}
 	if history != nil {
 		loaded, err := history.Load()
 		if err != nil {
+			_ = orderSystem.Close()
 			return nil, fmt.Errorf("load transaction history: %w", err)
 		}
 		server.stored = loaded
@@ -248,6 +272,9 @@ func (s *Server) CollectOnce(ctx context.Context) error {
 		ValuationCount: len(marketSnapshot.Valuations), FlipCount: len(flips), Message: message, API: s.upstream.Stats(),
 	}
 	s.engine.Store(engine)
+	if err := s.orders.Refresh(ctx, engine); err != nil {
+		s.logger.Warn("order candidates refresh failed", "error", err)
+	}
 	version := s.publishBroadSnapshot(Snapshot{GeneratedAt: now, Status: status, Thresholds: s.cfg.Thresholds,
 		Analysis: analysis, Valuations: topValuations(marketSnapshot.Valuations, 25), Flips: flips})
 	s.logger.Info("auction scan complete", "version", version, "transactions", len(transactions), "history", len(s.stored), "listings", len(listings), "valuations", len(marketSnapshot.Valuations), "flips", len(flips), "duration", now.Sub(started))
@@ -272,7 +299,36 @@ func (s *Server) fail(started time.Time, collectionErr error) error {
 
 func (s *Server) RunCollector(ctx context.Context) {
 	go s.runBroadCollector(ctx)
+	go s.runOrderMaintenance(ctx)
 	s.runFastCollector(ctx)
+}
+
+func (s *Server) runOrderMaintenance(ctx context.Context) {
+	if err := s.orders.Cleanup(ctx); err != nil {
+		s.logger.Warn("order maintenance cleanup", "error", err)
+	}
+	if path, err := s.orders.Backup(ctx); err != nil {
+		s.logger.Warn("order database backup", "error", err)
+	} else if path != "" {
+		s.logger.Info("order database backup complete", "path", path)
+	}
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.orders.Cleanup(ctx); err != nil {
+				s.logger.Warn("order maintenance cleanup", "error", err)
+			}
+			if path, err := s.orders.Backup(ctx); err != nil {
+				s.logger.Warn("order database backup", "error", err)
+			} else if path != "" {
+				s.logger.Info("order database backup complete", "path", path)
+			}
+		}
+	}
 }
 
 func (s *Server) runBroadCollector(ctx context.Context) {
@@ -326,6 +382,9 @@ func (s *Server) CollectFastOnce(ctx context.Context) error {
 	// evaluated. Never let a result from that retired model replace the new feed.
 	if s.engine.Load() != engine {
 		return nil
+	}
+	if err := s.orders.Refresh(ctx, engine); err != nil {
+		s.logger.Warn("fast order candidates refresh failed", "error", err)
 	}
 	status := Status{ValuationCount: len(marketSnapshot.Valuations), FlipCount: len(flips), API: s.upstream.Stats()}
 	version := s.publishFastSnapshot(Snapshot{GeneratedAt: now, Status: status, Thresholds: s.cfg.Thresholds,
@@ -393,14 +452,25 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/flips", s.authorize(s.flips))
 	mux.HandleFunc("GET /api/v1/debug", s.authorize(s.debugJSON))
 	mux.HandleFunc("GET /api/v1/debug/valuation", s.authorize(s.debugValuation))
+	mux.HandleFunc("POST /api/v1/observers/register", s.authorizeWith(s.observerAuth, s.observerRegister))
+	mux.HandleFunc("GET /api/v1/observers/tasks", s.authorizeWith(s.observerAuth, s.observerTasks))
+	mux.HandleFunc("POST /api/v1/observers/heartbeat", s.authorizeWith(s.observerAuth, s.observerHeartbeat))
+	mux.HandleFunc("POST /api/v1/observers/order-scans", s.authorizeWith(s.observerAuth, s.observerOrderScans))
+	mux.HandleFunc("POST /api/v1/observers/task-result", s.authorizeWith(s.observerAuth, s.observerTaskResult))
+	mux.HandleFunc("GET /api/v1/candidates", s.authorizeWith(s.fabricAuth, s.candidateFeed))
+	mux.HandleFunc("POST /api/v1/watches", s.authorizeWith(s.fabricAuth, s.addWatch))
+	mux.HandleFunc("DELETE /api/v1/watches/{id}", s.authorizeWith(s.fabricAuth, s.deleteWatch))
+	mux.HandleFunc("POST /api/v1/client/diagnostics", s.authorizeWith(s.fabricAuth, s.clientDiagnostics))
 	mux.HandleFunc("GET /order-auction-flipper", s.authorize(s.orderAuctionPage))
 	mux.HandleFunc("GET /", s.authorize(s.debugPage))
 	return securityHeaders(mux)
 }
 
 func (s *Server) HTTPServer() *http.Server {
-	return &http.Server{Addr: s.cfg.Address, Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+	return &http.Server{Addr: s.cfg.Address, Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 }
+
+func (s *Server) Close() error { return s.orders.Close() }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	snapshot := s.Snapshot()
@@ -454,18 +524,28 @@ func (s *Server) debugPage(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) orderAuctionPage(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) orderAuctionPage(w http.ResponseWriter, r *http.Request) {
+	debug, err := s.orders.Debug(r.Context())
+	if err != nil {
+		s.orderError(w, "load order debug", err)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := orderAuctionTemplate.Execute(w, s.Snapshot()); err != nil {
+	if err := orderAuctionTemplateV2.Execute(w, orderPageData{Auction: s.Snapshot(), Orders: debug}); err != nil {
 		s.logger.Warn("render order-auction page", "error", err)
 	}
 }
 
 func (s *Server) authorize(next http.HandlerFunc) http.HandlerFunc {
+	return s.authorizeWith(s.adminAuth, next)
+}
+
+func (s *Server) authorizeWith(auth credential, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.cfg.ClientToken != "" {
+		if auth.enabled {
 			provided := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if len(provided) != len(s.cfg.ClientToken) || subtle.ConstantTimeCompare([]byte(provided), []byte(s.cfg.ClientToken)) != 1 {
+			digest := sha256.Sum256([]byte(provided))
+			if subtle.ConstantTimeCompare(digest[:], auth.digest[:]) != 1 {
 				w.Header().Set("WWW-Authenticate", "Bearer")
 				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid client token"})
 				return
@@ -473,6 +553,13 @@ func (s *Server) authorize(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+func newCredential(token string) credential {
+	if token == "" {
+		return credential{}
+	}
+	return credential{enabled: true, digest: sha256.Sum256([]byte(token))}
 }
 
 func ValidateBind(address, token string) error {
@@ -487,6 +574,38 @@ func ValidateBind(address, token string) error {
 	}
 	if !local && token == "" {
 		return errors.New("DN_CLIENT_TOKEN is required when DN_ADDRESS is not loopback")
+	}
+	return nil
+}
+
+func ValidateScopedTokens(address, adminToken, observerToken, fabricToken string) error {
+	if observerToken != "" && !validToken(observerToken) {
+		return errors.New("DN_OBSERVER_TOKEN must be 16-512 printable ASCII characters without spaces")
+	}
+	if fabricToken != "" && !validToken(fabricToken) {
+		return errors.New("DN_FABRIC_TOKEN must be 16-512 printable ASCII characters without spaces")
+	}
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("invalid DN_ADDRESS: %w", err)
+	}
+	ip := net.ParseIP(host)
+	local := host == "localhost" || (ip != nil && ip.IsLoopback())
+	if !local && (observerToken == "" || fabricToken == "") {
+		return errors.New("DN_OBSERVER_TOKEN and DN_FABRIC_TOKEN are required when DN_ADDRESS is not loopback")
+	}
+	nonempty := []string{}
+	for _, token := range []string{adminToken, observerToken, fabricToken} {
+		if token != "" {
+			nonempty = append(nonempty, token)
+		}
+	}
+	for left := range nonempty {
+		for right := left + 1; right < len(nonempty); right++ {
+			if subtle.ConstantTimeCompare([]byte(nonempty[left]), []byte(nonempty[right])) == 1 {
+				return errors.New("administrator, observer, and Fabric tokens must be distinct")
+			}
+		}
 	}
 	return nil
 }
@@ -635,8 +754,6 @@ var debugTemplate = template.Must(template.New("debug").Funcs(template.FuncMap{
 	},
 }).Parse(debugHTML))
 
-var orderAuctionTemplate = template.Must(template.New("order-auction").Parse(orderAuctionHTML))
-
 const debugHTML = `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <meta http-equiv="refresh" content="1"><title>Donut auction debug</title>
@@ -653,29 +770,4 @@ const debugHTML = `<!doctype html>
 {{range .Flips}}<tr><td>{{.Quantity}}× {{.ItemName}}</td><td>{{money .Price}}</td><td>{{money .SingularUnitRef}} / {{money .QuantityUnitRef}} / <strong>{{money .UnitReference}}</strong></td><td>{{money .ReferenceValue}}</td><td>{{money .Profit}}</td><td>{{pct .MarginBPS}}</td><td>{{pct .ConfidenceBPS}}</td><td>{{.Volume24h}} near {{money .PriceBandLow}}–{{money .PriceBandHigh}} from {{.PriceSellers}} sellers / {{.MarketVolume24h}} all</td><td>{{.PricingBasis}}</td><td>seller <code>{{.SellerCommand}}</code><br>item <code>{{.ItemCommand}}</code></td></tr>{{else}}<tr><td colspan="10">No flips currently pass the configured safety thresholds.</td></tr>{{end}}</tbody></table>
 <h2>Highest-volume valuations</h2><table><thead><tr><th>Signature</th><th>Quick sell</th><th>Fair</th><th>Confidence</th><th>24h near target / all</th><th>Samples</th><th>Sell time</th><th>Risk flags</th></tr></thead><tbody>
 {{range .Valuations}}<tr><td><a href="/api/v1/debug/valuation?signature={{urlquery .Signature}}">{{.Signature}}</a></td><td>{{money .QuickSellValue}}</td><td>{{money .FairValue}}</td><td>{{pct .ConfidenceBPS}}</td><td>{{.Volume24h}} near {{money .PriceBandLow}}–{{money .PriceBandHigh}} from {{.PriceSellerCount}} sellers / {{.MarketVolume24h}} all</td><td>{{.SampleCount}}</td><td>{{.ExpectedSellMinutes}}m</td><td>{{range .RiskFlags}}{{.}} {{end}}</td></tr>{{else}}<tr><td colspan="8">No completed-sale model is ready yet.</td></tr>{{end}}</tbody></table>
-</body></html>`
-
-const orderAuctionHTML = `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<meta http-equiv="refresh" content="5"><title>Order-auction flipper</title>
-<style>body{font:14px monospace;max-width:1100px;margin:24px auto;padding:0 16px;color:#ddd;background:#111}h1,h2{color:#fff}table{border-collapse:collapse;width:100%;margin-bottom:24px}th,td{text-align:left;padding:7px;border-bottom:1px solid #333}code,a{color:#a5d6ff}.ready{color:#7ee787}.missing{color:#ffb86c}.muted{color:#999}.box{border:1px solid #333;padding:12px;margin:16px 0}</style>
-</head><body><nav><a href="/">Auction API debug</a> · <a href="/order-auction-flipper">Order-auction flipper</a></nav>
-<h1>Order-auction flipper</h1>
-<p>Find executable spreads between Donut orders and auctions while respecting limited market slots.</p>
-<div class="box"><strong>Auction source:</strong> <span class="ready">connected</span> · snapshot {{.Version}} · {{.Status.ValuationCount}} valuations<br>
-<strong>Order source:</strong> <span class="missing">not connected</span> · the official Donut API does not expose orders<br>
-<strong>Result:</strong> no opportunities are published until real order rows and fill evidence are available.</div>
-<h2>Qualification rules</h2>
-<table><tbody>
-<tr><th>Batch profit</th><td>At least $100,000 per intended auction stack/listing. This rejects a 64-sand spread of $16,496 even if its percentage margin is large.</td></tr>
-<tr><th>Margin</th><td>At least 10% after using the conservative auction target. Absolute profit and percentage margin must both pass.</td></tr>
-<tr><th>Auction demand</th><td>At least 2 completed near-target batches in 24h from at least 2 sellers.</td></tr>
-<tr><th>Order liquidity</th><td>Enough immediately available quantity for AH→order, or measured fulfillment velocity for order→AH.</td></tr>
-<tr><th>Slot efficiency</th><td>Rank by conservative daily profit, then profit per listing batch, then executable volume. Base planning assumes 20 auction/order slots; ranks may provide more.</td></tr>
-</tbody></table>
-<h2>Opportunity board</h2>
-<table><thead><tr><th>Direction</th><th>Item</th><th>Batch</th><th>Buy</th><th>Sell</th><th>Batch profit</th><th>Margin</th><th>24h executable volume</th><th>Daily profit</th><th>Evidence</th></tr></thead>
-<tbody><tr><td colspan="10" class="muted">Waiting for real order snapshots. No simulated rows.</td></tr></tbody></table>
-<h2>Required order capture</h2>
-<p>A thin Fabric reader should inspect only the <code>/orders</code> inventory menu and send canonical item ID, unit reward, remaining quantity, owner/order identity, expiry, page, and observation time to this local backend. Repeated snapshots let the backend measure fulfillment velocity. It does not need auction parsing, purchase automation, slot clicking, or a third-party market service.</p>
 </body></html>`

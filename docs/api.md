@@ -1,69 +1,116 @@
 # Backend HTTP API
 
-## `GET /`
+All JSON endpoints reject unknown fields and oversized bodies. Collector, Fabric, and administrator credentials have separate scopes and are stored as one-way hashes in the running backend. Use `Authorization: Bearer <token>`.
 
-Plain one-second auto-refreshing operational/debug page. It shows fast-lane publish time and duration, broad-scan state and counts, upstream request statistics, current thresholds, the rejection funnel, highest-volume valuations, and qualified flips. No fake fallback rows are generated.
+## Operational pages
 
-## `GET /healthz`
+- `GET /` — official auction API health, valuation evidence, and auction-only flips.
+- `GET /order-auction-flipper` — observer health, scan coverage, disagreements, order evidence, candidate economics, rejection reasons, and the reference `$10M` portfolio.
+- `GET /healthz` — `200` after a successful official-API scan, otherwise `503`.
 
-Returns `200` after at least one successful scan, including while a later scan is collecting. Returns `503` while starting or when the first scan fails.
+## Existing auction feed
 
-## `GET /order-auction-flipper`
+`GET /api/v1/flips` is the stable auction-only Fabric feed. It uses the Fabric credential and supports `ETag`/`If-None-Match`. Quantity, pricing, liquidity, and navigation semantics remain documented by the immutable `auction-only-v1.0.0` release.
 
-Barebones order-to-auction research page. It reports the live auction source, the intentionally missing order source, proposed absolute-profit/margin/liquidity/slot-efficiency gates, and no opportunity rows until real order snapshots are connected.
+`GET /api/v1/debug` and `GET /api/v1/debug/valuation?signature=...` expose the corresponding machine-readable audit state and require the administrator credential.
 
-## `GET /api/v1/flips`
+## Collector control API
 
-The Fabric feed. If `DN_CLIENT_TOKEN` is configured, send `Authorization: Bearer <token>`.
+These endpoints require the observer credential. They can assign observation work but cannot describe a transaction.
+
+### `POST /api/v1/observers/register`
+
+Registers one stable observer and its parser/protocol capabilities.
 
 ```json
 {
-  "version": 12,
-  "generated_at": "2026-08-22T22:00:00Z",
-  "status": "ready",
-  "flips": [{
-    "key": "donut:...",
+  "observer_id": "orders-east-1",
+  "parser_version": "mineflayer-orders-1.0.0",
+  "proxy_label": "oracle-us-east",
+  "capabilities": ["capture", "pagination", "refresh"]
+}
+```
+
+### `GET /api/v1/observers/tasks?observer_id=orders-east-1&wait_ms=25000`
+
+Long-polls for one renewable task lease. `wait_ms` is bounded by the server. A response may contain no task. Valid task types are `discovery`, `focused_watch`, `schema_probe`, and `verification`; payloads are limited to observation targets, freshness, cadence, parser schema, and deadline.
+
+### `POST /api/v1/observers/heartbeat`
+
+Reports task/page latency, reconnect count, and health. A heartbeat carrying the current task ID and lease token renews a valid lease. Success returns `204`.
+
+### `POST /api/v1/observers/order-scans`
+
+Submits one menu snapshot. Important fields are:
+
+```json
+{
+  "observer_id": "orders-east-1",
+  "task_id": "...",
+  "lease_token": "...",
+  "session_id": "login-session-id",
+  "schema_version": "orders-v1",
+  "page": 1,
+  "complete": true,
+  "observed_at": "2026-08-23T20:00:00Z",
+  "content_hash": "64-character-lowercase-sha256",
+  "orders": [{
+    "order_key": "stable-menu-identity",
+    "signature": "minecraft:diamond|components:...",
     "item_id": "minecraft:diamond",
-    "item_name": "Diamond",
-    "quantity": 1,
-    "seller": "player",
-    "price": 500000,
-    "reference_value": 900000,
-    "unit_reference_value": 900000,
-    "singular_unit_reference": 900000,
-    "quantity_unit_reference": 900000,
-    "profit": 400000,
-    "margin_bps": 8000,
-    "confidence_bps": 7200,
-    "volume_24h": 4,
-    "market_volume_24h": 12,
-    "price_seller_count": 3,
-    "price_band_low": 810000,
-    "price_band_high": 990000,
-    "singular_volume_24h": 4,
-    "quantity_volume_24h": 4,
-    "search_command": "/ah player",
-    "seller_command": "/ah player",
-    "item_search_command": "/ah diamond",
-    "model_version": "robust-v4-price-volume-quantity",
-    "pricing_basis": "exact-quantity",
-    "expected_sell_minutes": 8
+    "display_name": "Diamond",
+    "quantity": 64,
+    "max_stack_size": 64,
+    "unit_reward": 5000,
+    "requested_quantity": 640,
+    "remaining_quantity": 512,
+    "owner": "buyer_name",
+    "expires_at": "2026-08-24T20:00:00Z",
+    "price_position": 1,
+    "slot": 10,
+    "raw_field_hash": "64-character-lowercase-sha256",
+    "signature_complete": false
   }]
 }
 ```
 
-Responses include an `ETag`. Send it back as `If-None-Match`; unchanged feeds return `304` with no JSON body. At most 100 distinct exact-signature opportunities are published.
+Submissions are idempotent by observer/session/page/content hash. A missing row is not treated as a fill. Only a later observation of the same order with reduced remaining quantity creates fill evidence.
 
-`unit_reference_value` is always a per-item value. For a stacked listing, `reference_value` is that conservative unit value multiplied by the unchanged listing quantity. The unit value is the lower of a quantity-one completed-sale model and an exact-quantity completed-sale model; stacks without both evidence cohorts are rejected.
+### `POST /api/v1/observers/task-result`
 
-`volume_24h` is qualifying liquidity inside `price_band_low`–`price_band_high`, the ±10% band around the proposed per-item resale value. `price_seller_count` is the number of distinct sellers supplying that evidence. `market_volume_24h` is the broader item-wide count for diagnosis only and cannot qualify an alert.
+Completes or rejects the current lease and may attach a sanitized schema diagnostic. Unknown layouts must return a capture/hold result rather than navigate.
 
-`search_command` is the preferred seller route and remains for client compatibility. `seller_command` opens the seller-filtered auction view; `item_search_command` uses the canonical Minecraft identifier path with underscores. The upstream API does not return a server-addressable listing ID, so `auction_id` is a backend fingerprint and must not be sent as a command.
+## Fabric API
 
-## `GET /api/v1/debug`
+These endpoints require the Fabric installation credential.
 
-Machine-readable version of the debug snapshot: status, thresholds, API request/error/retry counts, scan counts, history/valuation counts, and flips.
+### `GET /api/v1/candidates`
 
-## `GET /api/v1/debug/valuation?signature=...`
+Returns a bounded, ETag-enabled candidate pool. Every record includes direction, exact item signature and quantity, conservative buy/sell economics, fees, completion probability, cycle time, executable volume, order/auction slot use, inventory-slot efficiency, evidence tier, state (`READY`, `HOLD`, `STALE`, or `RESEARCH`), rejection code, and safe manual commands.
 
-Explains one exact/base signature from the last completed immutable engine. The response includes status/reason, the robust valuation, up to 100 recent comparable sales, up to 100 active listings, and the raw recent sample count. The same client bearer token applies when configured.
+The backend does not personalize this feed. Balance, cash reserve, available slots, and final allocation remain in the Fabric installation. Position inference is disabled until real message fixtures are verified.
+
+### `POST /api/v1/watches`
+
+Requests a focused observation for a candidate signature. This never requests a trade.
+
+```json
+{"signature":"minecraft:diamond|..."}
+```
+
+### `DELETE /api/v1/watches/{id}`
+
+Deletes one watch by ID. Shared watches for the same signature keep the focused task active.
+
+### `POST /api/v1/client/diagnostics`
+
+Accepts a small, rate-limited batch of allowlisted diagnostic events. The backend drops unknown fields and values that resemble secrets or prohibited personal data. Raw chat, usernames, server addresses, inventory contents, NBT, credentials, and upstream API responses are forbidden. Diagnostics expire after 14 days.
+
+## Authentication and deployment
+
+- `DN_CLIENT_TOKEN` protects administrator/debug access.
+- `DN_OBSERVER_TOKEN` is only for collectors.
+- `DN_FABRIC_TOKEN` is only for distributed Fabric installations.
+- `DONUT_API_KEY` remains backend-only.
+
+Loopback HTTP is intended for development. Production clients use authenticated HTTPS through the included Caddy/Compose topology.

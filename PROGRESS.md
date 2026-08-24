@@ -1,58 +1,50 @@
 # Progress
 
-Last updated: 2026-08-23
+Last updated: 2026-08-24
 
-## Current system
+## Implemented on `codex/auction-orders`
 
-- One rate-limited/retrying official API client runs a sub-second newest-page detection lane alongside a background ten-transaction-page/220-active-page valuation lane.
-- `robust-v4-price-volume-quantity` ranks opportunities using the lower of quantity-one and exact-resale-quantity per-item valuations, and qualifies liquidity only from 24-hour sales within ±10% of the intended resale price.
-- Recent transactions persist in a deduplicated, versioned, compressed, safely rotated, 31-day/100,000-row local archive.
-- One HTTP process exposes health, an ETag-enabled compact flip feed, JSON debug state, and a zero-dependency live debug page.
-- Fabric 1.0.0 polls only that feed, caps/deduplicates chat alerts, validates commands, opens manual auction searches, and provides a plain `N`/`/dn` screen without blur.
-- The upstream API key remains backend-only. Public backend binds require a separate client token.
-- The complete parser/distributed implementation is preserved at tag `legacy-full-system-v0.4.0` and branch `archive/full-system-v0.4.0`.
-- Auction-only v1.0.0 is frozen at tag/release `auction-only-v1.0.0` and branch `codex/auction-only`; active auction-plus-orders work lives on `codex/auction-orders`.
-- `/order-auction-flipper` is an intentionally empty, no-fake-data foundation until an order-only Fabric menu reader is designed from live menu evidence.
+- The auction-only release remains frozen at `auction-only-v1.0.0` / `codex/auction-only`.
+- The Go backend still collects auctions from the official API and now persists observer registration, leased tasks, idempotent order snapshots, fill evidence, watches, diagnostics, and backups in SQLite WAL.
+- Order evidence graduates through captured, research, actionable, and conflict/hold states. Disappeared orders are ambiguous; only observed quantity reductions create fills.
+- Combined candidates model exact batch quantity, fees, capital, order/auction slots, queue position, completion probability, cycle time, conservative volume, and risk-adjusted profit/day. There is no fixed `$100k` threshold.
+- The `/order-auction-flipper` page exposes real observer health, freshness, scan coverage, disagreements, evidence history, candidates, rejection reasons, and a backend-only `$10M` reference portfolio. It generates no fake market rows.
+- The Mineflayer collector manager launches an isolated child per account, validates dedicated proxy egress, uses separate Microsoft token caches, registers with the backend, long-polls leased tasks, reconnects independently, and submits order snapshots.
+- Mineflayer's interaction adapter permits only `/orders` and controls explicitly verified by a captured schema. Empty/unknown schemas are capture-only; all economic actions and inventory transfers are denied.
+- The distinct `2.0.0-alpha.1` Fabric client polls the combined candidate feed, parses or lets the player override balance, applies a dynamic reserve, allocates within 20 order and 18 auction slots, starts focused watches, displays candidate explanations, and provides validated manual navigation. No purchase is automatic.
+- Fabric diagnostics are allowlisted, batched, rate-limited, retained for 14 days, enabled with a visible opt-out, and exclude personal/secret market context.
+- Compose runs backend, collector manager, persistent data, and Caddy HTTPS termination. Loopback HTTP remains the development path.
 
-## Verification
+## Verified locally
 
-- `go test ./...` passes.
-- `go vet ./...` passes.
-- Fabric JUnit/build passes with JDK 21, Gradle 9.6.1, Loader 0.19.2, Minecraft 1.21.11, and Fabric API 0.141.6.
-- API handler tests cover auth, ETags/304, short-page completion, failure state, safe public binding, and command sanitization.
-- History tests cover round-trip compression, retention, deduplication, ordering, and caps.
-- Mod tests cover a valid feed, injected-command rejection, and feed-size bounds.
-- Final live authenticated fast-lane soak: 99 snapshot versions across a complete broad scan published 741ms apart on average and 984ms maximum; upstream-to-feed duration was 733ms maximum, with zero upstream errors, retries, or rate-limit responses.
-- Concurrent broad scan: 1,000 transaction rows and 9,680 newest listings completed in 87.8 seconds without blocking fast publication. At that moment the retained archive contained 77,216 unique sales and the model contained 1,099 valuation families; market-dependent flip counts change continuously.
-- Final live Lava Chicken regression: after the latest sales arrived, fair value moved to $250,000 and the conservative target to $205,000. Only 4 of 12 daily trades from 2 sellers fall in its $184,500-$225,500 target band; high volatility/falling-market evidence lowers confidence to 15.25%, so it remains rejected rather than inheriting all item-wide volume.
-- Docker Compose configuration validates. The local Docker daemon is not running, so the final image could not be executed here.
-- Windows race instrumentation requires CGO and is unavailable locally; Linux CI runs `go test -race ./...`.
+- `go test ./...` and `go vet ./...` pass. Tests cover authenticated leases, idempotent scans, capture-only exclusion, fill/disappearance semantics, current-price freshness, shared-watch lifecycle, exact-quantity valuation, candidate executable volume, backups, scoped auth, API handlers, and diagnostic redaction.
+- Node TypeScript build and six parser/navigation tests pass; `npm audit --omit=dev` reports zero vulnerabilities.
+- Fabric JUnit/build passes on Minecraft 1.21.11, Java 21, Loader 0.19.2, Fabric API 0.141.6, Loom 1.17.19, and Gradle 9.6.1.
+- Candidate-frontier benchmark: approximately 118µs/op for 100 evidence rows on the local i5-11600K. Existing market benchmarks remain near or under roughly 2ms/op for their checked-in workloads.
+- `docker compose config --quiet` validates with placeholder environment credentials. The Docker Desktop Linux daemon is not running, so containers could not be executed locally.
+- Windows `go test -race` is unavailable because the local Go race build requires CGO. The normal suite is pure Go; race instrumentation remains a Linux CI/deployment-host gate.
 
 ## Senior review passes
 
-1. Fixed five high-value correctness/compatibility issues: Loader 0.19.2 metadata, the double-blur GUI crash, zero-as-unlimited budget semantics, first-scan health reporting, and removal of fake/legacy runtime paths.
-2. Fixed stale conditional-client state by including collection/error state in ETags, added corrupt-primary history recovery from backup, protected debug routes with downstream auth when configured, made command truncation Unicode-safe, and added regression tests.
-3. Added the missing decision/rejection funnel and per-signature evidence endpoint, removed unused simulator/client snapshot types, validated and bounded downstream tokens, returned real 404s for unknown paths, and re-ran tests/benchmarks.
-4. Live evidence disproved the assumed 220-page full-book boundary: valid rows exist past page 2,000. The system now truthfully defines 220 pages as a recent-listing latency window and uses accumulating completed sales for broad-market value.
-5. Rejected stack false positives by making quantity-one evidence mandatory, requiring an exact-quantity completed-sale cohort, conservatively combining both models, and exposing unit/total references in debug output.
-6. The follow-up quantity review added invariant tests for total-to-unit normalization, exact-quantity active competition, missing-cohort rejection, dual-reference audit fields, and a dedicated ranking benchmark. No further quantity-path issue in the current scope justified additional complexity.
-7. Replaced ambiguous display-name searches with seller-first navigation plus canonical underscore item-ID fallbacks, added independently validated dual chat actions, and documented why synthetic API fingerprints cannot directly open a listing.
-8. Split newest-listing detection from broad collection, seeded the engine from retained history at startup, reduced local mod polling to 250ms, preserved last-good feeds on fast failures, and exposed measured fast-lane latency in debug output.
-9. The fresh concurrency/operations review prevented a finishing broad scan from replacing a newer fast feed, added regression coverage for ordering and model isolation, moved the 9,680-row active-book merge off the live fast engine after observing a 1.36-second contention spike, reduced debug-page refresh from five seconds to one, and verified shared-rate-limit behavior live.
-10. Reproduced the Lava Chicken split-price market, separated target-price volume from broad item volume, made confidence/volume/sell-time gates use only the ±10% target cohort, recognized two-seller active competition, and exposed both volume measures in debug output.
-11. Released the stable auction-only system with reproducible JAR/backend assets, split future order development onto its own branch, confirmed the official API lacks orders, and added a source-status/ranking-rules page that cannot publish fabricated order opportunities.
+1. Added unguessable renewable lease tokens, ownership/expiry validation on heartbeats/scans/results, and tests that reject a forged lease.
+2. Prevented unknown or incomplete schemas from entering price/fill evidence, required verified canonical modifier signatures and queue position, and reused the auction engine's singular-plus-exact-batch valuation path.
+3. Replaced invented one-batch volume with strict two-sided executable limits, separated current order capacity from historical fill velocity, and stopped retained historical high rewards/queue ranks from leaking into current candidates.
+4. Deduplicated shared focused-watch tasks, prevented one client watch deletion from stopping another, added current scan/fill/watch/reference-portfolio debug surfaces, scoped credentials, diagnostic rate limiting, and bounded retention/backups.
+5. Hardened collector secret permissions, focused-watch refresh cadence, reconnect backoff reset, exact command/control denial, and assigned the combined Fabric artifact a distinct `2.0.0-alpha.1` identity.
 
-## Intentional omissions
+A final fresh pass found no further code-only improvement that outweighed the risk of inventing behavior without real Donut order-menu and transaction-message fixtures.
 
-- No screen parsing in the distributed mod.
-- No automatic purchase, slot click, auction refresh, or anti-cheat interaction.
-- No fake/simulated market records in normal or debug views.
-- No database, WebSocket, worker, sharding, telemetry, Node dashboard, or hosted site.
+## Shadow-mode limitations
 
-## Highest-value future work
+- No real order-menu schema is enabled. `collector/order-schemas.json` is intentionally empty, so collectors capture unknown layouts and stop instead of clicking.
+- Microsoft login reuse, each proxy type, signed `/orders`, real item components/lore, pagination, refresh cadence, scoreboard messages, and reconnect behavior cannot be certified without operator accounts and sanitized live fixtures.
+- Therefore combined candidates should be treated as research-only until repeated real scans and fill-rate calibration graduate an item to actionable evidence.
+- Local position inference is fail-closed until real success/failure message fixtures exist; used slots remain manually adjustable and no transaction or complete inventory data is uploaded.
 
-1. Run long enough to accumulate representative live completed-sale history and measure prediction error against later sales.
-2. Add replay/backtesting reports before tuning model thresholds.
-3. Add signed, expiring, UUID-bound client sessions before distributing access beyond trusted users.
-4. Validate chat click/search/seller matching in a live sanitized DonutSMP session.
-5. Revisit the archived parser only after the API-only path is measured and a real latency gap justifies the maintenance cost.
+## Next rollout gates
+
+1. Copy the collector account example to a permission-restricted host secret and bootstrap each Microsoft account.
+2. Run one observer through each configured proxy and collect unknown-menu diagnostics without navigation.
+3. Review and version a real order-menu fixture, then enable only the proven non-transactional controls.
+4. Run multiple observers in shadow mode and measure coverage, disagreement, attainable refresh cadence, and prediction error.
+5. Enable Fabric `READY` notifications only after fill velocity, exact-quantity exits, and stability calibration pass.

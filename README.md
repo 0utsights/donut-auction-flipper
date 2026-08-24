@@ -1,93 +1,119 @@
-# Donut Auction Flips
+# Donut Auction + Order Flipper
 
-An API-first DonutSMP auction flipper with two moving parts:
+A functionality-first market system with three permanent roles:
 
-- a single Go backend that reads the official API, retains bounded sale history, values items, and ranks live listings;
-- a thin Fabric 1.21.11 mod that polls the ranked feed, sends clickable chat alerts, and opens a manual `/ah <item>` search.
+- **Mineflayer observers** read DonutSMP order menus and submit evidence. They cannot trade.
+- **Go backend** reads the official auction API, coordinates observers, retains SQLite evidence, and scores order/auction routes.
+- **Fabric client** receives scored candidates, keeps each player's balance and slot usage local, allocates 20 order and 18 auction slots, and provides manual navigation.
 
-There is no screen parser, worker network, sharding, WebSocket, PostgreSQL, Node dashboard, telemetry, or automatic purchasing in the normal path. The older full system and parser remain preserved at Git tag `legacy-full-system-v0.4.0` and branch `archive/full-system-v0.4.0`.
+The stable API auction-only release remains at branch `codex/auction-only` and tag `auction-only-v1.0.0`. This branch, `codex/auction-orders`, is the research/production path for combined order and auction evidence. No fake rows are generated.
 
-The stable auction-only product is released as `auction-only-v1.0.0` on branch `codex/auction-only`. Auction-plus-orders research continues separately on `codex/auction-orders`; its order page never emits results until a real in-game order source is connected.
+## Local backend
 
-## Run locally
-
-Requirements: Go 1.26. The API key stays in the backend process and must never be placed in the mod config.
-
-On Windows, use the local launcher. The first run asks for the API key and stores it using Windows user-scoped encryption; later runs need no setup. Keep its terminal open while playing.
-
-```powershell
-.\scripts\start-local.ps1
-```
-
-Or start the backend directly with an environment variable:
+Requirements: Go 1.26. The Donut API key stays in this process.
 
 ```powershell
 $env:DONUT_API_KEY='your-key'
+$env:DN_CLIENT_TOKEN='long-admin-token'
+$env:DN_OBSERVER_TOKEN='different-long-observer-token'
+$env:DN_FABRIC_TOKEN='different-long-fabric-token'
 go run ./cmd/server
 ```
 
-Open [http://127.0.0.1:8080](http://127.0.0.1:8080) for the live debug page. It starts with no fake data, reports collection progress/errors, and shows every flip that passes the thresholds. Health is at `/healthz`; the compact mod feed is `/api/v1/flips`.
+Open:
 
-On the auction-orders development branch, [http://127.0.0.1:8080/order-auction-flipper](http://127.0.0.1:8080/order-auction-flipper) shows source readiness and qualification rules. It remains empty until real `/orders` menu observations exist.
+- [http://127.0.0.1:8080/](http://127.0.0.1:8080/) — official auction API debug
+- [http://127.0.0.1:8080/order-auction-flipper](http://127.0.0.1:8080/order-auction-flipper) — observers, evidence, watches, and combined candidates
+- [http://127.0.0.1:8080/healthz](http://127.0.0.1:8080/healthz) — health
 
-The backend has two API lanes. The fast lane refreshes the newest 44 listings about every 0.5–0.8 seconds under load and publishes immediately. A background lane uses the remaining rate-limit budget to refresh completed-sale history and the newest 9,680 rows (220 × 44) for broad valuation and active-market depth. Completed-sale history is retained in `data/history.json.gz`, capped at 100,000 rows and 31 days.
+Auction transactions remain in `data/history.json.gz`. Orders, fills, observer health, watches, diagnostics, and optimizer evidence use SQLite WAL at `data/market.db`, with daily seven-day backups.
 
-Stacked listings are quantity-safe: the backend requires both quantity-one sales and completed sales at the exact listed quantity, uses the lower per-item quick-sell estimate, then multiplies by the unchanged resale quantity. It will not recommend a stack based on profit that only exists after splitting it.
+## Mineflayer observers
 
-Liquidity is price-local: the alert gate, confidence, and sell-time estimate count only completed sales from the last 24 hours within ±10% of the proposed resale price, and one seller cannot supply all qualifying volume. The debug page shows near-target volume and distinct sellers beside total item volume so split-price markets are visible instead of being blended into a misleading sales count.
-
-## Install the mod
-
-Use Minecraft 1.21.11, Fabric Loader 0.19.2 or newer, Fabric API, and Java 21. Copy `outputs/donut-auction-flips-1.0.0-loader-0.19.2.jar` into the Prism instance's `mods` directory.
-
-The first launch creates `config/donut-network.properties`:
-
-```properties
-backend_url=http://127.0.0.1:8080
-client_token=
-poll_millis=250
-chat_alerts=true
-```
-
-Press `N` or run `/dn` for the barebones control screen. Alerts provide a primary seller search and a canonical item-ID fallback such as `/ah redstone_block`; screen rows use the seller search. Confirm the item and price yourself—the public API does not expose a command-addressable listing ID, and the mod never clicks or buys an item.
-
-The former double-blur crash is removed: the new screen draws an opaque background and never calls Minecraft's blur renderer.
-
-## Optional client authentication
-
-Local loopback use can omit a token. For any non-loopback backend bind, both variables are required:
+Mineflayer is pinned to Minecraft 1.21.11. It collects **orders only**; the official API remains authoritative for auctions.
 
 ```powershell
-$env:DN_ADDRESS='0.0.0.0:8080'
-$env:DN_CLIENT_TOKEN='replace-with-a-long-random-value'
+cd collector
+Copy-Item accounts.example.json accounts.json
+Copy-Item order-schemas.example.json order-schemas.json
+npm ci
+npm run build
+npm run auth -- --account observer-1
+npm start
 ```
 
-Put that same 16-512 character printable token in the mod's `client_token`. It is our backend access token, not the Donut API key.
+Configure one entry per Microsoft account in `collector/accounts.json`. Every account has an isolated token cache and authenticated SOCKS5 or HTTP CONNECT proxy. The configured egress IP must match before the account joins. On Linux, use `chmod 600 collector/accounts.json`.
+
+The checked-in schema list is deliberately empty. On the first run, the collector sends `/orders`, captures a sanitized local fixture under `collector/captures/`, reports `schema_hold`, and performs no clicks. Add a verified title/slot/control schema only after reviewing that fixture. The generic parser marks modifier signatures incomplete, so its rows remain `RESEARCH`; a versioned real-menu adapter must prove canonical modifier equivalence before `READY` is possible. Even with a schema, the only permitted controls are pagination, refresh, filter, and search. Purchase, fulfillment, creation, confirmation, cancellation, claim, listing, and inventory-transfer operations are absent from the collector interface.
+
+One manager process launches and restarts every configured observer. The backend leases discovery, focused-watch, verification, and schema-probe tasks over HTTP long polling.
+
+## Fabric client
+
+Requirements: Minecraft 1.21.11, Java 21, Fabric Loader 0.19.2+, and Fabric API. Build with Gradle 9.5+:
+
+```powershell
+gradle -p minecraft/client-mod clean test build
+```
+
+Copy the remapped JAR from `minecraft/client-mod/build/libs/` to the instance's `mods` directory. A verified shadow build is also checked in at `outputs/donut-market-flips-2.0.0-alpha.1.jar`. Press `N` or run `/dn`.
+
+The generated `config/donut-network.properties` contains:
+
+```properties
+backend_url=https://your-backend.example
+client_token=your-fabric-token
+poll_millis=250
+chat_alerts=true
+balance=10000000
+used_order_slots=0
+used_auction_slots=0
+diagnostics=true
+```
+
+Balance, used slots, reserve, and the final portfolio stay local. Balance messages containing a clear `balance`, `money`, or `cash` label update the local value; the screen also provides a manual adjustment. Position/outcome inference remains disabled in shadow mode until sanitized real transaction-message fixtures exist—the mod does not guess that opening a menu means a trade occurred. The mod applies a dynamic 15–35% reserve and selects the highest risk-adjusted daily-profit batches that fit the player's cash, 20 order slots, 18 auction slots, executable volume, and exposure caps.
+
+Selecting a combined candidate starts a backend focused watch and opens only `/orders` or a validated canonical `/ah <item_id>` search. Every economic action remains manual.
+
+Sanitized diagnostics are enabled by default and can be disabled in `/dn`. They contain only documented state, version, latency, route, decision, and error-code fields—never chat, usernames, credentials, server URLs, NBT, or inventories.
+
+## Remote deployment
+
+Copy `collector/accounts.container.example.json` to `collector/accounts.json`, configure `collector/order-schemas.json`, set the required environment variables, then run:
+
+```powershell
+docker compose up -d --build
+```
+
+The composition runs the backend, multi-account collector, and Caddy HTTPS termination together. Set `DN_DOMAIN` to the public hostname and point Fabric clients at `https://<DN_DOMAIN>`. Do not expose the backend container directly.
 
 ## Configuration
 
 | Variable | Default | Purpose |
 |---|---:|---|
-| `DONUT_API_KEY` | required | Official API bearer key; backend only |
-| `DONUT_API_BASE` | `https://api.donutsmp.net` | Official API base URL |
-| `DN_ADDRESS` | `127.0.0.1:8080` | HTTP/debug bind |
-| `DN_CLIENT_TOKEN` | empty on loopback | Protects the mod feed |
-| `DN_LISTING_PAGES` | `220` | Newest 44-row auction pages per scan (max 220) |
-| `DN_FAST_INTERVAL` | `250ms` | Pause between newest-page requests; effective cadence also respects the shared API limiter |
-| `DN_COLLECTION_PAUSE` | `5s` | Pause after a completed scan |
-| `DN_HISTORY_FILE` | `data/history.json.gz` | Bounded compressed sale history |
-| `DN_MIN_PROFIT` | `100000` | Minimum expected profit |
-| `DN_MIN_MARGIN_BPS` | `1000` | Minimum margin, 1000 = 10% |
-| `DN_MIN_CONFIDENCE_BPS` | `5000` | Minimum model confidence, 5000 = 50% |
-| `DN_MIN_VOLUME_24H` | `2` | Minimum completed sales in 24 hours |
-| `DN_MAX_PURCHASE_PRICE` | `0` | Optional budget cap; 0 means unlimited |
+| `DONUT_API_KEY` | required | Official auction API; backend only |
+| `DN_CLIENT_TOKEN` | empty on loopback | Administrative/debug credential |
+| `DN_OBSERVER_TOKEN` | empty on loopback; required remotely | Mineflayer task/observation credential |
+| `DN_FABRIC_TOKEN` | empty on loopback; required remotely | Candidate/watch/diagnostic credential |
+| `DN_DATABASE_FILE` | `data/market.db` | SQLite order/evidence state |
+| `DN_HISTORY_FILE` | `data/history.json.gz` | Bounded auction-sale history |
+| `DN_AUCTION_FEE_BPS` | `250` | Auction exit fee assumption |
+| `DN_ORDER_FEE_BPS` | `0` | Order exit fee assumption |
+| `DN_LISTING_PAGES` | `220` | Broad recent-auction pages |
+| `DN_FAST_INTERVAL` | `250ms` | Newest-page API lane interval |
 
-## Build and test
+All three tokens must be distinct when configured. The older `DN_MIN_*` settings apply only to the standalone API-auction feed. Combined candidates have no fixed dollar-profit floor; Fabric selects from the resource-constrained portfolio frontier.
+
+## Verification
 
 ```powershell
 go test ./...
 go vet ./...
-gradle -p minecraft/client-mod clean test build
+cd collector
+npm ci
+npm test
+npm audit --omit=dev
+gradle -p ../minecraft/client-mod clean test build
 ```
 
-The Fabric build requires Gradle 9.5+ because the selected Fabric Loom version targets that plugin API. See [docs/architecture.md](docs/architecture.md), [docs/api.md](docs/api.md), and [DECISIONS.md](DECISIONS.md).
+See [architecture](docs/architecture.md), [API](docs/api.md), and [decisions](DECISIONS.md).

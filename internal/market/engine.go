@@ -411,6 +411,34 @@ func (e *Engine) Valuation(signature string) (Valuation, bool) {
 	return v, ok
 }
 
+// QuantityValuation returns the same singular-ceiling plus exact-batch model
+// used by auction opportunities. Combined order/auction candidates must use
+// this instead of the generic per-item snapshot valuation.
+func (e *Engine) QuantityValuation(signature string, quantity int) (Valuation, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if quantity < 1 {
+		quantity = 1
+	}
+	base := signature
+	if transactions := e.transactions[signature]; len(transactions) > 0 {
+		base = transactions[0].Signature.Base
+	} else if listings := e.activeBySignature[signature]; len(listings) > 0 {
+		for _, listing := range listings {
+			base = listing.Signature.Base
+			break
+		}
+	}
+	cache := make(map[quantityValuationKey]quantityValuationResult)
+	if valuation, ok := e.quantityPairValuationLocked(signature, base, quantity, false, cache); ok {
+		return valuation, true
+	}
+	if base != signature {
+		return e.quantityPairValuationLocked(base, base, quantity, true, cache)
+	}
+	return Valuation{}, false
+}
+
 // Opportunities ranks active listings against conservative quick-sell values.
 // It deliberately uses completed-sale confidence and volume gates; active asks
 // alone can never create a client alert.
