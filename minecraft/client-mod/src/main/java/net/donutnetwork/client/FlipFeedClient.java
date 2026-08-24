@@ -35,12 +35,12 @@ final class FlipFeedClient implements AutoCloseable {
     private static final int MAX_FLIPS = 100;
     private static final int MAX_ALERTS_PER_POLL = 5;
     private static final int MAX_SEEN = 4096;
-    private static final Pattern SAFE_COMMAND = Pattern.compile("/ah [\\p{L}\\p{N} _-]{1,48}");
+    private static final Pattern SAFE_COMMAND = Pattern.compile("/ah [A-Za-z0-9_-]{1,48}");
 
     record Flip(String key, String auctionId, String itemId, String itemName, int quantity, String seller,
                 long price, long referenceValue, long profit, int marginBps, int confidenceBps,
                 int volume24h, Instant expiresAt, String searchCommand, String modelVersion,
-                int expectedSellMinutes) {}
+                int expectedSellMinutes, String sellerCommand, String itemSearchCommand) {}
 
     record Status(String state, Instant lastAttempt, Instant lastSuccess, String message,
                   long version, int flipCount) {}
@@ -174,6 +174,8 @@ final class FlipFeedClient implements AutoCloseable {
             if (!SAFE_COMMAND.matcher(command).matches()) {
                 throw new IllegalArgumentException("unsafe search_command");
             }
+            String sellerCommand = optionalSafeCommand(value, "seller_command", command);
+            String itemSearchCommand = optionalSafeCommand(value, "item_search_command", command);
             String itemId = safeString(value, "item_id", 128).toLowerCase(Locale.ROOT);
             if (!itemId.matches("[a-z0-9_.-]+:[a-z0-9_./-]+")) {
                 throw new IllegalArgumentException("invalid item_id");
@@ -188,16 +190,29 @@ final class FlipFeedClient implements AutoCloseable {
                     boundedLong(value, "profit", 1, Long.MAX_VALUE), boundedInt(value, "margin_bps", 0, Integer.MAX_VALUE),
                     boundedInt(value, "confidence_bps", 0, 10_000), boundedInt(value, "volume_24h", 0, Integer.MAX_VALUE),
                     expiresAt, command, optionalString(value, "model_version", 64),
-                    boundedInt(value, "expected_sell_minutes", 0, Integer.MAX_VALUE)));
+                    boundedInt(value, "expected_sell_minutes", 0, Integer.MAX_VALUE), sellerCommand, itemSearchCommand));
         }
         return new DecodedFeed(version, state, List.copyOf(decoded));
     }
 
     static String commandWithoutSlash(Flip flip) {
-        if (!SAFE_COMMAND.matcher(flip.searchCommand()).matches()) {
+        return commandWithoutSlash(flip.searchCommand());
+    }
+
+    static String commandWithoutSlash(String command) {
+        if (!SAFE_COMMAND.matcher(command).matches()) {
             throw new IllegalArgumentException("unsafe search command");
         }
-        return flip.searchCommand().substring(1);
+        return command.substring(1);
+    }
+
+    private static String optionalSafeCommand(JsonObject value, String field, String fallback) {
+        String command = optionalString(value, field, 52);
+        if (command.isBlank()) return fallback;
+        if (!SAFE_COMMAND.matcher(command).matches()) {
+            throw new IllegalArgumentException("unsafe " + field);
+        }
+        return command;
     }
 
     private static long boundedLong(JsonObject value, String field, long minimum, long maximum) {

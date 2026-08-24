@@ -33,7 +33,7 @@ An error changes the visible status and preserves the previous feed for inspecti
 - The official API key ends at the Donut API client and is never serialized.
 - `/api/v1/flips` uses an optional bearer client token; one is mandatory for non-loopback binds.
 - `/api/v1/debug` and `/` contain market evidence and operational counters but no secrets.
-- Commands are generated from a restricted item-name alphabet on the backend and independently checked by the mod.
+- Seller and canonical item-ID commands are generated from restricted ASCII alphabets on the backend and independently checked by the mod. Backend auction fingerprints are never treated as server commands.
 
 ## Valuation
 

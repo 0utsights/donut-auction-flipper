@@ -20,13 +20,21 @@ final class FlipNotifier {
                 .append(Text.literal(flip.itemName() + " x" + flip.quantity()).formatted(Formatting.WHITE))
                 .append(Text.literal("  $" + format(flip.price())).formatted(Formatting.GRAY))
                 .append(Text.literal("  +$" + format(flip.profit()) + " ("
-                        + String.format(Locale.ROOT, "%.1f", flip.marginBps() / 100.0) + "%)").formatted(Formatting.GREEN))
-                .append(Text.literal("  [OPEN]").styled(style -> style.withColor(Formatting.AQUA)
-                        .withBold(true).withUnderline(true)
-                        .withClickEvent(new ClickEvent.RunCommand(flip.searchCommand()))
-                        .withHoverEvent(new HoverEvent.ShowText(Text.literal("Open the auction search. Match seller "
-                                + flip.seller() + " and price $" + format(flip.price()) + "; buying is manual.")))));
+                        + String.format(Locale.ROOT, "%.1f", flip.marginBps() / 100.0) + "%)").formatted(Formatting.GREEN));
+        if (!flip.sellerCommand().equals(flip.itemSearchCommand())) {
+            message.append(action("  [SELLER]", flip.sellerCommand(), "Open " + flip.seller()
+                    + "'s listings; match price $" + format(flip.price()) + "."));
+        }
+        message.append(action("  [ITEM]", flip.itemSearchCommand(), "Search " + flip.itemId()
+                + "; match seller " + flip.seller() + " and price $" + format(flip.price()) + "."));
         client.player.sendMessage(message, false);
+    }
+
+    private static MutableText action(String label, String command, String hover) {
+        return Text.literal(label).styled(style -> style.withColor(Formatting.AQUA)
+                .withBold(true).withUnderline(true)
+                .withClickEvent(new ClickEvent.RunCommand(command))
+                .withHoverEvent(new HoverEvent.ShowText(Text.literal(hover + " Buying remains manual."))));
     }
 
     static void open(MinecraftClient client, FlipFeedClient.Flip flip) {

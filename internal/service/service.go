@@ -15,7 +15,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
 
 	"donut-network/internal/donutapi"
 	"donut-network/internal/market"
@@ -64,6 +63,8 @@ type Flip struct {
 	QuantityVolume  int       `json:"quantity_volume_24h"`
 	ExpiresAt       time.Time `json:"expires_at,omitempty"`
 	SearchCommand   string    `json:"search_command"`
+	SellerCommand   string    `json:"seller_command"`
+	ItemCommand     string    `json:"item_search_command"`
 	ModelVersion    string    `json:"model_version"`
 	PricingBasis    string    `json:"pricing_basis"`
 	ExpectedSellMin int       `json:"expected_sell_minutes"`
@@ -377,6 +378,13 @@ func mapFlip(opportunity market.Opportunity) Flip {
 	if key == "" {
 		key = listing.Fingerprint
 	}
+	itemCommand := "/ah " + itemSearchID(listing.Item.ID, name)
+	sellerCommand := sellerSearchCommand(listing.SellerName)
+	primaryCommand := sellerCommand
+	if primaryCommand == "" {
+		primaryCommand = itemCommand
+		sellerCommand = itemCommand
+	}
 	return Flip{
 		Key: key, AuctionID: listing.AuthoritativeID, ItemID: listing.Item.ID, ItemName: name,
 		Quantity: max(1, listing.Item.Quantity), Seller: listing.SellerName, Price: listing.TotalPrice,
@@ -385,28 +393,52 @@ func mapFlip(opportunity market.Opportunity) Flip {
 		Profit: opportunity.Profit, MarginBPS: opportunity.MarginBPS,
 		ConfidenceBPS: opportunity.Valuation.ConfidenceBPS, Volume24h: opportunity.Valuation.Volume24h,
 		SingularVolume: opportunity.Valuation.SingularVolume24h, QuantityVolume: opportunity.Valuation.QuantityVolume24h,
-		ExpiresAt: listing.ExpiresAt, SearchCommand: "/ah " + safeSearch(name), ModelVersion: opportunity.Valuation.ModelVersion,
+		ExpiresAt: listing.ExpiresAt, SearchCommand: primaryCommand, SellerCommand: sellerCommand,
+		ItemCommand: itemCommand, ModelVersion: opportunity.Valuation.ModelVersion,
 		PricingBasis:    opportunity.Valuation.FallbackLevel,
 		ExpectedSellMin: opportunity.Valuation.ExpectedSellMinutes, RiskFlags: append([]string(nil), opportunity.Valuation.RiskFlags...),
 	}
 }
 
-func safeSearch(value string) string {
-	value = strings.Map(func(r rune) rune {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsSpace(r) || r == '_' || r == '-' {
-			return r
+func itemSearchID(itemID, fallbackName string) string {
+	value := strings.ToLower(strings.TrimSpace(itemID))
+	if separator := strings.LastIndexByte(value, ':'); separator >= 0 {
+		value = value[separator+1:]
+	}
+	if value == "" {
+		value = strings.ToLower(strings.TrimSpace(fallbackName))
+	}
+	value = strings.Map(func(character rune) rune {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '_' || character == '-' {
+			return character
 		}
-		return -1
+		return '_'
 	}, value)
-	value = strings.Join(strings.Fields(value), " ")
-	runes := []rune(value)
-	if len(runes) > 48 {
-		value = string(runes[:48])
+	value = strings.Trim(value, "_")
+	for strings.Contains(value, "__") {
+		value = strings.ReplaceAll(value, "__", "_")
+	}
+	if len(value) > 48 {
+		value = value[:48]
 	}
 	if value == "" {
 		return "item"
 	}
 	return value
+}
+
+func sellerSearchCommand(seller string) string {
+	seller = strings.TrimSpace(seller)
+	if len(seller) < 1 || len(seller) > 16 {
+		return ""
+	}
+	for _, character := range seller {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || character == '_' {
+			continue
+		}
+		return ""
+	}
+	return "/ah " + seller
 }
 
 func topValuations(values map[string]market.Valuation, limit int) []market.Valuation {
@@ -469,8 +501,8 @@ const debugHTML = `<!doctype html>
 <p>Thresholds: profit ≥ {{money .Thresholds.MinProfit}} · margin ≥ {{pct .Thresholds.MinMarginBPS}} · confidence ≥ {{pct .Thresholds.MinConfidenceBPS}} · 24h sales ≥ {{.Thresholds.MinVolume24h}}</p>
 <p class="muted">Refreshes every five seconds. The API key is backend-only and is never rendered.</p>
 <h2>Decision funnel</h2><p class="funnel">{{.Analysis.Listings}} listings → no valuation {{.Analysis.NoValuation}} · no singular/exact-quantity evidence {{.Analysis.NoQuantityEvidence}} · low confidence {{.Analysis.LowConfidence}} · low volume {{.Analysis.LowVolume}} · risk blocked {{.Analysis.RiskBlocked}} · low profit {{.Analysis.LowProfit}} · low margin {{.Analysis.LowMargin}} · over budget {{.Analysis.OverBudget}} · expired {{.Analysis.Expired}} · duplicate signature {{.Analysis.DuplicateSignature}} → <strong>{{.Analysis.Published}} published</strong></p>
-<h2>Current opportunities</h2><table><thead><tr><th>Item</th><th>Price</th><th>Unit refs (1 / exact / used)</th><th>Total ref</th><th>Profit</th><th>Margin</th><th>Confidence</th><th>24h sales (1 / exact)</th><th>Basis</th><th>Command</th></tr></thead><tbody>
-{{range .Flips}}<tr><td>{{.Quantity}}× {{.ItemName}}</td><td>{{money .Price}}</td><td>{{money .SingularUnitRef}} / {{money .QuantityUnitRef}} / <strong>{{money .UnitReference}}</strong></td><td>{{money .ReferenceValue}}</td><td>{{money .Profit}}</td><td>{{pct .MarginBPS}}</td><td>{{pct .ConfidenceBPS}}</td><td>{{.SingularVolume}} / {{.QuantityVolume}}</td><td>{{.PricingBasis}}</td><td><code>{{.SearchCommand}}</code></td></tr>{{else}}<tr><td colspan="10">No flips currently pass the configured safety thresholds.</td></tr>{{end}}</tbody></table>
+<h2>Current opportunities</h2><table><thead><tr><th>Item</th><th>Price</th><th>Unit refs (1 / exact / used)</th><th>Total ref</th><th>Profit</th><th>Margin</th><th>Confidence</th><th>24h sales (1 / exact)</th><th>Basis</th><th>Seller / item routes</th></tr></thead><tbody>
+{{range .Flips}}<tr><td>{{.Quantity}}× {{.ItemName}}</td><td>{{money .Price}}</td><td>{{money .SingularUnitRef}} / {{money .QuantityUnitRef}} / <strong>{{money .UnitReference}}</strong></td><td>{{money .ReferenceValue}}</td><td>{{money .Profit}}</td><td>{{pct .MarginBPS}}</td><td>{{pct .ConfidenceBPS}}</td><td>{{.SingularVolume}} / {{.QuantityVolume}}</td><td>{{.PricingBasis}}</td><td>seller <code>{{.SellerCommand}}</code><br>item <code>{{.ItemCommand}}</code></td></tr>{{else}}<tr><td colspan="10">No flips currently pass the configured safety thresholds.</td></tr>{{end}}</tbody></table>
 <h2>Highest-volume valuations</h2><table><thead><tr><th>Signature</th><th>Quick sell</th><th>Fair</th><th>Confidence</th><th>24h sales</th><th>Samples</th><th>Sell time</th><th>Risk flags</th></tr></thead><tbody>
 {{range .Valuations}}<tr><td><a href="/api/v1/debug/valuation?signature={{urlquery .Signature}}">{{.Signature}}</a></td><td>{{money .QuickSellValue}}</td><td>{{money .FairValue}}</td><td>{{pct .ConfidenceBPS}}</td><td>{{.Volume24h}}</td><td>{{.SampleCount}}</td><td>{{.ExpectedSellMinutes}}m</td><td>{{range .RiskFlags}}{{.}} {{end}}</td></tr>{{else}}<tr><td colspan="8">No completed-sale model is ready yet.</td></tr>{{end}}</tbody></table>
 </body></html>`

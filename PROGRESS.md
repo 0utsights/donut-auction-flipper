@@ -32,6 +32,7 @@ Last updated: 2026-08-23
 4. Live evidence disproved the assumed 220-page full-book boundary: valid rows exist past page 2,000. The system now truthfully defines 220 pages as a recent-listing latency window and uses accumulating completed sales for broad-market value.
 5. Rejected stack false positives by making quantity-one evidence mandatory, requiring an exact-quantity completed-sale cohort, conservatively combining both models, and exposing unit/total references in debug output.
 6. The follow-up quantity review added invariant tests for total-to-unit normalization, exact-quantity active competition, missing-cohort rejection, dual-reference audit fields, and a dedicated ranking benchmark. No further quantity-path issue in the current scope justified additional complexity.
+7. Replaced ambiguous display-name searches with seller-first navigation plus canonical underscore item-ID fallbacks, added independently validated dual chat actions, and documented why synthetic API fingerprints cannot directly open a listing.
 
 ## Intentional omissions
 

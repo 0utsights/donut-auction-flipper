@@ -43,7 +43,7 @@ poll_seconds=2
 chat_alerts=true
 ```
 
-Press `N` or run `/dn` for the barebones control screen. Clicking an alert or row runs a sanitized auction search. Confirm the seller and price yourself; the mod never clicks or buys an item.
+Press `N` or run `/dn` for the barebones control screen. Alerts provide a primary seller search and a canonical item-ID fallback such as `/ah redstone_block`; screen rows use the seller search. Confirm the item and price yourself—the public API does not expose a command-addressable listing ID, and the mod never clicks or buys an item.
 
 The former double-blur crash is removed: the new screen draws an opaque background and never calls Minecraft's blur renderer.
 

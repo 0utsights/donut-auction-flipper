@@ -68,8 +68,8 @@ func TestCollectBuildsAuthenticatedFlipFeed(t *testing.T) {
 	if snapshot.Analysis.Qualified != 1 || len(snapshot.Valuations) == 0 {
 		t.Fatalf("missing debug analysis: %+v", snapshot)
 	}
-	if snapshot.Flips[0].SearchCommand != "/ah Diamond" {
-		t.Fatalf("unsafe/wrong search command: %q", snapshot.Flips[0].SearchCommand)
+	if snapshot.Flips[0].SearchCommand != "/ah cheap" || snapshot.Flips[0].SellerCommand != "/ah cheap" || snapshot.Flips[0].ItemCommand != "/ah diamond" {
+		t.Fatalf("unsafe/wrong search commands: %+v", snapshot.Flips[0])
 	}
 
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/flips", nil)
@@ -222,8 +222,17 @@ func TestUnknownRouteIsNotDebugPage(t *testing.T) {
 	}
 }
 
-func TestSafeSearchRemovesCommands(t *testing.T) {
-	if got := safeSearch("Diamond\n/op me @a"); got != "Diamond op me a" {
-		t.Fatalf("safeSearch=%q", got)
+func TestAuctionSearchCommandsAreCanonicalAndBounded(t *testing.T) {
+	if got := itemSearchID("minecraft:redstone_block", "Redstone Block"); got != "redstone_block" {
+		t.Fatalf("itemSearchID=%q", got)
+	}
+	if got := itemSearchID("", "Redstone Block\n/op me @a"); got != "redstone_block_op_me_a" {
+		t.Fatalf("fallback itemSearchID=%q", got)
+	}
+	if got := sellerSearchCommand("Valid_Name1"); got != "/ah Valid_Name1" {
+		t.Fatalf("sellerSearchCommand=%q", got)
+	}
+	if got := sellerSearchCommand("bad name"); got != "" {
+		t.Fatalf("unsafe seller accepted: %q", got)
 	}
 }
