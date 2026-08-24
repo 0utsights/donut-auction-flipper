@@ -7,7 +7,7 @@ Official Donut API
         |
         v
 one shared rate limiter -> fast page-1 lane -----------+
-                        -> broad sale/book lane -> robust-v3-quantity model
+                        -> broad sale/book lane -> robust-v4 price-volume model
                                                        |
                                                        v
                                             immutable ranked flip feed
@@ -38,9 +38,9 @@ An error changes the visible status and preserves the previous feed for inspecti
 
 ## Valuation
 
-The model uses completed sales as the authority. It canonicalizes item modifiers, deduplicates seller/day influence, filters outliers with median absolute deviation, compares short and long windows, caps per-seller volume, estimates liquidity and sale time, and uses distinct active sellers only as a conservative market cap. A recommendation is blocked when evidence is stale or the official API cannot represent economically sensitive modifiers reliably.
+The model uses completed sales as the authority. It canonicalizes item modifiers, deduplicates seller/day influence, filters outliers with median absolute deviation, compares short and long windows, caps per-seller volume, estimates liquidity and sale time, and uses distinct active sellers only as a conservative market cap. Liquidity, confidence, and sell time use only completed sales within ±10% of the proposed quick-sell price; broad item volume is diagnostic context. A recommendation is blocked when evidence is stale or the official API cannot represent economically sensitive modifiers reliably.
 
-Opportunity pricing uses `robust-v3-quantity`. Quantity-one completed sales establish the mandatory per-item ceiling. A stack also requires completed sales at its exact quantity, capturing real bulk discounts. The lower per-unit quick-sell value is multiplied by the unchanged resale quantity. The engine never assumes a stack will be split for resale and rejects stacks lacking either cohort.
+Opportunity pricing uses `robust-v4-price-volume-quantity`. Quantity-one completed sales establish the mandatory per-item ceiling. A stack also requires completed sales at its exact quantity, capturing real bulk discounts. The lower per-unit quick-sell value is multiplied by the unchanged resale quantity. The engine never assumes a stack will be split for resale and rejects stacks lacking either cohort.
 
 ## Why polling
 

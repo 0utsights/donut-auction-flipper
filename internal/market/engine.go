@@ -9,7 +9,7 @@ import (
 
 const activeListingFallbackTTL = 2 * time.Minute
 const transactionRetention = 31 * 24 * time.Hour
-const QuantityValuationModelVersion = "robust-v3-quantity"
+const QuantityValuationModelVersion = "robust-v4-price-volume-quantity"
 
 type Snapshot struct {
 	Version     uint64               `json:"version"`
@@ -452,12 +452,12 @@ func (e *Engine) AnalyzeOpportunities(thresholds Thresholds, limit int) ([]Oppor
 			}
 			continue
 		}
-		if valuation.ConfidenceBPS < thresholds.MinConfidenceBPS {
-			report.LowConfidence++
-			continue
-		}
 		if valuation.Volume24h < thresholds.MinVolume24h {
 			report.LowVolume++
+			continue
+		}
+		if valuation.ConfidenceBPS < thresholds.MinConfidenceBPS {
+			report.LowConfidence++
 			continue
 		}
 		if opportunityRiskBlocked(valuation.RiskFlags) {
@@ -607,6 +607,9 @@ func combineQuantityValuations(singular, stacked Valuation, quantity int) Valuat
 	combined.LongTermValue = min64(singular.LongTermValue, stacked.LongTermValue)
 	combined.ConfidenceBPS = min(singular.ConfidenceBPS, stacked.ConfidenceBPS)
 	combined.Volume24h = min(singular.Volume24h, stacked.Volume24h)
+	combined.MarketVolume24h = min(singular.MarketVolume24h, stacked.MarketVolume24h)
+	combined.PriceSellerCount = min(singular.PriceSellerCount, stacked.PriceSellerCount)
+	combined.PriceBandLow, combined.PriceBandHigh = targetPriceBand(combined.QuickSellValue)
 	combined.SampleCount = min(singular.SampleCount, stacked.SampleCount)
 	combined.RawSampleCount = min(singular.RawSampleCount, stacked.RawSampleCount)
 	combined.SellerCount = min(singular.SellerCount, stacked.SellerCount)
@@ -642,7 +645,7 @@ func mergeRiskFlags(groups ...[]string) []string {
 
 func opportunityRiskBlocked(flags []string) bool {
 	for _, flag := range flags {
-		if flag == "api_modifier_blindspot" || flag == "stale_references" {
+		if flag == "api_modifier_blindspot" || flag == "stale_references" || flag == "target_price_seller_concentration" {
 			return true
 		}
 	}

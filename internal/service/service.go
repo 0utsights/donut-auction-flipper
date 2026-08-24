@@ -60,6 +60,10 @@ type Flip struct {
 	MarginBPS       int       `json:"margin_bps"`
 	ConfidenceBPS   int       `json:"confidence_bps"`
 	Volume24h       int       `json:"volume_24h"`
+	MarketVolume24h int       `json:"market_volume_24h"`
+	PriceSellers    int       `json:"price_seller_count"`
+	PriceBandLow    int64     `json:"price_band_low"`
+	PriceBandHigh   int64     `json:"price_band_high"`
 	SingularVolume  int       `json:"singular_volume_24h"`
 	QuantityVolume  int       `json:"quantity_volume_24h"`
 	ExpiresAt       time.Time `json:"expires_at,omitempty"`
@@ -516,6 +520,9 @@ func mapFlip(opportunity market.Opportunity) Flip {
 		SingularUnitRef: opportunity.Valuation.SingularQuickSell, QuantityUnitRef: opportunity.Valuation.QuantityQuickSell,
 		Profit: opportunity.Profit, MarginBPS: opportunity.MarginBPS,
 		ConfidenceBPS: opportunity.Valuation.ConfidenceBPS, Volume24h: opportunity.Valuation.Volume24h,
+		MarketVolume24h: opportunity.Valuation.MarketVolume24h,
+		PriceSellers:    opportunity.Valuation.PriceSellerCount,
+		PriceBandLow:    opportunity.Valuation.PriceBandLow, PriceBandHigh: opportunity.Valuation.PriceBandHigh,
 		SingularVolume: opportunity.Valuation.SingularVolume24h, QuantityVolume: opportunity.Valuation.QuantityVolume24h,
 		ExpiresAt: listing.ExpiresAt, SearchCommand: primaryCommand, SellerCommand: sellerCommand,
 		ItemCommand: itemCommand, ModelVersion: opportunity.Valuation.ModelVersion,
@@ -629,11 +636,11 @@ const debugHTML = `<!doctype html>
 <p>Listings {{.Status.ListingsFetched}} · latest transactions {{.Status.TransactionsFetched}} · retained history {{.Status.HistorySize}} · valuations {{.Status.ValuationCount}} · flips {{.Status.FlipCount}}</p>
 <p>Fast lane: {{.Status.FastListingsFetched}} newest rows · last publish {{clock .Status.FastLastSuccessAt}} · {{printf "%.0f" .Status.FastDurationMS}}ms upstream-to-feed</p>
 <p>API requests {{.Status.API.Requests}} · errors {{.Status.API.Errors}} · retries {{.Status.API.Retries}} · last latency {{printf "%.0f" .Status.API.LastLatencyMS}}ms</p>
-<p>Thresholds: profit ≥ {{money .Thresholds.MinProfit}} · margin ≥ {{pct .Thresholds.MinMarginBPS}} · confidence ≥ {{pct .Thresholds.MinConfidenceBPS}} · 24h sales ≥ {{.Thresholds.MinVolume24h}}</p>
+<p>Thresholds: profit ≥ {{money .Thresholds.MinProfit}} · margin ≥ {{pct .Thresholds.MinMarginBPS}} · confidence ≥ {{pct .Thresholds.MinConfidenceBPS}} · 24h sales near target ≥ {{.Thresholds.MinVolume24h}}</p>
 <p class="muted">Refreshes every second. The API key is backend-only and is never rendered.</p>
 <h2>Decision funnel</h2><p class="funnel">{{.Analysis.Listings}} listings → no valuation {{.Analysis.NoValuation}} · no singular/exact-quantity evidence {{.Analysis.NoQuantityEvidence}} · low confidence {{.Analysis.LowConfidence}} · low volume {{.Analysis.LowVolume}} · risk blocked {{.Analysis.RiskBlocked}} · low profit {{.Analysis.LowProfit}} · low margin {{.Analysis.LowMargin}} · over budget {{.Analysis.OverBudget}} · expired {{.Analysis.Expired}} · duplicate signature {{.Analysis.DuplicateSignature}} → <strong>{{.Analysis.Published}} published</strong></p>
-<h2>Current opportunities</h2><table><thead><tr><th>Item</th><th>Price</th><th>Unit refs (1 / exact / used)</th><th>Total ref</th><th>Profit</th><th>Margin</th><th>Confidence</th><th>24h sales (1 / exact)</th><th>Basis</th><th>Seller / item routes</th></tr></thead><tbody>
-{{range .Flips}}<tr><td>{{.Quantity}}× {{.ItemName}}</td><td>{{money .Price}}</td><td>{{money .SingularUnitRef}} / {{money .QuantityUnitRef}} / <strong>{{money .UnitReference}}</strong></td><td>{{money .ReferenceValue}}</td><td>{{money .Profit}}</td><td>{{pct .MarginBPS}}</td><td>{{pct .ConfidenceBPS}}</td><td>{{.SingularVolume}} / {{.QuantityVolume}}</td><td>{{.PricingBasis}}</td><td>seller <code>{{.SellerCommand}}</code><br>item <code>{{.ItemCommand}}</code></td></tr>{{else}}<tr><td colspan="10">No flips currently pass the configured safety thresholds.</td></tr>{{end}}</tbody></table>
-<h2>Highest-volume valuations</h2><table><thead><tr><th>Signature</th><th>Quick sell</th><th>Fair</th><th>Confidence</th><th>24h sales</th><th>Samples</th><th>Sell time</th><th>Risk flags</th></tr></thead><tbody>
-{{range .Valuations}}<tr><td><a href="/api/v1/debug/valuation?signature={{urlquery .Signature}}">{{.Signature}}</a></td><td>{{money .QuickSellValue}}</td><td>{{money .FairValue}}</td><td>{{pct .ConfidenceBPS}}</td><td>{{.Volume24h}}</td><td>{{.SampleCount}}</td><td>{{.ExpectedSellMinutes}}m</td><td>{{range .RiskFlags}}{{.}} {{end}}</td></tr>{{else}}<tr><td colspan="8">No completed-sale model is ready yet.</td></tr>{{end}}</tbody></table>
+<h2>Current opportunities</h2><table><thead><tr><th>Item</th><th>Price</th><th>Unit refs (1 / exact / used)</th><th>Total ref</th><th>Profit</th><th>Margin</th><th>Confidence</th><th>24h near target / all</th><th>Basis</th><th>Seller / item routes</th></tr></thead><tbody>
+{{range .Flips}}<tr><td>{{.Quantity}}× {{.ItemName}}</td><td>{{money .Price}}</td><td>{{money .SingularUnitRef}} / {{money .QuantityUnitRef}} / <strong>{{money .UnitReference}}</strong></td><td>{{money .ReferenceValue}}</td><td>{{money .Profit}}</td><td>{{pct .MarginBPS}}</td><td>{{pct .ConfidenceBPS}}</td><td>{{.Volume24h}} near {{money .PriceBandLow}}–{{money .PriceBandHigh}} from {{.PriceSellers}} sellers / {{.MarketVolume24h}} all</td><td>{{.PricingBasis}}</td><td>seller <code>{{.SellerCommand}}</code><br>item <code>{{.ItemCommand}}</code></td></tr>{{else}}<tr><td colspan="10">No flips currently pass the configured safety thresholds.</td></tr>{{end}}</tbody></table>
+<h2>Highest-volume valuations</h2><table><thead><tr><th>Signature</th><th>Quick sell</th><th>Fair</th><th>Confidence</th><th>24h near target / all</th><th>Samples</th><th>Sell time</th><th>Risk flags</th></tr></thead><tbody>
+{{range .Valuations}}<tr><td><a href="/api/v1/debug/valuation?signature={{urlquery .Signature}}">{{.Signature}}</a></td><td>{{money .QuickSellValue}}</td><td>{{money .FairValue}}</td><td>{{pct .ConfidenceBPS}}</td><td>{{.Volume24h}} near {{money .PriceBandLow}}–{{money .PriceBandHigh}} from {{.PriceSellerCount}} sellers / {{.MarketVolume24h}} all</td><td>{{.SampleCount}}</td><td>{{.ExpectedSellMinutes}}m</td><td>{{range .RiskFlags}}{{.}} {{end}}</td></tr>{{else}}<tr><td colspan="8">No completed-sale model is ready yet.</td></tr>{{end}}</tbody></table>
 </body></html>`

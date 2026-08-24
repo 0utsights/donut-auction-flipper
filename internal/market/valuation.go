@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const ValuationModelVersion = "robust-v2"
+const ValuationModelVersion = "robust-v4-price-volume"
 
 type ValuationInput struct {
 	Signature      string
@@ -64,8 +64,7 @@ func CalculateValuation(in ValuationInput) (Valuation, bool) {
 		volBPS = ratioInt(mad, fair, 14826)
 	}
 	bestAsk, referenceAsk, depth, activeSellers := activeMarket(in)
-	volume := 0
-	volume = robustVolume24h(raw, in.Now)
+	marketVolume := robustVolume24h(raw, in.Now)
 	newest := filtered[0].SoldAt
 	for _, transaction := range filtered[1:] {
 		if transaction.SoldAt.After(newest) {
@@ -85,9 +84,6 @@ func CalculateValuation(in ValuationInput) (Valuation, bool) {
 	if sellerConcentrated || sellerCount < 3 {
 		riskFlags = append(riskFlags, "seller_concentration")
 	}
-	if volume < 3 {
-		riskFlags = append(riskFlags, "low_liquidity")
-	}
 	if referenceAge > int64((48 * time.Hour).Seconds()) {
 		riskFlags = append(riskFlags, "stale_references")
 	}
@@ -97,7 +93,16 @@ func CalculateValuation(in ValuationInput) (Valuation, bool) {
 	if hasAPIModifierBlindspot(raw) {
 		riskFlags = append(riskFlags, "api_modifier_blindspot")
 	}
-	confidence := 1200 + min(len(filtered), 20)*140 + min(volume, 30)*90 + min(sellerCount, 8)*250 + min(depth, 10)*60
+	quick := quickSellValue(fair, volBPS, referenceAsk)
+	priceBandLow, priceBandHigh := targetPriceBand(quick)
+	volume, priceSellerCount := robustPriceVolume24h(raw, in.Now, priceBandLow, priceBandHigh)
+	if volume < 3 {
+		riskFlags = append(riskFlags, "low_price_liquidity")
+	}
+	if volume >= 2 && priceSellerCount < 2 {
+		riskFlags = append(riskFlags, "target_price_seller_concentration")
+	}
+	confidence := 1200 + min(len(filtered), 20)*140 + min(volume, 30)*90 + min(priceSellerCount, 8)*250 + min(depth, 10)*60
 	confidence -= max(0, volBPS-400) / 2
 	confidence -= min(2500, int(referenceAge/3600)*35)
 	if sellerConcentrated {
@@ -110,7 +115,6 @@ func CalculateValuation(in ValuationInput) (Valuation, bool) {
 		confidence -= 1200
 	}
 	confidence = max(0, min(9900, confidence))
-	quick := quickSellValue(fair, volBPS, referenceAsk)
 	spread := 0
 	if bestAsk > 0 && fair > 0 {
 		spread = signedRatioInt(bestAsk-fair, fair, 10000)
@@ -121,6 +125,8 @@ func CalculateValuation(in ValuationInput) (Valuation, bool) {
 		QuickSellValue: quick, ShortTermValue: shortTerm, LongTermValue: longTerm,
 		ActiveBestAsk: bestAsk, ActiveReferenceAsk: referenceAsk, ActiveDepth: depth,
 		ActiveSellerCount: activeSellers, ConfidenceBPS: confidence, Volume24h: volume,
+		MarketVolume24h: marketVolume, PriceSellerCount: priceSellerCount,
+		PriceBandLow: priceBandLow, PriceBandHigh: priceBandHigh,
 		SampleCount: len(filtered), RawSampleCount: len(raw), SellerCount: sellerCount,
 		FreshSampleCount: len(shortSamples), VolatilityBPS: volBPS, SpreadBPS: spread,
 		ExpectedSellMinutes: expectedSellMinutes, ReferenceAgeSeconds: referenceAge,
@@ -154,15 +160,15 @@ func activeMarket(in ValuationInput) (bestAsk, referenceAsk int64, depth, seller
 	}
 	sort.Slice(asks, func(i, j int) bool { return asks[i] < asks[j] })
 	bestAsk = asks[0]
-	if len(sellerMinimum) >= 3 {
+	if len(sellerMinimum) >= 2 {
 		distinctAsks := make([]int64, 0, len(sellerMinimum))
 		for _, ask := range sellerMinimum {
 			distinctAsks = append(distinctAsks, ask)
 		}
 		sort.Slice(distinctAsks, func(i, j int) bool { return distinctAsks[i] < distinctAsks[j] })
-		// The third cheapest distinct seller ignores one bait listing without
-		// allowing a single seller's listing wall to inflate the market cap.
-		referenceAsk = distinctAsks[2]
+		// The second cheapest distinct seller survives one bait listing while
+		// recognizing genuine price competition from two independent sellers.
+		referenceAsk = distinctAsks[1]
 	} else if len(in.ActiveListings) == 0 && in.ActiveBestAsk > 0 {
 		referenceAsk = in.ActiveBestAsk
 	}
@@ -281,6 +287,42 @@ func robustVolume24h(values []Transaction, now time.Time) int {
 		volume++
 	}
 	return volume
+}
+
+func targetPriceBand(target int64) (int64, int64) {
+	if target <= 0 {
+		return 0, 0
+	}
+	delta := target / 10
+	high := target + delta
+	if high < target {
+		high = math.MaxInt64
+	}
+	return target - delta, high
+}
+
+// robustPriceVolume24h measures demand only around the price we intend to use.
+// Broad item volume remains useful context, but trades in another price regime
+// do not establish that a proposed resale price is liquid.
+func robustPriceVolume24h(values []Transaction, now time.Time, low, high int64) (int, int) {
+	if low <= 0 || high < low {
+		return 0, 0
+	}
+	perSeller := map[string]int{}
+	volume := 0
+	cutoff := now.Add(-24 * time.Hour)
+	for _, value := range values {
+		if value.SoldAt.Before(cutoff) || value.UnitPrice < low || value.UnitPrice > high {
+			continue
+		}
+		identity := sellerIdentity(value.SellerUUID, value.SellerName, value.Fingerprint)
+		if perSeller[identity] >= 3 {
+			continue
+		}
+		perSeller[identity]++
+		volume++
+	}
+	return volume, len(perSeller)
 }
 
 func hasAPIModifierBlindspot(values []Transaction) bool {

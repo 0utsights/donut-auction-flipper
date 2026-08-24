@@ -30,6 +30,8 @@ The backend has two API lanes. The fast lane refreshes the newest 44 listings ab
 
 Stacked listings are quantity-safe: the backend requires both quantity-one sales and completed sales at the exact listed quantity, uses the lower per-item quick-sell estimate, then multiplies by the unchanged resale quantity. It will not recommend a stack based on profit that only exists after splitting it.
 
+Liquidity is price-local: the alert gate, confidence, and sell-time estimate count only completed sales from the last 24 hours within ±10% of the proposed resale price, and one seller cannot supply all qualifying volume. The debug page shows near-target volume and distinct sellers beside total item volume so split-price markets are visible instead of being blended into a misleading sales count.
+
 ## Install the mod
 
 Use Minecraft 1.21.11, Fabric Loader 0.19.2 or newer, Fabric API, and Java 21. Copy `outputs/donut-auction-flips-1.0.0-loader-0.19.2.jar` into the Prism instance's `mods` directory.

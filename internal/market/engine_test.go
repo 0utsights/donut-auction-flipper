@@ -82,7 +82,7 @@ func TestEngineRanksOnlyQualifiedActiveOpportunities(t *testing.T) {
 	for i := 0; i < 12; i++ {
 		e.AddTransactions([]Transaction{{
 			SellerName: fmt.Sprintf("seller-%d", i), Item: Item{ID: "diamond", Quantity: 1},
-			TotalPrice: 10_000_000 + int64(i%3)*10_000, SoldAt: now.Add(-time.Duration(i) * time.Minute),
+			TotalPrice: 4_000_000 + int64(i%3)*10_000, SoldAt: now.Add(-time.Duration(i) * time.Minute),
 		}})
 	}
 	e.Observe(Listing{AuthoritativeID: "best", SellerName: "best-seller", Item: Item{ID: "diamond", Quantity: 1}, TotalPrice: 2_000_000})
@@ -98,7 +98,7 @@ func TestEngineRanksOnlyQualifiedActiveOpportunities(t *testing.T) {
 		t.Fatalf("zero budget cap must mean unlimited: %+v", unlimited)
 	}
 	_, report := e.AnalyzeOpportunities(Thresholds{MinProfit: 1_000_000, MinMarginBPS: 1_000, MinVolume24h: 1}, 10)
-	if report.Listings != 3 || report.LowProfit != 1 || report.DuplicateSignature != 1 || report.Qualified != 1 || report.Published != 1 {
+	if report.Listings != 3 || report.LowProfit != 2 || report.DuplicateSignature != 0 || report.Qualified != 1 || report.Published != 1 {
 		t.Fatalf("unexpected rejection report: %+v", report)
 	}
 }
@@ -170,7 +170,7 @@ func TestStackReferenceUsesExactQuantityActiveCompetition(t *testing.T) {
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	e.now = func() time.Time { return now }
 	e.AddTransactions(quantitySales(now, "iron_ingot", 1, 100, 8, "single"))
-	e.AddTransactions(quantitySales(now, "iron_ingot", 64, 6_400, 8, "stack"))
+	e.AddTransactions(quantitySales(now, "iron_ingot", 64, 3_200, 8, "stack"))
 	for index := 0; index < 3; index++ {
 		e.Observe(Listing{AuthoritativeID: fmt.Sprintf("competitor-%d", index), SellerName: fmt.Sprintf("competitor-%d", index), Item: Item{ID: "iron_ingot", Quantity: 64}, TotalPrice: 3_200})
 	}

@@ -76,6 +76,10 @@ type Valuation struct {
 	ActiveSellerCount   int       `json:"active_seller_count"`
 	ConfidenceBPS       int       `json:"confidence_bps"`
 	Volume24h           int       `json:"volume_24h"`
+	MarketVolume24h     int       `json:"market_volume_24h"`
+	PriceSellerCount    int       `json:"price_seller_count"`
+	PriceBandLow        int64     `json:"price_band_low"`
+	PriceBandHigh       int64     `json:"price_band_high"`
 	SampleCount         int       `json:"sample_count"`
 	RawSampleCount      int       `json:"raw_sample_count"`
 	SellerCount         int       `json:"seller_count"`

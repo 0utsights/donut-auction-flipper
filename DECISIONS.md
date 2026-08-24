@@ -42,6 +42,10 @@ The API provides a seller but no server-addressable listing ID; the apparent `au
 
 A one-second 220-page scan is impossible under the upstream 250-request/minute limit. The API path is therefore split without adding workers or WebSockets: a fast loop polls recently-listed page 1 and publishes against the retained sale model, while the broad transaction/depth collector runs concurrently through the same 240-request/minute limiter. Local mod polling is 250ms. This prioritizes approximately sub-second new-listing detection while preserving broad evidence in one process.
 
+## 2026-08-23 — Gate liquidity at the intended resale price
+
+Total item sales can combine incompatible price regimes and do not prove that an item will clear at our proposed resale price. `robust-v4-price-volume` therefore counts completed 24-hour volume only inside a ±10% band around the quick-sell target for confidence, minimum-volume gating, and sell-time estimates. It also requires that qualifying target-price volume is not supplied by only one seller. Total 24-hour item volume remains visible as context but cannot qualify an alert. The active price cap uses the second-cheapest distinct seller, so two independent competing listings are treated as real market evidence while one bait listing cannot set the target alone.
+
 ## 2026-08-22 — Barebones client and debug UI
 
 The in-game screen and backend debug page are intentionally plain, information-first interfaces. The Fabric screen uses an opaque fill and does not call `renderBackground`, fixing the Minecraft 1.21.11 `Can only blur once per frame` crash. Styling remains deferred.

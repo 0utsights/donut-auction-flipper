@@ -98,7 +98,7 @@ func TestActiveReferenceAskResistsOneBaitListing(t *testing.T) {
 	if !ok {
 		t.Fatal("expected valuation")
 	}
-	if v.ActiveBestAsk != 10 || v.ActiveReferenceAsk != 990 {
+	if v.ActiveBestAsk != 10 || v.ActiveReferenceAsk != 980 {
 		t.Fatalf("unexpected active book best=%d reference=%d", v.ActiveBestAsk, v.ActiveReferenceAsk)
 	}
 	if v.QuickSellValue < 900 {
@@ -113,8 +113,82 @@ func TestSingleSellerCannotInflateActiveReference(t *testing.T) {
 		{SellerUUID: "honest-b", UnitPrice: 110},
 	}}
 	best, reference, _, sellers := activeMarket(in)
-	if best != 10 || reference != 110 || sellers != 3 {
+	if best != 10 || reference != 100 || sellers != 3 {
 		t.Fatalf("best=%d reference=%d sellers=%d", best, reference, sellers)
+	}
+}
+
+func TestVolumeIsMeasuredNearProposedResalePrice(t *testing.T) {
+	now := time.Date(2026, 8, 24, 1, 46, 0, 0, time.UTC)
+	type sale struct {
+		seller string
+		price  int64
+	}
+	sales := []sale{
+		{"enzo", 120_000}, {"disco", 249_000}, {"faruq", 400_000}, {"novox", 400_000},
+		{"disco", 249_000}, {"sloan", 100_000}, {"booster", 500_000}, {"disco", 215_000},
+		{"disco", 213_000}, {"disco", 214_000}, {"void", 190_000}, {"steve", 400_000}, {"luki", 400_000},
+	}
+	transactions := make([]Transaction, 0, len(sales))
+	for index, value := range sales {
+		transactions = append(transactions, Transaction{SellerName: value.seller, UnitPrice: value.price,
+			SoldAt: now.Add(-time.Duration(index) * time.Minute)})
+	}
+	listings := []Listing{
+		{SellerName: "a", UnitPrice: 300_000}, {SellerName: "b", UnitPrice: 300_000},
+		{SellerName: "c", UnitPrice: 1_000_000}, {SellerName: "d", UnitPrice: 1_000_000_000},
+	}
+	valuation, ok := CalculateValuation(ValuationInput{Signature: "minecraft:music_disc_lava_chicken",
+		Transactions: transactions, ActiveListings: listings, Now: now})
+	if !ok {
+		t.Fatal("expected valuation")
+	}
+	if valuation.ActiveReferenceAsk != 300_000 || valuation.QuickSellValue > 297_000 {
+		t.Fatalf("active competition did not cap the resale target: %+v", valuation)
+	}
+	if valuation.MarketVolume24h != 11 || valuation.Volume24h != 0 {
+		t.Fatalf("unrelated price regimes counted as target liquidity: %+v", valuation)
+	}
+	if !containsString(valuation.RiskFlags, "low_price_liquidity") {
+		t.Fatalf("missing target-price liquidity warning: %+v", valuation)
+	}
+}
+
+func TestTargetPriceVolumeUsesTenPercentBandAndSellerCap(t *testing.T) {
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	transactions := []Transaction{
+		{SellerName: "repeat", UnitPrice: 90, SoldAt: now},
+		{SellerName: "repeat", UnitPrice: 100, SoldAt: now},
+		{SellerName: "repeat", UnitPrice: 110, SoldAt: now},
+		{SellerName: "repeat", UnitPrice: 100, SoldAt: now},
+		{SellerName: "other", UnitPrice: 105, SoldAt: now},
+		{SellerName: "too-low", UnitPrice: 89, SoldAt: now},
+		{SellerName: "too-high", UnitPrice: 111, SoldAt: now},
+		{SellerName: "old", UnitPrice: 100, SoldAt: now.Add(-25 * time.Hour)},
+	}
+	volume, sellers := robustPriceVolume24h(transactions, now, 90, 110)
+	if volume != 4 || sellers != 2 {
+		t.Fatalf("expected four price-local sales from two sellers after cap, got volume=%d sellers=%d", volume, sellers)
+	}
+}
+
+func TestOneSellerCannotQualifyTargetPriceLiquidity(t *testing.T) {
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	transactions := make([]Transaction, 0, 8)
+	for index := 0; index < 8; index++ {
+		transactions = append(transactions, Transaction{SellerName: "one-seller", UnitPrice: 1_000,
+			SoldAt: now.Add(-time.Duration(index) * time.Minute)})
+	}
+	valuation, ok := CalculateValuation(ValuationInput{Signature: "item", Transactions: transactions, Now: now})
+	if !ok {
+		t.Fatal("expected valuation")
+	}
+	if valuation.Volume24h != 3 || valuation.PriceSellerCount != 1 ||
+		!containsString(valuation.RiskFlags, "target_price_seller_concentration") {
+		t.Fatalf("single-seller target liquidity was not identified: %+v", valuation)
+	}
+	if !opportunityRiskBlocked(valuation.RiskFlags) {
+		t.Fatal("single-seller target-price volume must not qualify an alert")
 	}
 }
 

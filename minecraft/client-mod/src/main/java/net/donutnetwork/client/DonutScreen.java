@@ -36,9 +36,9 @@ final class DonutScreen extends Screen {
             FlipFeedClient.Flip flip = flips.get(index);
             String label = abbreviate(flip.itemName(), 21) + "  $" + FlipNotifier.format(flip.price())
                     + "  +$" + FlipNotifier.format(flip.profit());
-            addDrawableChild(ButtonWidget.builder(Text.literal(label), button -> FlipNotifier.open(client, flip))
-                    .tooltip(Tooltip.of(Text.literal("Seller " + flip.seller() + " · confidence "
-                            + flip.confidenceBps() / 100.0 + "% · " + flip.volume24h() + " sales/24h")))
+			addDrawableChild(ButtonWidget.builder(Text.literal(label), button -> FlipNotifier.open(client, flip))
+					.tooltip(Tooltip.of(Text.literal("Seller " + flip.seller() + " · confidence "
+							+ flip.confidenceBps() / 100.0 + "% · " + flip.volume24h() + " near-target sales/24h")))
                     .dimensions(left, top + 76 + index * 22, WIDTH, 20).build());
         }
         addDrawableChild(ButtonWidget.builder(Text.literal("Close"), button -> close())

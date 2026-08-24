@@ -58,7 +58,7 @@ func TestCollectBuildsAuthenticatedFlipFeed(t *testing.T) {
 	item := market.Item{ID: "minecraft:diamond", Quantity: 1, DisplayName: "Diamond"}
 	transactions := make([]market.Transaction, 0, 12)
 	for index := 0; index < 12; index++ {
-		transactions = append(transactions, market.Transaction{SellerName: "seller", Item: item, TotalPrice: 1_000_000 + int64(index*1_000), SoldAt: now.Add(-time.Duration(index+1) * time.Hour), Source: market.SourceDonutAPI})
+		transactions = append(transactions, market.Transaction{SellerName: fmt.Sprintf("seller-%d", index), Item: item, TotalPrice: 1_000_000 + int64(index*1_000), SoldAt: now.Add(-time.Duration(index+1) * time.Hour), Source: market.SourceDonutAPI})
 	}
 	listing := market.NormalizeListing(market.Listing{AuthoritativeID: "auction-1", SellerName: "cheap", Item: item, TotalPrice: 500_000, LastSeen: now, ExpiresAt: now.Add(time.Hour), Source: market.SourceDonutAPI})
 	upstream := &fakeUpstream{transactions: transactions, listings: []market.Listing{listing}}

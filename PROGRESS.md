@@ -5,7 +5,7 @@ Last updated: 2026-08-23
 ## Current system
 
 - One rate-limited/retrying official API client runs a sub-second newest-page detection lane alongside a background ten-transaction-page/220-active-page valuation lane.
-- `robust-v3-quantity` ranks opportunities using the lower of quantity-one and exact-resale-quantity per-item valuations, behind profit, margin, confidence, liquidity, expiry, and risk gates.
+- `robust-v4-price-volume-quantity` ranks opportunities using the lower of quantity-one and exact-resale-quantity per-item valuations, and qualifies liquidity only from 24-hour sales within ±10% of the intended resale price.
 - Recent transactions persist in a deduplicated, versioned, compressed, safely rotated, 31-day/100,000-row local archive.
 - One HTTP process exposes health, an ETag-enabled compact flip feed, JSON debug state, and a zero-dependency live debug page.
 - Fabric 1.0.0 polls only that feed, caps/deduplicates chat alerts, validates commands, opens manual auction searches, and provides a plain `N`/`/dn` screen without blur.
@@ -22,6 +22,7 @@ Last updated: 2026-08-23
 - Mod tests cover a valid feed, injected-command rejection, and feed-size bounds.
 - Final live authenticated fast-lane soak: 99 snapshot versions across a complete broad scan published 741ms apart on average and 984ms maximum; upstream-to-feed duration was 733ms maximum, with zero upstream errors, retries, or rate-limit responses.
 - Concurrent broad scan: 1,000 transaction rows and 9,680 newest listings completed in 87.8 seconds without blocking fast publication. At that moment the retained archive contained 77,216 unique sales and the model contained 1,099 valuation families; market-dependent flip counts change continuously.
+- Final live Lava Chicken regression: after the latest sales arrived, fair value moved to $250,000 and the conservative target to $205,000. Only 4 of 12 daily trades from 2 sellers fall in its $184,500-$225,500 target band; high volatility/falling-market evidence lowers confidence to 15.25%, so it remains rejected rather than inheriting all item-wide volume.
 - Docker Compose configuration validates. The local Docker daemon is not running, so the final image could not be executed here.
 - Windows race instrumentation requires CGO and is unavailable locally; Linux CI runs `go test -race ./...`.
 
@@ -36,6 +37,7 @@ Last updated: 2026-08-23
 7. Replaced ambiguous display-name searches with seller-first navigation plus canonical underscore item-ID fallbacks, added independently validated dual chat actions, and documented why synthetic API fingerprints cannot directly open a listing.
 8. Split newest-listing detection from broad collection, seeded the engine from retained history at startup, reduced local mod polling to 250ms, preserved last-good feeds on fast failures, and exposed measured fast-lane latency in debug output.
 9. The fresh concurrency/operations review prevented a finishing broad scan from replacing a newer fast feed, added regression coverage for ordering and model isolation, moved the 9,680-row active-book merge off the live fast engine after observing a 1.36-second contention spike, reduced debug-page refresh from five seconds to one, and verified shared-rate-limit behavior live.
+10. Reproduced the Lava Chicken split-price market, separated target-price volume from broad item volume, made confidence/volume/sell-time gates use only the ±10% target cohort, recognized two-seller active competition, and exposed both volume measures in debug output.
 
 ## Intentional omissions
 
