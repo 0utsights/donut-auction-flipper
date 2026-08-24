@@ -6,24 +6,25 @@ The runtime has one direction of data flow:
 Official Donut API
         |
         v
-one rate-limited scan -> bounded sale history -> fresh robust-v2 model
-                                                |
-                                                v
-                                     immutable ranked flip feed
-                                                |
-                                      HTTP polling with ETag
-                                                |
-                                                v
-                                   Fabric chat + manual /ah search
+one shared rate limiter -> fast page-1 lane -----------+
+                        -> broad sale/book lane -> robust-v3-quantity model
+                                                       |
+                                                       v
+                                            immutable ranked flip feed
+                                                       |
+                                             HTTP polling with ETag
+                                                       |
+                                                       v
+                                          Fabric chat + manual /ah search
 ```
 
 ## Backend cycle
 
-1. Fetch up to ten official completed-transaction pages.
-2. Fetch the newest active listings in recently-listed order until the first short 44-row page or the 220-page latency cap (9,680 rows).
-3. Merge transactions by stable fingerprint and sale timestamp; discard records older than 31 days and cap the archive at 100,000.
-4. Build a new market engine from history and the current active book.
-5. Publish a complete immutable snapshot through one atomic pointer.
+1. Load the retained completed-sale model immediately at startup.
+2. Continuously fetch recently-listed page 1 and publish its newest 44 rows without waiting for a broad scan.
+3. In parallel, fetch up to ten completed-transaction pages and the newest 220 active pages using the remaining shared rate-limit budget.
+4. Merge transactions by stable fingerprint and sale timestamp; discard records older than 31 days and cap the archive at 100,000.
+5. Atomically swap refreshed models and snapshots; readers never observe partial data.
 6. Persist history with a temporary file and backup rotation.
 
 An error changes the visible status and preserves the previous feed for inspection. The mod emits alerts only while status is `ready`.
@@ -43,4 +44,4 @@ Opportunity pricing uses `robust-v3-quantity`. Quantity-one completed sales esta
 
 ## Why polling
 
-The full upstream book has thousands of pages and cannot be exhaustively rescanned quickly under the published rate limit. The backend instead scans the newest 220 pages in about a minute; completed sales provide broad-market valuation. Two-second conditional polling gives the mod prompt delivery after publication with ordinary HTTP semantics, tiny unchanged responses (`304 Not Modified`), simple reconnection, and no WebSocket lifecycle or fanout machinery.
+The full upstream book has thousands of pages and cannot be exhaustively rescanned quickly under the published rate limit. Detection therefore uses the recently-listed first page at sub-second cadence while broad depth/history collection runs concurrently. The mod polls the local conditional feed every 250ms, giving near-immediate delivery without WebSocket lifecycle or fanout machinery.

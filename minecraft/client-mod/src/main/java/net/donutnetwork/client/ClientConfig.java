@@ -39,14 +39,14 @@ final class ClientConfig {
                 || backend.getFragment() != null) {
             throw new IllegalArgumentException("backend_url must be an http(s) URL without credentials, query, or fragment");
         }
-        int seconds;
+        int milliseconds;
         try {
-            seconds = Integer.parseInt(properties.getProperty("poll_seconds", "2").strip());
+            milliseconds = Integer.parseInt(properties.getProperty("poll_millis", "250").strip());
         } catch (NumberFormatException error) {
-            throw new IllegalArgumentException("poll_seconds must be a whole number", error);
+            throw new IllegalArgumentException("poll_millis must be a whole number", error);
         }
-        if (seconds < 2 || seconds > 60) {
-            throw new IllegalArgumentException("poll_seconds must be between 2 and 60");
+        if (milliseconds < 100 || milliseconds > 5_000) {
+            throw new IllegalArgumentException("poll_millis must be between 100 and 5000");
         }
         String token = properties.getProperty("client_token", "").strip();
         if (!token.isEmpty() && (token.length() < 16 || token.length() > 512
@@ -54,7 +54,7 @@ final class ClientConfig {
             throw new IllegalArgumentException("client_token must be 16-512 printable ASCII characters without spaces");
         }
         return new Settings(backend, token,
-                Duration.ofSeconds(seconds), Boolean.parseBoolean(properties.getProperty("chat_alerts", "true")));
+                Duration.ofMillis(milliseconds), Boolean.parseBoolean(properties.getProperty("chat_alerts", "true")));
     }
 
     static void saveChatAlerts(boolean enabled) {
@@ -75,7 +75,7 @@ final class ClientConfig {
         Properties properties = new Properties();
         properties.setProperty("backend_url", "http://127.0.0.1:8080");
         properties.setProperty("client_token", "");
-        properties.setProperty("poll_seconds", "2");
+        properties.setProperty("poll_millis", "250");
         properties.setProperty("chat_alerts", "true");
         return properties;
     }

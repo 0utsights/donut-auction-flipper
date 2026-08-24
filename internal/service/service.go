@@ -39,6 +39,7 @@ type Config struct {
 	ClientToken      string
 	ListingPages     int
 	CollectionPause  time.Duration
+	FastInterval     time.Duration
 	OpportunityLimit int
 	Thresholds       market.Thresholds
 }
@@ -85,6 +86,9 @@ type Status struct {
 	FlipCount           int            `json:"flip_count"`
 	Message             string         `json:"message,omitempty"`
 	API                 donutapi.Stats `json:"api"`
+	FastLastSuccessAt   time.Time      `json:"fast_last_success_at,omitempty"`
+	FastDurationMS      float64        `json:"fast_duration_ms"`
+	FastListingsFetched int            `json:"fast_listings_fetched"`
 }
 
 type Snapshot struct {
@@ -98,16 +102,17 @@ type Snapshot struct {
 }
 
 type Server struct {
-	cfg      Config
-	upstream Upstream
-	history  History
-	logger   *slog.Logger
-	now      func() time.Time
-	current  atomic.Pointer[Snapshot]
-	engine   atomic.Pointer[market.Engine]
-	version  atomic.Uint64
-	cycleMu  sync.Mutex
-	stored   []market.Transaction
+	cfg       Config
+	upstream  Upstream
+	history   History
+	logger    *slog.Logger
+	now       func() time.Time
+	current   atomic.Pointer[Snapshot]
+	engine    atomic.Pointer[market.Engine]
+	version   atomic.Uint64
+	cycleMu   sync.Mutex
+	publishMu sync.Mutex
+	stored    []market.Transaction
 }
 
 func New(cfg Config, upstream Upstream, history History, logger *slog.Logger) (*Server, error) {
@@ -125,6 +130,9 @@ func New(cfg Config, upstream Upstream, history History, logger *slog.Logger) (*
 	}
 	if cfg.CollectionPause <= 0 {
 		cfg.CollectionPause = 5 * time.Second
+	}
+	if cfg.FastInterval <= 0 {
+		cfg.FastInterval = 250 * time.Millisecond
 	}
 	if cfg.OpportunityLimit <= 0 {
 		cfg.OpportunityLimit = 100
@@ -154,6 +162,11 @@ func New(cfg Config, upstream Upstream, history History, logger *slog.Logger) (*
 	}
 	initial := &Snapshot{GeneratedAt: server.now(), Status: Status{State: "starting", HistorySize: len(server.stored), Message: "waiting for first official API scan"}, Thresholds: cfg.Thresholds, Flips: []Flip{}}
 	server.current.Store(initial)
+	if len(server.stored) > 0 {
+		engine := market.NewEngine()
+		engine.AddTransactions(server.stored)
+		server.engine.Store(engine)
+	}
 	return server, nil
 }
 
@@ -171,17 +184,34 @@ func (s *Server) CollectOnce(ctx context.Context) error {
 	s.cycleMu.Lock()
 	defer s.cycleMu.Unlock()
 	started := s.now()
-	previous := s.Snapshot()
-	previous.Status.State = "collecting"
-	previous.Status.CycleStartedAt = started
-	previous.Status.Message = "reading transactions and active auction pages"
-	previous.GeneratedAt = started
-	s.current.Store(&previous)
+	s.updateCurrent(func(previous *Snapshot) {
+		previous.Status.State = "collecting"
+		previous.Status.CycleStartedAt = started
+		previous.Status.Message = "reading transactions and active auction pages"
+		previous.GeneratedAt = started
+	})
 
 	transactions, err := s.upstream.AllTransactionPages(ctx)
 	if err != nil {
 		return s.fail(started, fmt.Errorf("transactions: %w", err))
 	}
+	s.stored = state.Merge(s.stored, transactions, s.now(), 31*24*time.Hour, 100_000)
+	if s.history != nil {
+		if err := s.history.Save(s.stored); err != nil {
+			return s.fail(started, fmt.Errorf("save transaction history: %w", err))
+		}
+	}
+	engine := market.NewEngine()
+	engine.AddTransactions(s.stored)
+	// Keep broad active-book construction off the live engine so its 9,680-row
+	// merge cannot pause newest-page detection. A fresh install without retained
+	// history receives a sale-only seed while the first broad scan finishes.
+	if s.engine.Load() == nil {
+		fastSeed := market.NewEngine()
+		fastSeed.AddTransactions(s.stored)
+		s.engine.Store(fastSeed)
+	}
+
 	listings := make([]market.Listing, 0, 4096)
 	reachedCap := true
 	for page := 1; page <= s.cfg.ListingPages; page++ {
@@ -195,15 +225,6 @@ func (s *Server) CollectOnce(ctx context.Context) error {
 			break
 		}
 	}
-
-	s.stored = state.Merge(s.stored, transactions, s.now(), 31*24*time.Hour, 100_000)
-	if s.history != nil {
-		if err := s.history.Save(s.stored); err != nil {
-			return s.fail(started, fmt.Errorf("save transaction history: %w", err))
-		}
-	}
-	engine := market.NewEngine()
-	engine.AddTransactions(s.stored)
 	engine.ObserveBatch(listings)
 	marketSnapshot := engine.Snapshot()
 	opportunities, analysis := engine.AnalyzeOpportunities(s.cfg.Thresholds, s.cfg.OpportunityLimit)
@@ -222,31 +243,35 @@ func (s *Server) CollectOnce(ctx context.Context) error {
 		ListingsFetched: len(listings), TransactionsFetched: len(transactions), HistorySize: len(s.stored),
 		ValuationCount: len(marketSnapshot.Valuations), FlipCount: len(flips), Message: message, API: s.upstream.Stats(),
 	}
-	version := s.version.Add(1)
 	s.engine.Store(engine)
-	s.current.Store(&Snapshot{Version: version, GeneratedAt: now, Status: status, Thresholds: s.cfg.Thresholds,
+	version := s.publishBroadSnapshot(Snapshot{GeneratedAt: now, Status: status, Thresholds: s.cfg.Thresholds,
 		Analysis: analysis, Valuations: topValuations(marketSnapshot.Valuations, 25), Flips: flips})
 	s.logger.Info("auction scan complete", "version", version, "transactions", len(transactions), "history", len(s.stored), "listings", len(listings), "valuations", len(marketSnapshot.Valuations), "flips", len(flips), "duration", now.Sub(started))
 	return nil
 }
 
 func (s *Server) fail(started time.Time, collectionErr error) error {
-	current := s.Snapshot()
 	now := s.now()
-	current.GeneratedAt = now
-	current.Status.State = "error"
-	current.Status.CycleStartedAt = started
-	current.Status.CycleCompletedAt = now
-	current.Status.CycleDurationMS = float64(now.Sub(started)) / float64(time.Millisecond)
-	current.Status.NextCollectionAt = now.Add(s.cfg.CollectionPause)
-	current.Status.Message = safeMessage(collectionErr)
-	current.Status.API = s.upstream.Stats()
-	s.current.Store(&current)
+	s.updateCurrent(func(current *Snapshot) {
+		current.GeneratedAt = now
+		current.Status.State = "error"
+		current.Status.CycleStartedAt = started
+		current.Status.CycleCompletedAt = now
+		current.Status.CycleDurationMS = float64(now.Sub(started)) / float64(time.Millisecond)
+		current.Status.NextCollectionAt = now.Add(s.cfg.CollectionPause)
+		current.Status.Message = safeMessage(collectionErr)
+		current.Status.API = s.upstream.Stats()
+	})
 	s.logger.Error("auction scan failed", "error", collectionErr)
 	return collectionErr
 }
 
 func (s *Server) RunCollector(ctx context.Context) {
+	go s.runBroadCollector(ctx)
+	s.runFastCollector(ctx)
+}
+
+func (s *Server) runBroadCollector(ctx context.Context) {
 	for {
 		_ = s.CollectOnce(ctx)
 		timer := time.NewTimer(s.cfg.CollectionPause)
@@ -257,6 +282,105 @@ func (s *Server) RunCollector(ctx context.Context) {
 		case <-timer.C:
 		}
 	}
+}
+
+func (s *Server) runFastCollector(ctx context.Context) {
+	for {
+		_ = s.CollectFastOnce(ctx)
+		timer := time.NewTimer(s.cfg.FastInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+// CollectFastOnce scans only the newest page and publishes against the latest
+// completed-sale model. It is deliberately independent of the broad collector.
+func (s *Server) CollectFastOnce(ctx context.Context) error {
+	started := s.now()
+	listings, err := s.upstream.AuctionPage(ctx, 1, "", "recently_listed")
+	if err != nil {
+		s.logger.Warn("fast auction refresh failed", "error", err)
+		return err
+	}
+	engine := s.engine.Load()
+	if engine == nil {
+		return nil
+	}
+	engine.ObserveBatch(listings)
+	opportunities, analysis := engine.AnalyzeOpportunities(s.cfg.Thresholds, s.cfg.OpportunityLimit)
+	flips := make([]Flip, 0, len(opportunities))
+	for _, opportunity := range opportunities {
+		flips = append(flips, mapFlip(opportunity))
+	}
+	now := s.now()
+	marketSnapshot := engine.Snapshot()
+	// A completed broad scan may replace the engine while this request is being
+	// evaluated. Never let a result from that retired model replace the new feed.
+	if s.engine.Load() != engine {
+		return nil
+	}
+	status := Status{ValuationCount: len(marketSnapshot.Valuations), FlipCount: len(flips), API: s.upstream.Stats()}
+	version := s.publishFastSnapshot(Snapshot{GeneratedAt: now, Status: status, Thresholds: s.cfg.Thresholds,
+		Analysis: analysis, Valuations: topValuations(marketSnapshot.Valuations, 25), Flips: flips}, started, now, len(listings))
+	s.logger.Debug("fast auction refresh complete", "version", version, "listings", len(listings), "flips", len(flips), "duration", now.Sub(started))
+	return nil
+}
+
+func (s *Server) updateCurrent(update func(*Snapshot)) {
+	s.publishMu.Lock()
+	defer s.publishMu.Unlock()
+	current := *s.current.Load()
+	update(&current)
+	s.current.Store(&current)
+}
+
+func (s *Server) publishBroadSnapshot(snapshot Snapshot) uint64 {
+	s.publishMu.Lock()
+	defer s.publishMu.Unlock()
+	current := s.current.Load()
+	snapshot.Status.FastLastSuccessAt = current.Status.FastLastSuccessAt
+	snapshot.Status.FastDurationMS = current.Status.FastDurationMS
+	snapshot.Status.FastListingsFetched = current.Status.FastListingsFetched
+	// A fast refresh can finish after the broad collector built its result but
+	// before this lock is acquired. Preserve that newer feed while still
+	// publishing the completed broad-scan counters.
+	if current.GeneratedAt.After(snapshot.GeneratedAt) {
+		snapshot.GeneratedAt = current.GeneratedAt
+		snapshot.Analysis = current.Analysis
+		snapshot.Valuations = current.Valuations
+		snapshot.Flips = current.Flips
+		snapshot.Status.LastSuccessAt = current.Status.LastSuccessAt
+		snapshot.Status.ValuationCount = current.Status.ValuationCount
+		snapshot.Status.FlipCount = current.Status.FlipCount
+	}
+	version := s.version.Add(1)
+	snapshot.Version = version
+	s.current.Store(&snapshot)
+	return version
+}
+
+func (s *Server) publishFastSnapshot(snapshot Snapshot, started, now time.Time, listingCount int) uint64 {
+	s.publishMu.Lock()
+	defer s.publishMu.Unlock()
+	status := s.current.Load().Status
+	status.State = "ready"
+	status.Message = "live newest-page refresh; broad valuation scan runs in background"
+	status.LastSuccessAt = now
+	status.FastLastSuccessAt = now
+	status.FastDurationMS = float64(now.Sub(started)) / float64(time.Millisecond)
+	status.FastListingsFetched = listingCount
+	status.ValuationCount = snapshot.Status.ValuationCount
+	status.FlipCount = snapshot.Status.FlipCount
+	status.API = snapshot.Status.API
+	snapshot.Status = status
+	version := s.version.Add(1)
+	snapshot.Version = version
+	s.current.Store(&snapshot)
+	return version
 }
 
 func (s *Server) Handler() http.Handler {
@@ -488,18 +612,25 @@ func securityHeaders(next http.Handler) http.Handler {
 var debugTemplate = template.Must(template.New("debug").Funcs(template.FuncMap{
 	"money": func(value int64) string { return fmt.Sprintf("$%d", value) },
 	"pct":   func(value int) string { return fmt.Sprintf("%.1f%%", float64(value)/100) },
+	"clock": func(value time.Time) string {
+		if value.IsZero() {
+			return "never"
+		}
+		return value.Local().Format("15:04:05.000")
+	},
 }).Parse(debugHTML))
 
 const debugHTML = `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<meta http-equiv="refresh" content="5"><title>Donut auction debug</title>
+<meta http-equiv="refresh" content="1"><title>Donut auction debug</title>
 <style>body{font:14px monospace;max-width:1100px;margin:24px auto;padding:0 16px;color:#ddd;background:#111}h1,h2{color:#fff}table{border-collapse:collapse;width:100%;margin-bottom:24px}th,td{text-align:left;padding:7px;border-bottom:1px solid #333}.ready{color:#7ee787}.error{color:#ff7b72}.collecting{color:#d2a8ff}code,a{color:#a5d6ff}.muted{color:#999}.funnel{line-height:1.7}</style>
 </head><body><h1>Donut auction API debug</h1>
 <p>Status: <strong class="{{.Status.State}}">{{.Status.State}}</strong> · snapshot {{.Version}} · {{.Status.Message}}</p>
 <p>Listings {{.Status.ListingsFetched}} · latest transactions {{.Status.TransactionsFetched}} · retained history {{.Status.HistorySize}} · valuations {{.Status.ValuationCount}} · flips {{.Status.FlipCount}}</p>
+<p>Fast lane: {{.Status.FastListingsFetched}} newest rows · last publish {{clock .Status.FastLastSuccessAt}} · {{printf "%.0f" .Status.FastDurationMS}}ms upstream-to-feed</p>
 <p>API requests {{.Status.API.Requests}} · errors {{.Status.API.Errors}} · retries {{.Status.API.Retries}} · last latency {{printf "%.0f" .Status.API.LastLatencyMS}}ms</p>
 <p>Thresholds: profit ≥ {{money .Thresholds.MinProfit}} · margin ≥ {{pct .Thresholds.MinMarginBPS}} · confidence ≥ {{pct .Thresholds.MinConfidenceBPS}} · 24h sales ≥ {{.Thresholds.MinVolume24h}}</p>
-<p class="muted">Refreshes every five seconds. The API key is backend-only and is never rendered.</p>
+<p class="muted">Refreshes every second. The API key is backend-only and is never rendered.</p>
 <h2>Decision funnel</h2><p class="funnel">{{.Analysis.Listings}} listings → no valuation {{.Analysis.NoValuation}} · no singular/exact-quantity evidence {{.Analysis.NoQuantityEvidence}} · low confidence {{.Analysis.LowConfidence}} · low volume {{.Analysis.LowVolume}} · risk blocked {{.Analysis.RiskBlocked}} · low profit {{.Analysis.LowProfit}} · low margin {{.Analysis.LowMargin}} · over budget {{.Analysis.OverBudget}} · expired {{.Analysis.Expired}} · duplicate signature {{.Analysis.DuplicateSignature}} → <strong>{{.Analysis.Published}} published</strong></p>
 <h2>Current opportunities</h2><table><thead><tr><th>Item</th><th>Price</th><th>Unit refs (1 / exact / used)</th><th>Total ref</th><th>Profit</th><th>Margin</th><th>Confidence</th><th>24h sales (1 / exact)</th><th>Basis</th><th>Seller / item routes</th></tr></thead><tbody>
 {{range .Flips}}<tr><td>{{.Quantity}}× {{.ItemName}}</td><td>{{money .Price}}</td><td>{{money .SingularUnitRef}} / {{money .QuantityUnitRef}} / <strong>{{money .UnitReference}}</strong></td><td>{{money .ReferenceValue}}</td><td>{{money .Profit}}</td><td>{{pct .MarginBPS}}</td><td>{{pct .ConfidenceBPS}}</td><td>{{.SingularVolume}} / {{.QuantityVolume}}</td><td>{{.PricingBasis}}</td><td>seller <code>{{.SellerCommand}}</code><br>item <code>{{.ItemCommand}}</code></td></tr>{{else}}<tr><td colspan="10">No flips currently pass the configured safety thresholds.</td></tr>{{end}}</tbody></table>

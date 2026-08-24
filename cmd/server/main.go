@@ -44,6 +44,10 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	fastInterval, err := envDuration("DN_FAST_INTERVAL", 250*time.Millisecond, 250*time.Millisecond, 10*time.Second)
+	if err != nil {
+		return err
+	}
 	thresholds := market.Thresholds{}
 	if thresholds.MinProfit, err = envInt64("DN_MIN_PROFIT", 100_000, 1, 9_000_000_000_000_000_000); err != nil {
 		return err
@@ -67,7 +71,7 @@ func run(logger *slog.Logger) error {
 	})
 	history := state.NewFile(env("DN_HISTORY_FILE", "data/history.json.gz"), 31*24*time.Hour, 100_000)
 	application, err := service.New(service.Config{
-		Address: address, ClientToken: clientToken, ListingPages: listingPages, CollectionPause: pause,
+		Address: address, ClientToken: clientToken, ListingPages: listingPages, CollectionPause: pause, FastInterval: fastInterval,
 		OpportunityLimit: 100, Thresholds: thresholds,
 	}, upstream, history, logger)
 	if err != nil {

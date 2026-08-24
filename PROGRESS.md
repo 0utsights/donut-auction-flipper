@@ -4,7 +4,7 @@ Last updated: 2026-08-23
 
 ## Current system
 
-- One rate-limited/retrying official API client reads up to ten transaction pages and the newest 220 44-row active-auction pages per cycle.
+- One rate-limited/retrying official API client runs a sub-second newest-page detection lane alongside a background ten-transaction-page/220-active-page valuation lane.
 - `robust-v3-quantity` ranks opportunities using the lower of quantity-one and exact-resale-quantity per-item valuations, behind profit, margin, confidence, liquidity, expiry, and risk gates.
 - Recent transactions persist in a deduplicated, versioned, compressed, safely rotated, 31-day/100,000-row local archive.
 - One HTTP process exposes health, an ETag-enabled compact flip feed, JSON debug state, and a zero-dependency live debug page.
@@ -16,11 +16,12 @@ Last updated: 2026-08-23
 
 - `go test ./...` passes.
 - `go vet ./...` passes.
-- Fabric clean JUnit/build passes with JDK 21, Gradle 9.7, Loader 0.19.2, Minecraft 1.21.11, and Fabric API 0.141.6.
+- Fabric JUnit/build passes with JDK 21, Gradle 9.6.1, Loader 0.19.2, Minecraft 1.21.11, and Fabric API 0.141.6.
 - API handler tests cover auth, ETags/304, short-page completion, failure state, safe public binding, and command sanitization.
 - History tests cover round-trip compression, retention, deduplication, ordering, and caps.
 - Mod tests cover a valid feed, injected-command rejection, and feed-size bounds.
-- Final live authenticated scan: 1,000 transaction rows, 9,680 newest listings, 9,749 retained unique sales, 513 valuation families, two qualified flips, and zero upstream errors/retries. The exact counts change with the market.
+- Final live authenticated fast-lane soak: 99 snapshot versions across a complete broad scan published 741ms apart on average and 984ms maximum; upstream-to-feed duration was 733ms maximum, with zero upstream errors, retries, or rate-limit responses.
+- Concurrent broad scan: 1,000 transaction rows and 9,680 newest listings completed in 87.8 seconds without blocking fast publication. At that moment the retained archive contained 77,216 unique sales and the model contained 1,099 valuation families; market-dependent flip counts change continuously.
 - Docker Compose configuration validates. The local Docker daemon is not running, so the final image could not be executed here.
 - Windows race instrumentation requires CGO and is unavailable locally; Linux CI runs `go test -race ./...`.
 
@@ -33,6 +34,8 @@ Last updated: 2026-08-23
 5. Rejected stack false positives by making quantity-one evidence mandatory, requiring an exact-quantity completed-sale cohort, conservatively combining both models, and exposing unit/total references in debug output.
 6. The follow-up quantity review added invariant tests for total-to-unit normalization, exact-quantity active competition, missing-cohort rejection, dual-reference audit fields, and a dedicated ranking benchmark. No further quantity-path issue in the current scope justified additional complexity.
 7. Replaced ambiguous display-name searches with seller-first navigation plus canonical underscore item-ID fallbacks, added independently validated dual chat actions, and documented why synthetic API fingerprints cannot directly open a listing.
+8. Split newest-listing detection from broad collection, seeded the engine from retained history at startup, reduced local mod polling to 250ms, preserved last-good feeds on fast failures, and exposed measured fast-lane latency in debug output.
+9. The fresh concurrency/operations review prevented a finishing broad scan from replacing a newer fast feed, added regression coverage for ordering and model isolation, moved the 9,680-row active-book merge off the live fast engine after observing a 1.36-second contention spike, reduced debug-page refresh from five seconds to one, and verified shared-rate-limit behavior live.
 
 ## Intentional omissions
 

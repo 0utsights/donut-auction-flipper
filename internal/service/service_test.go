@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,6 +20,8 @@ type fakeUpstream struct {
 	listings     []market.Listing
 	err          error
 	pages        int
+	pageStarted  chan<- struct{}
+	pageRelease  <-chan struct{}
 }
 
 func (f *fakeUpstream) AllTransactionPages(context.Context) ([]market.Transaction, error) {
@@ -28,6 +31,15 @@ func (f *fakeUpstream) AllTransactionPages(context.Context) ([]market.Transactio
 	return f.transactions, nil
 }
 func (f *fakeUpstream) AuctionPage(context.Context, int, string, string) ([]market.Listing, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.pageStarted != nil {
+		f.pageStarted <- struct{}{}
+	}
+	if f.pageRelease != nil {
+		<-f.pageRelease
+	}
 	f.pages++
 	return f.listings, nil
 }
@@ -122,6 +134,104 @@ func TestFailurePreservesPreviousFeed(t *testing.T) {
 	}
 	if server.Snapshot().Status.State != "error" {
 		t.Fatalf("status=%+v", server.Snapshot().Status)
+	}
+}
+
+func TestFastCollectionPublishesNewestPageFromStoredHistory(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	item := market.Item{ID: "minecraft:diamond", Quantity: 1, DisplayName: "Diamond"}
+	transactions := make([]market.Transaction, 0, 12)
+	for index := 0; index < 12; index++ {
+		transactions = append(transactions, market.Transaction{
+			SellerName: fmt.Sprintf("seller-%d", index), Item: item, TotalPrice: 1_000_000,
+			SoldAt: now.Add(-time.Duration(index) * time.Minute), Source: market.SourceDonutAPI,
+		})
+	}
+	listing := market.Listing{AuthoritativeID: "fast-auction", SellerName: "cheap", Item: item,
+		TotalPrice: 500_000, ExpiresAt: now.Add(time.Hour), Source: market.SourceDonutAPI}
+	upstream := &fakeUpstream{listings: []market.Listing{listing}}
+	server, err := New(Config{FastInterval: 250 * time.Millisecond, Thresholds: market.Thresholds{
+		MinProfit: 1, MinMarginBPS: 1, MinConfidenceBPS: 1, MinVolume24h: 1,
+	}}, upstream, &memoryHistory{values: transactions}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.now = func() time.Time { return now }
+	if err := server.CollectFastOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := server.Snapshot()
+	if snapshot.Status.State != "ready" || snapshot.Version != 1 || len(snapshot.Flips) != 1 {
+		t.Fatalf("fast snapshot was not published: %+v", snapshot)
+	}
+	if snapshot.Status.FastListingsFetched != 1 || !snapshot.Status.FastLastSuccessAt.Equal(now) {
+		t.Fatalf("fast status missing: %+v", snapshot.Status)
+	}
+	upstream.err = errors.New("temporary fast failure")
+	if err := server.CollectFastOnce(context.Background()); err == nil {
+		t.Fatal("expected fast refresh error")
+	}
+	if after := server.Snapshot(); after.Version != snapshot.Version || after.Status.State != "ready" || len(after.Flips) != 1 {
+		t.Fatalf("fast failure destroyed last good feed: %+v", after)
+	}
+}
+
+func TestBroadPublishCannotReplaceNewerFastFeed(t *testing.T) {
+	server, err := New(Config{}, &fakeUpstream{}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC()
+	newerFlip := Flip{Key: "newer", ItemID: "minecraft:diamond", ItemName: "Diamond", Quantity: 1,
+		Price: 1, ReferenceValue: 2, Profit: 1, SearchCommand: "/ah diamond", SellerCommand: "/ah diamond", ItemCommand: "/ah diamond"}
+	server.current.Store(&Snapshot{Version: 7, GeneratedAt: base.Add(time.Second), Status: Status{
+		State: "ready", LastSuccessAt: base.Add(time.Second), FastLastSuccessAt: base.Add(time.Second),
+		FastDurationMS: 500, FastListingsFetched: 44, ValuationCount: 9, FlipCount: 1,
+	}, Flips: []Flip{newerFlip}})
+	server.version.Store(7)
+
+	server.publishBroadSnapshot(Snapshot{GeneratedAt: base, Status: Status{
+		State: "ready", ListingsFetched: 9_680, TransactionsFetched: 1_000, ValuationCount: 20,
+	}, Flips: []Flip{{Key: "stale"}}})
+
+	snapshot := server.Snapshot()
+	if snapshot.Version != 8 || len(snapshot.Flips) != 1 || snapshot.Flips[0].Key != "newer" {
+		t.Fatalf("broad publish replaced a newer fast feed: %+v", snapshot)
+	}
+	if snapshot.Status.ListingsFetched != 9_680 || snapshot.Status.TransactionsFetched != 1_000 {
+		t.Fatalf("broad counters were not published: %+v", snapshot.Status)
+	}
+	if snapshot.Status.FastListingsFetched != 44 || snapshot.Status.ValuationCount != 9 || snapshot.Status.FlipCount != 1 {
+		t.Fatalf("newer fast status was not preserved: %+v", snapshot.Status)
+	}
+}
+
+func TestBroadCollectionBuildsAwayFromLiveFastEngine(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	transactions := []market.Transaction{{
+		SellerName: "seller", Item: market.Item{ID: "minecraft:diamond", Quantity: 1},
+		TotalPrice: 1_000, SoldAt: now.Add(-time.Minute), Source: market.SourceDonutAPI,
+	}}
+	pageStarted := make(chan struct{})
+	pageRelease := make(chan struct{})
+	upstream := &fakeUpstream{pageStarted: pageStarted, pageRelease: pageRelease}
+	server, err := New(Config{ListingPages: 1}, upstream, &memoryHistory{values: transactions}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveEngine := server.engine.Load()
+	completed := make(chan error, 1)
+	go func() { completed <- server.CollectOnce(context.Background()) }()
+	<-pageStarted
+	if during := server.engine.Load(); during != liveEngine {
+		t.Fatal("broad collector replaced the live engine before its active-book merge completed")
+	}
+	close(pageRelease)
+	if err := <-completed; err != nil {
+		t.Fatal(err)
+	}
+	if after := server.engine.Load(); after == liveEngine {
+		t.Fatal("completed broad model was not installed")
 	}
 }
 

@@ -26,7 +26,7 @@ go run ./cmd/server
 
 Open [http://127.0.0.1:8080](http://127.0.0.1:8080) for the live debug page. It starts with no fake data, reports collection progress/errors, and shows every flip that passes the thresholds. Health is at `/healthz`; the compact mod feed is `/api/v1/flips`.
 
-The default recent-listing window takes roughly a minute to scan because the client stays below Donut's published request limit. It covers the newest 9,680 rows (220 × 44), not the entire deep auction book. Completed-sale history is the broad-market authority and is retained in `data/history.json.gz`, capped at 100,000 rows and 31 days.
+The backend has two API lanes. The fast lane refreshes the newest 44 listings about every 0.5–0.8 seconds under load and publishes immediately. A background lane uses the remaining rate-limit budget to refresh completed-sale history and the newest 9,680 rows (220 × 44) for broad valuation and active-market depth. Completed-sale history is retained in `data/history.json.gz`, capped at 100,000 rows and 31 days.
 
 Stacked listings are quantity-safe: the backend requires both quantity-one sales and completed sales at the exact listed quantity, uses the lower per-item quick-sell estimate, then multiplies by the unchanged resale quantity. It will not recommend a stack based on profit that only exists after splitting it.
 
@@ -39,7 +39,7 @@ The first launch creates `config/donut-network.properties`:
 ```properties
 backend_url=http://127.0.0.1:8080
 client_token=
-poll_seconds=2
+poll_millis=250
 chat_alerts=true
 ```
 
@@ -67,6 +67,7 @@ Put that same 16-512 character printable token in the mod's `client_token`. It i
 | `DN_ADDRESS` | `127.0.0.1:8080` | HTTP/debug bind |
 | `DN_CLIENT_TOKEN` | empty on loopback | Protects the mod feed |
 | `DN_LISTING_PAGES` | `220` | Newest 44-row auction pages per scan (max 220) |
+| `DN_FAST_INTERVAL` | `250ms` | Pause between newest-page requests; effective cadence also respects the shared API limiter |
 | `DN_COLLECTION_PAUSE` | `5s` | Pause after a completed scan |
 | `DN_HISTORY_FILE` | `data/history.json.gz` | Bounded compressed sale history |
 | `DN_MIN_PROFIT` | `100000` | Minimum expected profit |

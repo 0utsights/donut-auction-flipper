@@ -2,7 +2,7 @@
 
 ## `GET /`
 
-Plain auto-refreshing operational/debug page. It shows scan state, counts, upstream request statistics, current thresholds, the rejection funnel, highest-volume valuations, and qualified flips. No fake fallback rows are generated.
+Plain one-second auto-refreshing operational/debug page. It shows fast-lane publish time and duration, broad-scan state and counts, upstream request statistics, current thresholds, the rejection funnel, highest-volume valuations, and qualified flips. No fake fallback rows are generated.
 
 ## `GET /healthz`
 
