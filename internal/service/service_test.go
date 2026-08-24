@@ -257,6 +257,25 @@ func TestStartupFeedUsesJSONArray(t *testing.T) {
 	}
 }
 
+func TestOrderAuctionPageReportsMissingOrderSourceWithoutFakeRows(t *testing.T) {
+	server, err := New(Config{Address: "127.0.0.1:8080"}, &fakeUpstream{}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/order-auction-flipper", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("order-auction page code=%d", response.Code)
+	}
+	body := response.Body.String()
+	for _, expected := range []string{"Order-auction flipper", "Order source:</strong> <span class=\"missing\">not connected", "Waiting for real order snapshots. No simulated rows."} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("order-auction page missing %q", expected)
+		}
+	}
+}
+
 func TestFeedETagChangesWithFailureState(t *testing.T) {
 	upstream := &fakeUpstream{}
 	server, err := New(Config{Address: "127.0.0.1:8080"}, upstream, nil, nil)

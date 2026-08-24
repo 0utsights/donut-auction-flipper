@@ -7,6 +7,8 @@ An API-first DonutSMP auction flipper with two moving parts:
 
 There is no screen parser, worker network, sharding, WebSocket, PostgreSQL, Node dashboard, telemetry, or automatic purchasing in the normal path. The older full system and parser remain preserved at Git tag `legacy-full-system-v0.4.0` and branch `archive/full-system-v0.4.0`.
 
+The stable auction-only product is released as `auction-only-v1.0.0` on branch `codex/auction-only`. Auction-plus-orders research continues separately on `codex/auction-orders`; its order page never emits results until a real in-game order source is connected.
+
 ## Run locally
 
 Requirements: Go 1.26. The API key stays in the backend process and must never be placed in the mod config.
@@ -25,6 +27,8 @@ go run ./cmd/server
 ```
 
 Open [http://127.0.0.1:8080](http://127.0.0.1:8080) for the live debug page. It starts with no fake data, reports collection progress/errors, and shows every flip that passes the thresholds. Health is at `/healthz`; the compact mod feed is `/api/v1/flips`.
+
+On the auction-orders development branch, [http://127.0.0.1:8080/order-auction-flipper](http://127.0.0.1:8080/order-auction-flipper) shows source readiness and qualification rules. It remains empty until real `/orders` menu observations exist.
 
 The backend has two API lanes. The fast lane refreshes the newest 44 listings about every 0.5–0.8 seconds under load and publishes immediately. A background lane uses the remaining rate-limit budget to refresh completed-sale history and the newest 9,680 rows (220 × 44) for broad valuation and active-market depth. Completed-sale history is retained in `data/history.json.gz`, capped at 100,000 rows and 31 days.
 

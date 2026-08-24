@@ -46,6 +46,12 @@ A one-second 220-page scan is impossible under the upstream 250-request/minute l
 
 Total item sales can combine incompatible price regimes and do not prove that an item will clear at our proposed resale price. `robust-v4-price-volume` therefore counts completed 24-hour volume only inside a ±10% band around the quick-sell target for confidence, minimum-volume gating, and sell-time estimates. It also requires that qualifying target-price volume is not supplied by only one seller. Total 24-hour item volume remains visible as context but cannot qualify an alert. The active price cap uses the second-cheapest distinct seller, so two independent competing listings are treated as real market evidence while one bait listing cannot set the target alone.
 
+## 2026-08-23 — Freeze auction-only; research orders separately
+
+The verified API-only product is frozen at branch `codex/auction-only`, tag/release `auction-only-v1.0.0`. Auction-plus-orders development continues on `codex/auction-orders`. The official API has no order endpoints, so the new page must remain empty until a thin Fabric reader supplies real `/orders` menu observations. Order parsing is deliberately deferred until the creation/browse menus are reviewed. No third-party tracker, simulated row, automatic purchase, or inventory click is accepted as a substitute.
+
+Order-auction ranking will require both absolute batch profit and margin, then prioritize executable daily profit, profit per scarce market slot, and observed liquidity. The initial batch-profit floor is $100,000, which rejects the example 64-sand spread ($16,496 total) while allowing a 64-block batch earning $5,000 per block ($320,000 total). Base planning assumes 20 auction and 20 order slots; the limit is rank-dependent and must remain configurable once captured in game.
+
 ## 2026-08-22 — Barebones client and debug UI
 
 The in-game screen and backend debug page are intentionally plain, information-first interfaces. The Fabric screen uses an opaque fill and does not call `renderBackground`, fixing the Minecraft 1.21.11 `Can only blur once per frame` crash. Styling remains deferred.

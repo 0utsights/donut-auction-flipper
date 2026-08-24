@@ -393,6 +393,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/flips", s.authorize(s.flips))
 	mux.HandleFunc("GET /api/v1/debug", s.authorize(s.debugJSON))
 	mux.HandleFunc("GET /api/v1/debug/valuation", s.authorize(s.debugValuation))
+	mux.HandleFunc("GET /order-auction-flipper", s.authorize(s.orderAuctionPage))
 	mux.HandleFunc("GET /", s.authorize(s.debugPage))
 	return securityHeaders(mux)
 }
@@ -450,6 +451,13 @@ func (s *Server) debugPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := debugTemplate.Execute(w, s.Snapshot()); err != nil {
 		s.logger.Warn("render debug page", "error", err)
+	}
+}
+
+func (s *Server) orderAuctionPage(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := orderAuctionTemplate.Execute(w, s.Snapshot()); err != nil {
+		s.logger.Warn("render order-auction page", "error", err)
 	}
 }
 
@@ -627,11 +635,13 @@ var debugTemplate = template.Must(template.New("debug").Funcs(template.FuncMap{
 	},
 }).Parse(debugHTML))
 
+var orderAuctionTemplate = template.Must(template.New("order-auction").Parse(orderAuctionHTML))
+
 const debugHTML = `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <meta http-equiv="refresh" content="1"><title>Donut auction debug</title>
 <style>body{font:14px monospace;max-width:1100px;margin:24px auto;padding:0 16px;color:#ddd;background:#111}h1,h2{color:#fff}table{border-collapse:collapse;width:100%;margin-bottom:24px}th,td{text-align:left;padding:7px;border-bottom:1px solid #333}.ready{color:#7ee787}.error{color:#ff7b72}.collecting{color:#d2a8ff}code,a{color:#a5d6ff}.muted{color:#999}.funnel{line-height:1.7}</style>
-</head><body><h1>Donut auction API debug</h1>
+</head><body><nav><a href="/">Auction API debug</a> · <a href="/order-auction-flipper">Order-auction flipper</a></nav><h1>Donut auction API debug</h1>
 <p>Status: <strong class="{{.Status.State}}">{{.Status.State}}</strong> · snapshot {{.Version}} · {{.Status.Message}}</p>
 <p>Listings {{.Status.ListingsFetched}} · latest transactions {{.Status.TransactionsFetched}} · retained history {{.Status.HistorySize}} · valuations {{.Status.ValuationCount}} · flips {{.Status.FlipCount}}</p>
 <p>Fast lane: {{.Status.FastListingsFetched}} newest rows · last publish {{clock .Status.FastLastSuccessAt}} · {{printf "%.0f" .Status.FastDurationMS}}ms upstream-to-feed</p>
@@ -643,4 +653,29 @@ const debugHTML = `<!doctype html>
 {{range .Flips}}<tr><td>{{.Quantity}}× {{.ItemName}}</td><td>{{money .Price}}</td><td>{{money .SingularUnitRef}} / {{money .QuantityUnitRef}} / <strong>{{money .UnitReference}}</strong></td><td>{{money .ReferenceValue}}</td><td>{{money .Profit}}</td><td>{{pct .MarginBPS}}</td><td>{{pct .ConfidenceBPS}}</td><td>{{.Volume24h}} near {{money .PriceBandLow}}–{{money .PriceBandHigh}} from {{.PriceSellers}} sellers / {{.MarketVolume24h}} all</td><td>{{.PricingBasis}}</td><td>seller <code>{{.SellerCommand}}</code><br>item <code>{{.ItemCommand}}</code></td></tr>{{else}}<tr><td colspan="10">No flips currently pass the configured safety thresholds.</td></tr>{{end}}</tbody></table>
 <h2>Highest-volume valuations</h2><table><thead><tr><th>Signature</th><th>Quick sell</th><th>Fair</th><th>Confidence</th><th>24h near target / all</th><th>Samples</th><th>Sell time</th><th>Risk flags</th></tr></thead><tbody>
 {{range .Valuations}}<tr><td><a href="/api/v1/debug/valuation?signature={{urlquery .Signature}}">{{.Signature}}</a></td><td>{{money .QuickSellValue}}</td><td>{{money .FairValue}}</td><td>{{pct .ConfidenceBPS}}</td><td>{{.Volume24h}} near {{money .PriceBandLow}}–{{money .PriceBandHigh}} from {{.PriceSellerCount}} sellers / {{.MarketVolume24h}} all</td><td>{{.SampleCount}}</td><td>{{.ExpectedSellMinutes}}m</td><td>{{range .RiskFlags}}{{.}} {{end}}</td></tr>{{else}}<tr><td colspan="8">No completed-sale model is ready yet.</td></tr>{{end}}</tbody></table>
+</body></html>`
+
+const orderAuctionHTML = `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<meta http-equiv="refresh" content="5"><title>Order-auction flipper</title>
+<style>body{font:14px monospace;max-width:1100px;margin:24px auto;padding:0 16px;color:#ddd;background:#111}h1,h2{color:#fff}table{border-collapse:collapse;width:100%;margin-bottom:24px}th,td{text-align:left;padding:7px;border-bottom:1px solid #333}code,a{color:#a5d6ff}.ready{color:#7ee787}.missing{color:#ffb86c}.muted{color:#999}.box{border:1px solid #333;padding:12px;margin:16px 0}</style>
+</head><body><nav><a href="/">Auction API debug</a> · <a href="/order-auction-flipper">Order-auction flipper</a></nav>
+<h1>Order-auction flipper</h1>
+<p>Find executable spreads between Donut orders and auctions while respecting limited market slots.</p>
+<div class="box"><strong>Auction source:</strong> <span class="ready">connected</span> · snapshot {{.Version}} · {{.Status.ValuationCount}} valuations<br>
+<strong>Order source:</strong> <span class="missing">not connected</span> · the official Donut API does not expose orders<br>
+<strong>Result:</strong> no opportunities are published until real order rows and fill evidence are available.</div>
+<h2>Qualification rules</h2>
+<table><tbody>
+<tr><th>Batch profit</th><td>At least $100,000 per intended auction stack/listing. This rejects a 64-sand spread of $16,496 even if its percentage margin is large.</td></tr>
+<tr><th>Margin</th><td>At least 10% after using the conservative auction target. Absolute profit and percentage margin must both pass.</td></tr>
+<tr><th>Auction demand</th><td>At least 2 completed near-target batches in 24h from at least 2 sellers.</td></tr>
+<tr><th>Order liquidity</th><td>Enough immediately available quantity for AH→order, or measured fulfillment velocity for order→AH.</td></tr>
+<tr><th>Slot efficiency</th><td>Rank by conservative daily profit, then profit per listing batch, then executable volume. Base planning assumes 20 auction/order slots; ranks may provide more.</td></tr>
+</tbody></table>
+<h2>Opportunity board</h2>
+<table><thead><tr><th>Direction</th><th>Item</th><th>Batch</th><th>Buy</th><th>Sell</th><th>Batch profit</th><th>Margin</th><th>24h executable volume</th><th>Daily profit</th><th>Evidence</th></tr></thead>
+<tbody><tr><td colspan="10" class="muted">Waiting for real order snapshots. No simulated rows.</td></tr></tbody></table>
+<h2>Required order capture</h2>
+<p>A thin Fabric reader should inspect only the <code>/orders</code> inventory menu and send canonical item ID, unit reward, remaining quantity, owner/order identity, expiry, page, and observation time to this local backend. Repeated snapshots let the backend measure fulfillment velocity. It does not need auction parsing, purchase automation, slot clicking, or a third-party market service.</p>
 </body></html>`

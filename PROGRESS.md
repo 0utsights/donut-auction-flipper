@@ -11,6 +11,8 @@ Last updated: 2026-08-23
 - Fabric 1.0.0 polls only that feed, caps/deduplicates chat alerts, validates commands, opens manual auction searches, and provides a plain `N`/`/dn` screen without blur.
 - The upstream API key remains backend-only. Public backend binds require a separate client token.
 - The complete parser/distributed implementation is preserved at tag `legacy-full-system-v0.4.0` and branch `archive/full-system-v0.4.0`.
+- Auction-only v1.0.0 is frozen at tag/release `auction-only-v1.0.0` and branch `codex/auction-only`; active auction-plus-orders work lives on `codex/auction-orders`.
+- `/order-auction-flipper` is an intentionally empty, no-fake-data foundation until an order-only Fabric menu reader is designed from live menu evidence.
 
 ## Verification
 
@@ -38,6 +40,7 @@ Last updated: 2026-08-23
 8. Split newest-listing detection from broad collection, seeded the engine from retained history at startup, reduced local mod polling to 250ms, preserved last-good feeds on fast failures, and exposed measured fast-lane latency in debug output.
 9. The fresh concurrency/operations review prevented a finishing broad scan from replacing a newer fast feed, added regression coverage for ordering and model isolation, moved the 9,680-row active-book merge off the live fast engine after observing a 1.36-second contention spike, reduced debug-page refresh from five seconds to one, and verified shared-rate-limit behavior live.
 10. Reproduced the Lava Chicken split-price market, separated target-price volume from broad item volume, made confidence/volume/sell-time gates use only the ±10% target cohort, recognized two-seller active competition, and exposed both volume measures in debug output.
+11. Released the stable auction-only system with reproducible JAR/backend assets, split future order development onto its own branch, confirmed the official API lacks orders, and added a source-status/ranking-rules page that cannot publish fabricated order opportunities.
 
 ## Intentional omissions
 

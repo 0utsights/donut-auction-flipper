@@ -8,6 +8,10 @@ Plain one-second auto-refreshing operational/debug page. It shows fast-lane publ
 
 Returns `200` after at least one successful scan, including while a later scan is collecting. Returns `503` while starting or when the first scan fails.
 
+## `GET /order-auction-flipper`
+
+Barebones order-to-auction research page. It reports the live auction source, the intentionally missing order source, proposed absolute-profit/margin/liquidity/slot-efficiency gates, and no opportunity rows until real order snapshots are connected.
+
 ## `GET /api/v1/flips`
 
 The Fabric feed. If `DN_CLIENT_TOKEN` is configured, send `Authorization: Bearer <token>`.
