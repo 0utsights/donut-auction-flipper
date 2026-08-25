@@ -17,11 +17,19 @@ services:
       DN_AUCTION_FEE_BPS: ${DN_AUCTION_FEE_BPS:-250}
       DN_ORDER_FEE_BPS: ${DN_ORDER_FEE_BPS:-0}
     volumes: ["market-data:/data"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/api/v1/candidates"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
     restart: unless-stopped
 
   order-collector:
     build: ./collector
-    depends_on: [auction-server]
+    depends_on:
+      auction-server:
+        condition: service_healthy
     environment:
       DN_COLLECTOR_CONFIG: /run/secrets/collector-accounts.json
     volumes:

@@ -1,0 +1,11 @@
+*
+!Dockerfile
+!Dockerfile.prebuilt
+!go.mod
+!go.sum
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+!.second-pc-build/
+!.second-pc-build/donut-server

@@ -1,0 +1,15 @@
+*
+!Dockerfile
+!Dockerfile.prebuilt
+!package.json
+!package-lock.json
+!tsconfig.json
+!src/
+!src/**
+!.second-pc-build/
+!.second-pc-build/package.json
+!.second-pc-build/package-lock.json
+!.second-pc-build/node_modules/
+!.second-pc-build/node_modules/**
+!.second-pc-build/dist/
+!.second-pc-build/dist/**
