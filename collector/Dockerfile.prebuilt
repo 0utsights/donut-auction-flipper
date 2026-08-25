@@ -4,7 +4,8 @@ WORKDIR /app
 COPY --chown=collector:collector .second-pc-build/package.json .second-pc-build/package-lock.json ./
 COPY --chown=collector:collector .second-pc-build/node_modules ./node_modules
 COPY --chown=collector:collector .second-pc-build/dist ./dist
+COPY --chmod=755 entrypoint.sh /usr/local/bin/collector-entrypoint
 USER collector
 ENV DN_COLLECTOR_CONFIG=/run/secrets/collector-accounts.json
 VOLUME ["/data/profiles", "/data/captures"]
-ENTRYPOINT ["node", "dist/manager.js"]
+ENTRYPOINT ["collector-entrypoint"]

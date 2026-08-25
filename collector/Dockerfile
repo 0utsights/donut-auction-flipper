@@ -11,7 +11,8 @@ WORKDIR /app
 COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
+COPY --chmod=755 entrypoint.sh /usr/local/bin/collector-entrypoint
 USER collector
 ENV DN_COLLECTOR_CONFIG=/run/secrets/collector-accounts.json
 VOLUME ["/data/profiles", "/data/captures"]
-ENTRYPOINT ["node", "dist/manager.js"]
+ENTRYPOINT ["collector-entrypoint"]

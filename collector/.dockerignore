@@ -1,6 +1,7 @@
 *
 !Dockerfile
 !Dockerfile.prebuilt
+!entrypoint.sh
 !package.json
 !package-lock.json
 !tsconfig.json
