@@ -257,7 +257,7 @@ func TestManualWatchUpgradesAutomaticResearchTask(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = system.Close() })
 	ctx := context.Background()
-	if err = system.store.QueueAutomaticResearch(ctx, []string{"minecraft:diamond_block"}, 5*time.Minute); err != nil {
+	if err = system.store.QueueAutomaticResearch(ctx, []string{"minecraft:diamond_block"}, time.Minute, 5*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = system.AddWatch(ctx, "minecraft:diamond_block"); err != nil {

@@ -79,7 +79,10 @@ func (s *System) CompleteTask(ctx context.Context, value TaskResult) error {
 	if kind != "discovery" || value.Status != "complete" {
 		return nil
 	}
+	return s.queueAutomaticResearch(ctx)
+}
 
+func (s *System) queueAutomaticResearch(ctx context.Context) error {
 	// The auction API establishes the exit value. READY markets take priority,
 	// followed by RESEARCH markets, then by the exact-quantity auction resale
 	// value. Profit score breaks ties so expensive but uneconomic items do not
@@ -111,7 +114,7 @@ func (s *System) CompleteTask(ctx context.Context, value TaskResult) error {
 		seen[candidate.Signature] = struct{}{}
 		signatures = append(signatures, candidate.Signature)
 	}
-	return s.store.QueueAutomaticResearch(ctx, signatures, 5*time.Minute)
+	return s.store.QueueAutomaticResearch(ctx, signatures, time.Minute, 5*time.Minute)
 }
 func (s *System) AddWatch(ctx context.Context, signature string) (Watch, error) {
 	return s.store.AddWatch(ctx, signature, 15*time.Minute)
@@ -191,7 +194,11 @@ func (s *System) refreshLocked(ctx context.Context, engine *market.Engine) error
 	version := s.version.Add(1)
 	s.candidates.Store(&CandidateFeed{Version: version, GeneratedAt: now, Candidates: candidates})
 	s.lastRefresh.Store(s.now().UnixMilli())
-	return nil
+	// Candidate economics may first become valid on the final submitted page,
+	// after the discovery completion request has already used the preceding feed.
+	// Queue here as well so a valuable API-backed market can preempt the next
+	// discovery page instead of waiting for another complete traversal.
+	return s.queueAutomaticResearch(ctx)
 }
 
 func (s *System) Debug(ctx context.Context) (DebugSnapshot, error) {

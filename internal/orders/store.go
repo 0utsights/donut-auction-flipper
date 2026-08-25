@@ -479,7 +479,7 @@ func (s *Store) LeasedTaskKind(ctx context.Context, result TaskResult) (string, 
 // QueueAutomaticResearch creates at most one short focused task. Callers pass
 // signatures in preferred order; recent automatic samples are skipped so the
 // collector rotates through valuable markets instead of fixating on one item.
-func (s *Store) QueueAutomaticResearch(ctx context.Context, signatures []string, cooldown time.Duration) error {
+func (s *Store) QueueAutomaticResearch(ctx context.Context, signatures []string, minimumInterval, cooldown time.Duration) error {
 	if len(signatures) == 0 {
 		return nil
 	}
@@ -494,6 +494,14 @@ func (s *Store) QueueAutomaticResearch(ctx context.Context, signatures []string,
 		return err
 	}
 	if active > 0 {
+		return tx.Commit()
+	}
+	var recentAutomatic int
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE automatic=1 AND updated_ms>?`,
+		now.Add(-minimumInterval).UnixMilli()).Scan(&recentAutomatic); err != nil {
+		return err
+	}
+	if recentAutomatic > 0 {
 		return tx.Commit()
 	}
 	for _, signature := range signatures {
