@@ -367,7 +367,8 @@ func TestFillInferenceRequiresObservedQuantityDecrease(t *testing.T) {
 				orders[orderIndex].RemainingQuantity -= 1
 			}
 		}
-		batch := scan("one", "", fmt.Sprintf("session-%d", index), index, base.Add(observedAt[index]), orders...)
+		batch := scan("one", "", "steady-session", 1, base.Add(observedAt[index]), orders...)
+		batch.ContentHash = fmt.Sprintf("%064x", index+100)
 		if _, err := system.SaveScan(ctx, batch); err != nil {
 			t.Fatal(err)
 		}
@@ -394,6 +395,32 @@ func TestFillInferenceRequiresObservedQuantityDecrease(t *testing.T) {
 	evidence, _ = system.store.Evidence(ctx)
 	if evidence[0].FillEvents != before {
 		t.Fatal("disappearing order was guessed as a fill")
+	}
+}
+
+func TestCrossPagePseudoIdentityCannotConfirmFill(t *testing.T) {
+	system, err := NewSystem(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	ctx := context.Background()
+	_, _ = system.Register(ctx, ObserverRegistration{ObserverID: "one", ParserVersion: "p1", ProxyLabel: "proxy"})
+	now := time.Now().UTC()
+	first := scan("one", "", "same-session", 1, now, order("pseudo", 100))
+	second := scan("one", "", "same-session", 2, now.Add(time.Second), order("pseudo", 50))
+	if _, err := system.SaveScan(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := system.SaveScan(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := system.store.Evidence(ctx)
+	if err != nil || len(evidence) != 1 {
+		t.Fatalf("evidence=%+v err=%v", evidence, err)
+	}
+	if evidence[0].FillEvents != 0 || evidence[0].FilledUnits24h != 0 {
+		t.Fatalf("cross-page collision became confirmed fill: %+v", evidence[0])
 	}
 }
 

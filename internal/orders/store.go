@@ -136,6 +136,19 @@ func (s *Store) migrate() error {
 	if _, err := s.db.Exec(`ALTER TABLE fill_events ADD COLUMN previous_observed_ms INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 		return fmt.Errorf("migrate fill observation interval: %w", err)
 	}
+	// A pseudo order key may repeat in the same slot on a different menu page.
+	// Demote any prior confirmation that cannot prove both observations came
+	// from the same page in the same Minecraft connection session.
+	if _, err := s.db.Exec(`UPDATE fill_events SET confirmation_level=0 WHERE confirmation_level>=2 AND NOT EXISTS (
+		SELECT 1 FROM order_rows newer JOIN scans newer_scan ON newer_scan.id=newer.scan_id
+		JOIN order_rows older ON older.observer_id=newer.observer_id AND older.order_key=newer.order_key
+			AND older.unit_reward_cents=newer.unit_reward_cents AND older.observed_ms=fill_events.previous_observed_ms
+		JOIN scans older_scan ON older_scan.id=older.scan_id
+		WHERE newer.observer_id=fill_events.observer_id AND newer.order_key=fill_events.order_key
+			AND newer.unit_reward_cents=fill_events.unit_reward_cents AND newer.observed_ms=fill_events.observed_ms
+			AND newer_scan.page=older_scan.page AND newer_scan.session_id=older_scan.session_id)`); err != nil {
+		return fmt.Errorf("quarantine cross-page fill evidence: %w", err)
+	}
 	availabilityAdded := false
 	if _, err := s.db.Exec(`ALTER TABLE order_evidence_summary ADD COLUMN available_units INTEGER NOT NULL DEFAULT 0`); err == nil {
 		availabilityAdded = true
@@ -356,8 +369,9 @@ func (s *Store) SaveScan(ctx context.Context, batch ScanBatch) (bool, error) {
 		}
 		for _, order := range batch.Orders {
 			var previous, previousObserved int64
-			previousErr := tx.QueryRowContext(ctx, `SELECT remaining_quantity,observed_ms FROM order_rows WHERE observer_id=? AND order_key=? AND unit_reward_cents=? AND observed_ms<? ORDER BY observed_ms DESC LIMIT 1`,
-				batch.ObserverID, order.OrderKey, order.UnitRewardCents, batch.ObservedAt.UnixMilli()).Scan(&previous, &previousObserved)
+			previousErr := tx.QueryRowContext(ctx, `SELECT r.remaining_quantity,r.observed_ms FROM order_rows r JOIN scans prior_scan ON prior_scan.id=r.scan_id
+				WHERE r.observer_id=? AND r.order_key=? AND r.unit_reward_cents=? AND prior_scan.page=? AND prior_scan.session_id=? AND r.observed_ms<?
+				ORDER BY r.observed_ms DESC LIMIT 1`, batch.ObserverID, order.OrderKey, order.UnitRewardCents, batch.Page, batch.SessionID, batch.ObservedAt.UnixMilli()).Scan(&previous, &previousObserved)
 			_, err = tx.ExecContext(ctx, `INSERT INTO order_rows(scan_id,observer_id,order_key,item_id,signature,display_name,quantity,max_stack_size,unit_reward,unit_reward_cents,requested_quantity,remaining_quantity,owner,expires_ms,price_position,slot,raw_field_hash,signature_complete,observed_ms)
 			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, scanID, batch.ObserverID, order.OrderKey, order.ItemID, order.Signature,
 				order.DisplayName, order.Quantity, order.MaxStackSize, 0, order.UnitRewardCents, order.RequestedQuantity, order.RemainingQuantity,
