@@ -486,6 +486,17 @@ func TestCandidateScoringSaturatesInsteadOfOverflowing(t *testing.T) {
 	}
 }
 
+func TestCandidateScoringAppliesConfidenceAndCompletionOnce(t *testing.T) {
+	value := candidate(Candidate{AcquisitionCost: 1_000, ExpectedProceeds: 2_000, ConfidenceBPS: 8_000,
+		CompletionBPS: 5_000, ExpectedCycleMinutes: 1440, InventorySlots: 1, ResearchBatches: 1, SignatureComplete: true})
+	if value.ConservativeProfit != 800 {
+		t.Fatalf("confidence-adjusted profit=%d want=800", value.ConservativeProfit)
+	}
+	if value.RiskAdjustedProfitDay != 400 || value.PriorityScore != 400 {
+		t.Fatalf("completion was not applied exactly once: daily=%d priority=%d", value.RiskAdjustedProfitDay, value.PriorityScore)
+	}
+}
+
 func scan(observer, task, session string, page int, at time.Time, values ...OrderObservation) ScanBatch {
 	return ScanBatch{SchemaVersion: SchemaVersion, ObserverID: observer, TaskID: task, SessionID: session,
 		ContentHash: fmt.Sprintf("%064x", page+1), ScreenTitle: "Orders", Page: page, Complete: true, ObservedAt: at, Orders: append([]OrderObservation(nil), values...)}

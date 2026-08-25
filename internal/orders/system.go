@@ -338,7 +338,9 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 func candidate(value Candidate) Candidate {
 	profit := value.ExpectedProceeds - value.AcquisitionCost
 	value.GrossProfit = profit
-	value.ConservativeProfit = mulDivNonNegative(profit, int64(min(value.ConfidenceBPS, value.CompletionBPS)), 10_000)
+	// Confidence discounts the exit value; completion probability is applied
+	// separately below when converting that conservative profit into profit/day.
+	value.ConservativeProfit = mulDivNonNegative(profit, int64(value.ConfidenceBPS), 10_000)
 	if profit > 0 && value.AcquisitionCost > 0 {
 		ratio := float64(profit) / float64(value.AcquisitionCost) * 10_000
 		value.MarginBPS = int(math.Min(float64(math.MaxInt32), ratio))
