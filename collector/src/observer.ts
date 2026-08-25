@@ -21,6 +21,7 @@ const FOCUSED_CLICK_DELAY_MS = 500
 // heartbeat. A focused scan therefore needs its own bounded work horizon so it
 // can traverse a large order book instead of stopping after the initial lease.
 const FOCUSED_WATCH_RUNTIME_MS = 4 * 60_000
+const AUTOMATIC_FOCUSED_RUNTIME_MS = 30_000
 // A runaway guard, not a normal scan boundary. The live market has exceeded
 // 200 pages, so discovery must continue until the server removes pagination or
 // refuses to advance it. Connections are rotated after every completed pass.
@@ -57,7 +58,7 @@ class ObserverRuntime {
       if (!task) continue
       if (!this.connected) await this.reconnect()
       this.activeTask = task
-      this.log('task_leased', `kind=${task.kind}`)
+      this.log('task_leased', `kind=${task.kind} priority=${task.priority}`)
       await this.backend.heartbeat('scanning', task.id, task.lease_token, 0, this.bot?.player?.ping ?? 0, this.reconnects)
       let status: 'complete' | 'retry' | 'failed' = 'complete'
       let message = ''
@@ -162,7 +163,9 @@ class ObserverRuntime {
     let sessionId = randomUUID()
     const seen = new Set<string>()
     const limit = DISCOVERY_PAGE_LIMIT
-    const taskDeadline = task.kind === 'focused_watch' ? Date.now() + FOCUSED_WATCH_RUNTIME_MS : Date.parse(task.lease_expires_at) - 2_000
+    const taskDeadline = task.kind === 'focused_watch'
+      ? Date.now() + (task.priority >= 100 ? FOCUSED_WATCH_RUNTIME_MS : AUTOMATIC_FOCUSED_RUNTIME_MS)
+      : Date.parse(task.lease_expires_at) - 2_000
     for (let pageIndex = 0; pageIndex < limit; pageIndex++) {
       this.ensureConnected(bot)
       const captured = this.capture(window as unknown as WindowView)

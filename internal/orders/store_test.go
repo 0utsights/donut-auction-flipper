@@ -213,6 +213,65 @@ func TestDiscoveryTaskCadenceAndSchemaHold(t *testing.T) {
 	}
 }
 
+func TestDiscoveryCompletionQueuesHighestAuctionValueResearch(t *testing.T) {
+	system, err := NewSystem(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	ctx := context.Background()
+	if _, err = system.Register(ctx, ObserverRegistration{ObserverID: "one", ParserVersion: "p1", ProxyLabel: "proxy"}); err != nil {
+		t.Fatal(err)
+	}
+	task, err := system.LeaseTask(ctx, "one")
+	if err != nil || task == nil || task.Kind != "discovery" {
+		t.Fatalf("discovery=%+v err=%v", task, err)
+	}
+	system.candidates.Store(&CandidateFeed{Candidates: []Candidate{
+		{Route: "ORDER_TO_AUCTION", State: "RESEARCH", Signature: "minecraft:iron_ingot", SignatureComplete: true, PriorityRank: 1, PriorityScore: 100, TargetListPrice: 100_000, ConservativeProfit: 10_000},
+		{Route: "ORDER_TO_AUCTION", State: "RESEARCH", Signature: "minecraft:diamond_block", SignatureComplete: true, PriorityRank: 2, PriorityScore: 90, TargetListPrice: 5_000_000, ConservativeProfit: 9_000},
+	}})
+	if err = system.CompleteTask(ctx, TaskResult{ObserverID: "one", TaskID: task.ID, LeaseToken: task.LeaseToken, Status: "complete"}); err != nil {
+		t.Fatal(err)
+	}
+	focused, err := system.LeaseTask(ctx, "one")
+	if err != nil || focused == nil {
+		t.Fatalf("automatic focused task=%+v err=%v", focused, err)
+	}
+	if focused.Kind != "focused_watch" || focused.Signature != "minecraft:diamond_block" || focused.Priority != 50 {
+		t.Fatalf("wrong automatic priority task: %+v", focused)
+	}
+	if err = system.CompleteTask(ctx, TaskResult{ObserverID: "one", TaskID: focused.ID, LeaseToken: focused.LeaseToken, Status: "complete"}); err != nil {
+		t.Fatal(err)
+	}
+	var state string
+	if err = system.store.db.QueryRowContext(ctx, `SELECT state FROM tasks WHERE id=?`, focused.ID).Scan(&state); err != nil || state != "completed" {
+		t.Fatalf("one-shot task state=%q err=%v", state, err)
+	}
+}
+
+func TestManualWatchUpgradesAutomaticResearchTask(t *testing.T) {
+	system, err := NewSystem(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	ctx := context.Background()
+	if err = system.store.QueueAutomaticResearch(ctx, []string{"minecraft:diamond_block"}, 5*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = system.AddWatch(ctx, "minecraft:diamond_block"); err != nil {
+		t.Fatal(err)
+	}
+	var priority, automatic int
+	if err = system.store.db.QueryRowContext(ctx, `SELECT priority,automatic FROM tasks WHERE kind='focused_watch' AND state='ready'`).Scan(&priority, &automatic); err != nil {
+		t.Fatal(err)
+	}
+	if priority != 100 || automatic != 0 {
+		t.Fatalf("manual watch did not upgrade task: priority=%d automatic=%d", priority, automatic)
+	}
+}
+
 func TestObserverHealthBecomesOfflineAfterMissedHeartbeats(t *testing.T) {
 	system, err := NewSystem(Config{})
 	if err != nil {

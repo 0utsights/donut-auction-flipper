@@ -527,15 +527,36 @@ func (s *Server) debugPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) orderAuctionPage(w http.ResponseWriter, r *http.Request) {
-	data, err := s.loadOrderPageData(r.Context())
-	if err != nil {
-		s.orderError(w, "load order recommendations", err)
-		return
-	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := orderAuctionSimpleTemplate.Execute(w, data); err != nil {
+	w.Header().Set("Cache-Control", "private, no-cache")
+	if err := orderAuctionSimpleTemplate.Execute(w, s.simpleOrderPageData()); err != nil {
 		s.logger.Warn("render order recommendations", "error", err)
 	}
+}
+
+func (s *Server) simpleOrderPageData() simpleOrderPageData {
+	feed := s.orders.CandidateFeed()
+	data := simpleOrderPageData{Version: feed.Version, GeneratedAt: feed.GeneratedAt, Ready: make([]orders.Candidate, 0, 20), Research: make([]orders.Candidate, 0, 10)}
+	for _, candidate := range feed.Candidates {
+		if candidate.PriorityRank <= 0 || candidate.Route != "ORDER_TO_AUCTION" {
+			continue
+		}
+		switch candidate.State {
+		case "READY":
+			data.ReadyCount++
+			if len(data.Ready) < cap(data.Ready) {
+				candidate.PriorityRank = len(data.Ready) + 1
+				data.Ready = append(data.Ready, candidate)
+			}
+		case "RESEARCH":
+			data.ResearchCount++
+			if len(data.Research) < cap(data.Research) {
+				candidate.PriorityRank = len(data.Research) + 1
+				data.Research = append(data.Research, candidate)
+			}
+		}
+	}
+	return data
 }
 
 func (s *Server) orderAuctionDebugPage(w http.ResponseWriter, r *http.Request) {

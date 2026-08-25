@@ -66,7 +66,7 @@ func (s *Store) migrate() error {
 			id TEXT PRIMARY KEY, kind TEXT NOT NULL, signature TEXT NOT NULL DEFAULT '', priority INTEGER NOT NULL,
 			desired_freshness_ms INTEGER NOT NULL, parser_schema TEXT NOT NULL, state TEXT NOT NULL,
 			assigned_observer TEXT NOT NULL DEFAULT '', lease_expires_ms INTEGER NOT NULL DEFAULT 0,
-			lease_token TEXT NOT NULL DEFAULT '',
+			lease_token TEXT NOT NULL DEFAULT '', automatic INTEGER NOT NULL DEFAULT 0,
 			created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS tasks_ready ON tasks(state, priority DESC, created_ms)`,
 		`CREATE TABLE IF NOT EXISTS scans (
@@ -115,6 +115,9 @@ func (s *Store) migrate() error {
 	// Existing development databases predate authenticated leases.
 	if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN lease_token TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 		return fmt.Errorf("migrate task lease token: %w", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN automatic INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return fmt.Errorf("migrate automatic task marker: %w", err)
 	}
 	if _, err := s.db.Exec(`ALTER TABLE order_rows ADD COLUMN signature_complete INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 		return fmt.Errorf("migrate signature completeness: %w", err)
@@ -274,7 +277,7 @@ func (s *Store) LeaseTask(ctx context.Context, observerID string, lease time.Dur
 	}
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `UPDATE tasks SET
-		state=CASE WHEN kind='focused_watch' AND NOT EXISTS(SELECT 1 FROM watches WHERE watches.signature=tasks.signature AND watches.expires_ms>?) THEN 'completed' ELSE 'ready' END,
+		state=CASE WHEN kind='focused_watch' AND automatic=0 AND NOT EXISTS(SELECT 1 FROM watches WHERE watches.signature=tasks.signature AND watches.expires_ms>?) THEN 'completed' ELSE 'ready' END,
 		assigned_observer=CASE WHEN kind='discovery' THEN assigned_observer ELSE '' END,lease_expires_ms=0,lease_token='',updated_ms=?
 		WHERE state='leased' AND lease_expires_ms<?`, now.UnixMilli(), now.UnixMilli(), now.UnixMilli())
 	if err != nil {
@@ -463,6 +466,58 @@ func (s *Store) CompleteTask(ctx context.Context, result TaskResult) error {
 	return err
 }
 
+// LeasedTaskKind validates the submitted lease before the system performs any
+// completion-triggered scheduling. It keeps forged or expired results from
+// creating automatic research work.
+func (s *Store) LeasedTaskKind(ctx context.Context, result TaskResult) (string, error) {
+	var kind string
+	err := s.db.QueryRowContext(ctx, `SELECT kind FROM tasks WHERE id=? AND state='leased' AND assigned_observer=? AND lease_token=? AND lease_expires_ms>?`,
+		result.TaskID, result.ObserverID, result.LeaseToken, s.now().UnixMilli()).Scan(&kind)
+	return kind, err
+}
+
+// QueueAutomaticResearch creates at most one short focused task. Callers pass
+// signatures in preferred order; recent automatic samples are skipped so the
+// collector rotates through valuable markets instead of fixating on one item.
+func (s *Store) QueueAutomaticResearch(ctx context.Context, signatures []string, cooldown time.Duration) error {
+	if len(signatures) == 0 {
+		return nil
+	}
+	now := s.now()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var active int
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE kind='focused_watch' AND state IN ('ready','leased')`).Scan(&active); err != nil {
+		return err
+	}
+	if active > 0 {
+		return tx.Commit()
+	}
+	for _, signature := range signatures {
+		signature = strings.TrimSpace(signature)
+		if signature == "" {
+			continue
+		}
+		var sampled int
+		if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE kind='focused_watch' AND automatic=1 AND signature=? AND updated_ms>?`,
+			signature, now.Add(-cooldown).UnixMilli()).Scan(&sampled); err != nil {
+			return err
+		}
+		if sampled > 0 {
+			continue
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO tasks(id,kind,signature,priority,desired_freshness_ms,parser_schema,state,automatic,created_ms,updated_ms)
+			VALUES(?,'focused_watch',?,50,1000,?,'ready',1,?,?)`, newID("task"), signature, SchemaVersion, now.UnixMilli(), now.Add(-time.Second).UnixMilli()); err != nil {
+			return err
+		}
+		break
+	}
+	return tx.Commit()
+}
+
 func (s *Store) AddWatch(ctx context.Context, signature string, lifetime time.Duration) (Watch, error) {
 	now := s.now()
 	watch := Watch{ID: newID("watch"), Signature: signature, CreatedAt: now, ExpiresAt: now.Add(lifetime)}
@@ -481,6 +536,14 @@ func (s *Store) AddWatch(ctx context.Context, signature string, lifetime time.Du
 	if activeTask == 0 {
 		if _, err = tx.ExecContext(ctx, `INSERT INTO tasks(id,kind,signature,priority,desired_freshness_ms,parser_schema,state,created_ms,updated_ms)
 			VALUES(?,'focused_watch',?,100,1000,?,'ready',?,?)`, newID("task"), signature, SchemaVersion, now.UnixMilli(), now.Add(-time.Second).UnixMilli()); err != nil {
+			return Watch{}, err
+		}
+	} else {
+		// A player request always upgrades an existing automatic sample. A task
+		// already leased finishes its current short sample, then renews with the
+		// manual priority and work horizon because the watch remains active.
+		if _, err = tx.ExecContext(ctx, `UPDATE tasks SET priority=100,automatic=0,updated_ms=? WHERE kind='focused_watch' AND signature=? AND state IN ('ready','leased')`,
+			now.Add(-time.Second).UnixMilli(), signature); err != nil {
 			return Watch{}, err
 		}
 	}
@@ -855,7 +918,10 @@ func (s *Store) Cleanup(ctx context.Context) error {
 	if _, err = tx.ExecContext(ctx, `DELETE FROM watches WHERE expires_ms<?`, s.now().UnixMilli()); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE tasks SET state='completed',lease_expires_ms=0,lease_token='' WHERE kind='focused_watch' AND state='ready' AND signature NOT IN (SELECT signature FROM watches WHERE expires_ms>?)`, s.now().UnixMilli()); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE tasks SET state='completed',lease_expires_ms=0,lease_token='' WHERE kind='focused_watch' AND automatic=0 AND state='ready' AND signature NOT IN (SELECT signature FROM watches WHERE expires_ms>?)`, s.now().UnixMilli()); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM tasks WHERE automatic=1 AND state='completed' AND updated_ms<?`, s.now().Add(-7*24*time.Hour).UnixMilli()); err != nil {
 		return err
 	}
 	return tx.Commit()

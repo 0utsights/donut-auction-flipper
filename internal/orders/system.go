@@ -69,7 +69,49 @@ func (s *System) SaveScan(ctx context.Context, value ScanBatch) (bool, error) {
 	return s.store.SaveScan(ctx, value)
 }
 func (s *System) CompleteTask(ctx context.Context, value TaskResult) error {
-	return s.store.CompleteTask(ctx, value)
+	kind, err := s.store.LeasedTaskKind(ctx, value)
+	if err != nil {
+		return err
+	}
+	if err = s.store.CompleteTask(ctx, value); err != nil {
+		return err
+	}
+	if kind != "discovery" || value.Status != "complete" {
+		return nil
+	}
+
+	// The auction API establishes the exit value. READY markets take priority,
+	// followed by RESEARCH markets, then by the exact-quantity auction resale
+	// value. Profit score breaks ties so expensive but uneconomic items do not
+	// outrank useful research indefinitely.
+	feed := s.CandidateFeed()
+	candidates := make([]Candidate, 0, len(feed.Candidates))
+	for _, candidate := range feed.Candidates {
+		if candidate.Route == "ORDER_TO_AUCTION" && (candidate.State == "READY" || candidate.State == "RESEARCH") &&
+			candidate.SignatureComplete && candidate.PriorityRank > 0 && candidate.PriorityScore > 0 &&
+			candidate.TargetListPrice > 0 && candidate.ConservativeProfit > 0 {
+			candidates = append(candidates, candidate)
+		}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].State != candidates[j].State {
+			return candidates[i].State == "READY"
+		}
+		if candidates[i].TargetListPrice != candidates[j].TargetListPrice {
+			return candidates[i].TargetListPrice > candidates[j].TargetListPrice
+		}
+		return candidates[i].PriorityScore > candidates[j].PriorityScore
+	})
+	signatures := make([]string, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if _, exists := seen[candidate.Signature]; exists {
+			continue
+		}
+		seen[candidate.Signature] = struct{}{}
+		signatures = append(signatures, candidate.Signature)
+	}
+	return s.store.QueueAutomaticResearch(ctx, signatures, 5*time.Minute)
 }
 func (s *System) AddWatch(ctx context.Context, signature string) (Watch, error) {
 	return s.store.AddWatch(ctx, signature, 15*time.Minute)

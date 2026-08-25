@@ -280,6 +280,9 @@ func TestOrderAuctionPageReportsRealObserverStateWithoutFakeRows(t *testing.T) {
 			t.Fatalf("simple order page still contains debug section %q", noise)
 		}
 	}
+	if strings.Contains(body, ">Refresh<") || !strings.Contains(body, "setInterval(update,1000)") {
+		t.Fatal("simple order page is not using its one-second live update")
+	}
 	request = httptest.NewRequest(http.MethodGet, "/order-auction-flipper/debug", nil)
 	response = httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)

@@ -126,6 +126,12 @@ Focused watches preempt discovery after the currently submitted page. The backen
 
 Completed discovery and focused-watch rotations reset reconnect failure backoff. The monotonic reconnect counter remains visible for diagnostics, but only unexpected short-lived connection or menu failures can increase the delay. This prevents a legitimately small order book from eventually imposing a 60-second idle penalty between successful passes.
 
+## 2026-08-25 — Live decision page and auction-value research lane
+
+The normal order-flipper page has no manual refresh control. It performs a small same-origin fetch once per second and replaces only its decision content when the candidate-feed version changes. The debug console remains separate and heavier; the normal player path does not fetch its database-wide evidence snapshot.
+
+Order discovery continues to scan every verified global page because the server menu's ordering and search control have not been proven safe or stable enough to assume that page one contains every desirable item. After a complete discovery pass, the backend schedules one bounded 30-second focused sample. It chooses among economically viable order-to-auction candidates using the official auction API's exact-quantity resale target, preferring `READY` over `RESEARCH`, then higher resale value, then the existing risk-adjusted profit score. Automatic samples rotate on a five-minute per-item cooldown. A player-requested watch remains higher priority and retains its longer four-minute research window. This creates a high-value lane without starving broad discovery or clicking an unverified search UI.
+
 ## Assumptions made without operator input
 
 - The official API retains its bearer-authenticated listing and transaction endpoints and 250 requests/minute published limit.
