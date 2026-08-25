@@ -462,6 +462,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/watches/{id}", s.authorizeWith(s.fabricAuth, s.deleteWatch))
 	mux.HandleFunc("POST /api/v1/client/diagnostics", s.authorizeWith(s.fabricAuth, s.clientDiagnostics))
 	mux.HandleFunc("GET /order-auction-flipper", s.authorize(s.orderAuctionPage))
+	mux.HandleFunc("GET /order-auction-flipper/debug", s.authorize(s.orderAuctionDebugPage))
 	mux.HandleFunc("POST /order-auction-flipper/watch", s.authorize(s.dashboardWatch))
 	mux.HandleFunc("GET /", s.authorize(s.debugPage))
 	return securityHeaders(mux)
@@ -526,26 +527,63 @@ func (s *Server) debugPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) orderAuctionPage(w http.ResponseWriter, r *http.Request) {
-	debug, err := s.orders.Debug(r.Context())
+	data, err := s.loadOrderPageData(r.Context())
+	if err != nil {
+		s.orderError(w, "load order recommendations", err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := orderAuctionSimpleTemplate.Execute(w, data); err != nil {
+		s.logger.Warn("render order recommendations", "error", err)
+	}
+}
+
+func (s *Server) orderAuctionDebugPage(w http.ResponseWriter, r *http.Request) {
+	data, err := s.loadOrderPageData(r.Context())
 	if err != nil {
 		s.orderError(w, "load order debug", err)
 		return
 	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := orderAuctionTemplateV2.Execute(w, data); err != nil {
+		s.logger.Warn("render order-auction debug page", "error", err)
+	}
+}
+
+func (s *Server) loadOrderPageData(ctx context.Context) (orderPageData, error) {
+	debug, err := s.orders.Debug(ctx)
+	if err != nil {
+		return orderPageData{}, err
+	}
 	priority := make([]orders.Candidate, 0, 30)
+	ready := make([]orders.Candidate, 0, 20)
+	research := make([]orders.Candidate, 0, 10)
 	immediate := make([]orders.Candidate, 0, 20)
 	blocked := make([]orders.Candidate, 0, 50)
 	readyCount, researchCount := 0, 0
 	orderRank, immediateRank := 0, 0
 	for _, candidate := range debug.Candidates {
-		if candidate.PriorityRank > 0 && candidate.Route == "ORDER_TO_AUCTION" && len(priority) < 30 {
-			orderRank++
-			candidate.PriorityRank = orderRank
+		if candidate.PriorityRank > 0 && candidate.Route == "ORDER_TO_AUCTION" {
 			if candidate.State == "READY" {
 				readyCount++
+				if len(ready) < 20 {
+					value := candidate
+					value.PriorityRank = len(ready) + 1
+					ready = append(ready, value)
+				}
 			} else if candidate.State == "RESEARCH" {
 				researchCount++
+				if len(research) < 10 {
+					value := candidate
+					value.PriorityRank = len(research) + 1
+					research = append(research, value)
+				}
 			}
-			priority = append(priority, candidate)
+			if len(priority) < 30 {
+				orderRank++
+				candidate.PriorityRank = orderRank
+				priority = append(priority, candidate)
+			}
 			continue
 		}
 		if candidate.PriorityRank > 0 && candidate.Route == "AUCTION_TO_ORDER" && len(immediate) < 20 {
@@ -558,11 +596,8 @@ func (s *Server) orderAuctionPage(w http.ResponseWriter, r *http.Request) {
 			blocked = append(blocked, candidate)
 		}
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := orderAuctionTemplateV2.Execute(w, orderPageData{Auction: s.Snapshot(), Orders: debug,
-		Priority: priority, Immediate: immediate, Blocked: blocked, ReadyCount: readyCount, ResearchCount: researchCount}); err != nil {
-		s.logger.Warn("render order-auction page", "error", err)
-	}
+	return orderPageData{Auction: s.Snapshot(), Orders: debug, Ready: ready, Research: research,
+		Priority: priority, Immediate: immediate, Blocked: blocked, ReadyCount: readyCount, ResearchCount: researchCount}, nil
 }
 
 func (s *Server) authorize(next http.HandlerFunc) http.HandlerFunc {

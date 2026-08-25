@@ -84,6 +84,8 @@ The initial second-PC move uses host-networked containers bound only to `127.0.0
 
 The in-game screen and backend debug page are intentionally plain, information-first interfaces. The Fabric screen uses an opaque fill and does not call `renderBackground`, fixing the Minecraft 1.21.11 `Can only blur once per frame` crash. Styling remains deferred.
 
+The default `/order-auction-flipper` page is a player decision surface, not an engineering console. It displays only `READY` order-to-auction opportunities, exact order and relist inputs, and a collapsed research queue clearly marked as not buyable. Collector operations, evidence, rejected routes, and legacy quarantine totals remain available at `/order-auction-flipper/debug` without cluttering the normal workflow.
+
 ## 2026-08-25 — Exact order-price cents and live menu schema
 
 Mineflayer stores order rewards as integer cents (`unit_reward_cents`). This preserves Donut values such as `$0.01`, `$230.10`, and compact `$19.1K` prices without floating-point comparisons or silent rounding. The backend keeps auction/candidate totals in whole dollars: order acquisition costs round up only after multiplying cents by quantity, while expected order proceeds round down. This is conservative and prevents cheap stacked commodities from being inflated or discarded.

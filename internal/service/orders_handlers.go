@@ -230,7 +230,7 @@ func (s *Server) dashboardWatch(w http.ResponseWriter, r *http.Request) {
 		s.orderError(w, "add dashboard focused watch", err)
 		return
 	}
-	http.Redirect(w, r, "/order-auction-flipper#priority", http.StatusSeeOther)
+	http.Redirect(w, r, "/order-auction-flipper#good-orders", http.StatusSeeOther)
 }
 
 func (s *Server) clientDiagnostics(w http.ResponseWriter, r *http.Request) {
@@ -382,12 +382,44 @@ func uintString(value uint64) string {
 type orderPageData struct {
 	Auction       Snapshot
 	Orders        orders.DebugSnapshot
+	Ready         []orders.Candidate
+	Research      []orders.Candidate
 	Priority      []orders.Candidate
 	Immediate     []orders.Candidate
 	Blocked       []orders.Candidate
 	ReadyCount    int
 	ResearchCount int
 }
+
+var orderAuctionSimpleTemplate = template.Must(template.New("order-auction-simple").Funcs(template.FuncMap{
+	"money":      formatMoney,
+	"moneyCents": moneyCents,
+	"pct": func(value int) string {
+		return strconv.Itoa(value/100) + "." + string([]byte{'0' + byte((value%100)/10), '0' + byte(value%10)}) + "%"
+	},
+	"clock": func(value time.Time) string {
+		if value.IsZero() {
+			return "never"
+		}
+		return value.Local().Format("15:04:05")
+	},
+}).Parse(orderAuctionSimpleHTML))
+
+const orderAuctionSimpleHTML = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Order flips</title>
+<style>
+*{box-sizing:border-box}body{font:15px system-ui,sans-serif;max-width:1050px;margin:0 auto;padding:24px 18px;color:#e8e8e8;background:#111}header{display:flex;justify-content:space-between;gap:16px;align-items:start;border-bottom:1px solid #333;padding-bottom:14px}h1{font-size:24px;margin:0 0 5px}h2{font-size:17px;margin:28px 0 10px}.muted{color:#999}.status{margin:16px 0;padding:10px 12px;background:#181818;border-left:3px solid #6aa84f}.empty{padding:30px 18px;text-align:center;border:1px solid #333;background:#161616}.flip{border:1px solid #3f5535;background:#151815;margin:10px 0;padding:15px}.top{display:flex;justify-content:space-between;gap:18px;align-items:start}.name{font-size:19px;font-weight:700}.rank{color:#9dce7b}.numbers{display:grid;grid-template-columns:repeat(4,minmax(140px,1fr));gap:8px;margin:14px 0}.number{padding:9px;background:#1d1d1d}.number strong{display:block;font-size:17px;color:#fff}.profit strong{color:#86d66b}.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}button{font:inherit;color:#fff;background:#2d5121;border:1px solid #6a9558;padding:7px 11px;cursor:pointer}a,code{color:#9dce7b}code{background:#1d1d1d;padding:3px 5px}details{margin-top:28px;border-top:1px solid #333;padding-top:13px}summary{cursor:pointer;color:#bbb}.research{display:grid;grid-template-columns:1fr auto;gap:8px;padding:9px 0;border-bottom:1px solid #292929}.warn{color:#e0bd62}@media(max-width:760px){.numbers{grid-template-columns:1fr 1fr}.top,header{display:block}header a{display:inline-block;margin-top:8px}}@media(max-width:430px){.numbers{grid-template-columns:1fr}}
+</style></head><body>
+<header><div><h1>Order → Auction Flips</h1><div class="muted">Only verified opportunities are shown as buyable.</div></div><a href="/order-auction-flipper/debug">Debug</a></header>
+<div class="status"><strong>{{.ReadyCount}} ready</strong> · collector {{range .Orders.Observers}}{{.State}}{{else}}offline{{end}} · updated {{clock .Orders.GeneratedAt}} <button type="button" onclick="location.reload()">Refresh</button></div>
+<main id="good-orders">
+{{range .Ready}}<article class="flip"><div class="top"><div><span class="rank">#{{.PriorityRank}}</span> <span class="name">{{.Quantity}}× {{.ItemName}}</span><div class="muted"><code>{{.ItemID}}</code></div></div><div><strong>READY</strong></div></div>
+<div class="numbers"><div class="number"><span class="muted">Create order</span><strong>{{moneyCents .OrderUnitRewardCents}} each</strong><span class="muted">{{money .AcquisitionCost}} total</span></div><div class="number"><span class="muted">Relist exact batch</span><strong>{{money .TargetListPrice}}</strong><span class="muted">{{money .ExpectedProceeds}} after fee</span></div><div class="number profit"><span class="muted">Conservative profit</span><strong>+{{money .ConservativeProfit}}</strong><span class="muted">{{pct .MarginBPS}} ROI</span></div><div class="number"><span class="muted">Priority</span><strong>{{money .PriorityScore}} / day</strong><span class="muted">{{.ExecutableBatches}} batches · {{.AuctionVolume24h}} sales</span></div></div>
+<div class="actions"><form method="post" action="/order-auction-flipper/watch"><input type="hidden" name="signature" value="{{.Signature}}"><button type="submit">Recheck now</button></form><code>{{.OrderCommand}}</code><span>then</span><code>{{.AuctionCommand}}</code></div></article>
+{{else}}<div class="empty"><strong>No verified flips right now.</strong><div class="muted">The collector is still researching markets. RESEARCH items are not buy recommendations.</div></div>{{end}}
+</main>
+<details><summary>Research queue ({{.ResearchCount}}) — not ready to buy</summary>{{range .Research}}<div class="research"><div><strong>{{.Quantity}}× {{.ItemName}}</strong> · modeled +{{money .ConservativeProfit}}<div class="warn">{{.Reason}}</div></div><form method="post" action="/order-auction-flipper/watch"><input type="hidden" name="signature" value="{{.Signature}}"><button type="submit">Research this</button></form></div>{{else}}<p class="muted">No current research candidates.</p>{{end}}</details>
+<script>const key='orderSimpleAuto';if(localStorage.getItem(key)!=='0')setTimeout(()=>location.reload(),5000);</script>
+</body></html>`
 
 var orderAuctionTemplateV2 = template.Must(template.New("order-auction-v2").Funcs(template.FuncMap{
 	"money":      formatMoney,

@@ -270,10 +270,21 @@ func TestOrderAuctionPageReportsRealObserverStateWithoutFakeRows(t *testing.T) {
 		t.Fatalf("order-auction page code=%d", response.Code)
 	}
 	body := response.Body.String()
-	for _, expected := range []string{"Order → auction priority queue", "No observer registered.", "Waiting for trusted order snapshots.", "No profitable, base-safe order → auction candidates yet."} {
+	for _, expected := range []string{"Order → Auction Flips", "Only verified opportunities are shown as buyable.", "No verified flips right now.", "RESEARCH items are not buy recommendations.", "/order-auction-flipper/debug"} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("order-auction page missing %q", expected)
 		}
+	}
+	for _, noise := range []string{"legacy reductions quarantined", "$10M reference portfolio", "Auction → existing order", "Blocked and stale candidate diagnostics"} {
+		if strings.Contains(body, noise) {
+			t.Fatalf("simple order page still contains debug section %q", noise)
+		}
+	}
+	request = httptest.NewRequest(http.MethodGet, "/order-auction-flipper/debug", nil)
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Order → auction priority queue") || !strings.Contains(response.Body.String(), "No observer registered.") {
+		t.Fatalf("order debug page code=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
