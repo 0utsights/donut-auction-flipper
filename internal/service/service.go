@@ -527,9 +527,16 @@ func (s *Server) debugPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) orderAuctionPage(w http.ResponseWriter, r *http.Request) {
+	data := s.simpleOrderPageData()
+	etag := `"order-page-` + uintString(data.Version) + `"`
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "private, no-cache")
-	if err := orderAuctionSimpleTemplate.Execute(w, s.simpleOrderPageData()); err != nil {
+	w.Header().Set("ETag", etag)
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	if err := orderAuctionSimpleTemplate.Execute(w, data); err != nil {
 		s.logger.Warn("render order recommendations", "error", err)
 	}
 }

@@ -283,6 +283,13 @@ func TestOrderAuctionPageReportsRealObserverStateWithoutFakeRows(t *testing.T) {
 	if strings.Contains(body, ">Refresh<") || !strings.Contains(body, "setInterval(update,1000)") {
 		t.Fatal("simple order page is not using its one-second live update")
 	}
+	request = httptest.NewRequest(http.MethodGet, "/order-auction-flipper", nil)
+	request.Header.Set("If-None-Match", response.Header().Get("ETag"))
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusNotModified || response.Body.Len() != 0 {
+		t.Fatalf("unchanged live page code=%d bytes=%d", response.Code, response.Body.Len())
+	}
 	request = httptest.NewRequest(http.MethodGet, "/order-auction-flipper/debug", nil)
 	response = httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
