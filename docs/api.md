@@ -61,7 +61,7 @@ Submits one menu snapshot. Important fields are:
     "display_name": "Diamond",
     "quantity": 64,
     "max_stack_size": 64,
-    "unit_reward": 5000,
+    "unit_reward_cents": 500000,
     "requested_quantity": 640,
     "remaining_quantity": 512,
     "owner": "buyer_name",
@@ -75,6 +75,7 @@ Submits one menu snapshot. Important fields are:
 ```
 
 Submissions are idempotent by observer/session/page/content hash. A missing row is not treated as a fill. Only a later observation of the same order with reduced remaining quantity creates fill evidence.
+Order rewards use integer cents so values such as `$0.01` and `$230.10` remain exact. Candidate capital, proceeds, and profit remain conservative whole-dollar values after quantity multiplication: acquisition costs round up and proceeds round down.
 
 ### `POST /api/v1/observers/task-result`
 

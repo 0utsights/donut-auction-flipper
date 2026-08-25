@@ -3,8 +3,8 @@ import test from 'node:test'
 import { SafeNavigator, type NavigationBot } from './safe-navigation.js'
 import type { MenuSchema } from './types.js'
 
-function fixture(): { bot: NavigationBot & { commands: string[]; clicks: number[] }; schemas: MenuSchema[]; slots: Array<{ name?: string; displayName?: string } | null> } {
-  const slots: Array<{ name?: string; displayName?: string } | null> = Array.from({ length: 54 }, () => null)
+function fixture(): { bot: NavigationBot & { commands: string[]; clicks: number[] }; schemas: MenuSchema[]; slots: Array<{ name?: string; displayName?: string; customName?: unknown } | null> } {
+  const slots: Array<{ name?: string; displayName?: string; customName?: unknown } | null> = Array.from({ length: 54 }, () => null)
   const bot = {
     commands: [] as string[], clicks: [] as number[],
     currentWindow: { title: 'Orders - Page 1/3', slots },
@@ -23,11 +23,20 @@ test('only the exact orders command is allowed', () => {
   assert.throws(() => navigator.sendCommand('/ah'), /not allowlisted/)
 })
 
+test('validates controls using custom component labels', () => {
+  const { bot, schemas, slots } = fixture()
+  slots[50] = { name: 'minecraft:arrow', displayName: 'Arrow', customName: { type: 'string', value: 'Next Page' } }
+  const navigator = new SafeNavigator(bot, schemas)
+  assert.equal(navigator.controlAvailable('next_page'), true)
+})
+
 test('clicks only a verified non-transactional control', async () => {
   const { bot, schemas, slots } = fixture(); const navigator = new SafeNavigator(bot, schemas)
+  assert.equal(navigator.controlAvailable('next_page'), true)
   await navigator.clickControl('next_page')
   assert.deepEqual(bot.clicks, [50])
   slots[50] = { name: 'minecraft:diamond', displayName: 'Buy Now' }
+  assert.equal(navigator.controlAvailable('next_page'), false)
   await assert.rejects(navigator.clickControl('next_page'), /navigation denied/)
   assert.deepEqual(bot.clicks, [50])
 })
@@ -36,4 +45,11 @@ test('unknown windows are capture-only', async () => {
   const { bot } = fixture(); const navigator = new SafeNavigator(bot, [])
   await assert.rejects(navigator.clickControl('next_page'), /unknown order screen/)
   assert.deepEqual(bot.clicks, [])
+})
+
+test('matches Mineflayer chat-component window titles', () => {
+  const { bot, schemas } = fixture()
+  bot.currentWindow = { ...bot.currentWindow!, title: { type: 'string', value: 'Orders - Page 1/3' } }
+  const navigator = new SafeNavigator(bot, schemas)
+  assert.equal(navigator.schemaFor(bot.currentWindow)?.id, 'fixture')
 })

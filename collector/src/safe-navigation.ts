@@ -1,8 +1,9 @@
-import type { MenuSchema, SafeControl } from './types.js'
+import type { ControlRule, MenuSchema, SafeControl } from './types.js'
+import { plainText } from './parser.js'
 
 export interface WindowView {
-  title: string
-  slots: ReadonlyArray<{ name?: string; displayName?: string } | null>
+  title: unknown
+  slots: ReadonlyArray<{ name?: string; displayName?: string; customName?: unknown } | null>
 }
 
 export interface NavigationBot {
@@ -25,21 +26,35 @@ export class SafeNavigator {
 
   schemaFor(window: WindowView | null | undefined): MenuSchema | undefined {
     if (!window) return undefined
-    return this.schemas.find(schema => schema.title.test(window.title))
+    const title = plainText(window.title)
+    return this.schemas.find(schema => schema.title.test(title))
+  }
+
+  controlAvailable(kind: SafeControl): boolean {
+    return this.control(kind) !== undefined
   }
 
   async clickControl(kind: SafeControl): Promise<void> {
     if (!allowedControls.has(kind)) throw new Error('control kind is not allowlisted')
+    if (!this.bot.currentWindow || !this.schemaFor(this.bot.currentWindow)) throw new Error('unknown order screen; navigation denied')
+    const control = this.control(kind)
+    if (!control) throw new Error('control fingerprint changed; navigation denied')
+    const [slot] = control
+    await this.bot.clickWindow(slot, 0, 0)
+  }
+
+  private control(kind: SafeControl): [number, ControlRule] | undefined {
+    if (!allowedControls.has(kind)) return undefined
     const window = this.bot.currentWindow
     const schema = this.schemaFor(window)
-    if (!window || !schema) throw new Error('unknown order screen; navigation denied')
+    if (!window || !schema) return undefined
     const matches = [...schema.controls.entries()].filter(([, rule]) => rule.kind === kind)
-    if (matches.length !== 1) throw new Error(`schema does not define exactly one ${kind} control`)
+    if (matches.length !== 1) return undefined
     const [slot, rule] = matches[0]!
     const item = window.slots[slot]
     const name = item?.name ?? ''
-    const label = item?.displayName ?? ''
-    if (!item || name !== rule.itemName || !rule.label.test(label) || forbiddenLabel.test(label)) throw new Error('control fingerprint changed; navigation denied')
-    await this.bot.clickWindow(slot, 0, 0)
+    const label = plainText(item?.customName) || plainText(item?.displayName)
+    if (!item || name !== rule.itemName || !rule.label.test(label) || forbiddenLabel.test(label)) return undefined
+    return [slot, rule]
   }
 }

@@ -280,7 +280,7 @@ func validateScan(value orders.ScanBatch, now time.Time) error {
 func safeOrder(value orders.OrderObservation) bool {
 	return identifierPattern.MatchString(value.OrderKey) && itemIDPattern.MatchString(value.ItemID) && safeSignature(value.Signature) &&
 		optionalText(value.DisplayName, 128) && value.Quantity >= 1 && value.Quantity <= 1728 && value.MaxStackSize >= 1 && value.MaxStackSize <= 99 &&
-		value.UnitReward > 0 && value.UnitReward <= 9_000_000_000_000_000_000 && value.RequestedQuantity >= value.RemainingQuantity &&
+		value.UnitRewardCents > 0 && value.UnitRewardCents <= 9_000_000_000_000_000_000 && value.RequestedQuantity >= value.RemainingQuantity &&
 		value.RequestedQuantity > 0 && value.RequestedQuantity <= 1_000_000_000_000 && value.RemainingQuantity >= 0 &&
 		(value.Owner == "" || ownerPattern.MatchString(value.Owner)) && value.PricePosition >= 0 && value.PricePosition <= 1_000_000 &&
 		value.Slot >= 0 && value.Slot <= 1_000 && hashPattern.MatchString(value.RawFieldHash)
@@ -349,7 +349,8 @@ type orderPageData struct {
 }
 
 var orderAuctionTemplateV2 = template.Must(template.New("order-auction-v2").Funcs(template.FuncMap{
-	"money": func(value int64) string { return "$" + uintString(uint64(max64Service(0, value))) },
+	"money":      func(value int64) string { return "$" + uintString(uint64(max64Service(0, value))) },
+	"moneyCents": moneyCents,
 	"clock": func(value time.Time) string {
 		if value.IsZero() {
 			return "never"
@@ -364,9 +365,9 @@ const orderAuctionHTMLV2 = `<!doctype html><html><head><meta charset="utf-8"><me
 <div class="box">Auction API: {{.Auction.Status.State}} · {{.Auction.Status.ValuationCount}} valuations · order observers: {{len .Orders.Observers}} · watches: {{len .Orders.Watches}} · diagnostics (14d): {{.Orders.Diagnostics}}<br><span class="muted">Reference UI only. Each Fabric client keeps its real balance, positions, reserve, and 20/18-slot portfolio locally. No simulated market rows.</span></div>
 <div class="box">Order scans: {{.Orders.ScanCoverage.Total}} total · {{.Orders.ScanCoverage.Complete}} complete · {{.Orders.ScanCoverage.Incomplete}} incomplete · {{.Orders.ScanCoverage.UnknownSchema}} unknown schema · {{.Orders.ScanCoverage.DistinctPages}} distinct pages through page {{.Orders.ScanCoverage.HighestPage}} · last {{clock .Orders.ScanCoverage.LastScanAt}}</div>
 <h2>Mineflayer observers</h2><table><tr><th>ID</th><th>State</th><th>Parser</th><th>Proxy label</th><th>Task/page</th><th>Latency</th><th>Reconnects</th><th>Last seen</th></tr>{{range .Orders.Observers}}<tr><td>{{.ObserverID}}</td><td>{{.State}}</td><td>{{.ParserVersion}}</td><td>{{.ProxyLabel}}</td><td>{{.CurrentTaskID}} / {{.CurrentPage}}</td><td>{{printf "%.0f" .LatencyMS}}ms</td><td>{{.ReconnectCount}}</td><td>{{clock .LastSeenAt}}</td></tr>{{else}}<tr><td colspan="8" class="muted">No Mineflayer observer has registered yet.</td></tr>{{end}}</table>
-<h2>Evidence</h2><table><tr><th>Item</th><th>Tier</th><th>Scans</th><th>Fills/orders</th><th>24h filled / available</th><th>Best reward / queue</th><th>Fresh</th><th>Reason</th></tr>{{range .Orders.Evidence}}<tr><td><code>{{.Signature}}</code></td><td>{{.Tier}}</td><td>{{.CompleteScans}}</td><td>{{.FillEvents}} / {{.DistinctOrders}}</td><td>{{.FilledUnits24h}} / {{.AvailableUnits}}</td><td>{{money .BestUnitReward}} / #{{.BestPricePosition}}</td><td>{{clock .LastSeenAt}}</td><td>{{.Reason}}</td></tr>{{else}}<tr><td colspan="8" class="muted">Waiting for real order snapshots.</td></tr>{{end}}</table>
+<h2>Evidence</h2><table><tr><th>Item</th><th>Tier</th><th>Scans</th><th>Fills/orders</th><th>24h filled / available</th><th>Best reward / queue</th><th>Fresh</th><th>Reason</th></tr>{{range .Orders.Evidence}}<tr><td><code>{{.Signature}}</code></td><td>{{.Tier}}</td><td>{{.CompleteScans}}</td><td>{{.FillEvents}} / {{.DistinctOrders}}</td><td>{{.FilledUnits24h}} / {{.AvailableUnits}}</td><td>{{moneyCents .BestUnitRewardCents}} / #{{.BestPricePosition}}</td><td>{{clock .LastSeenAt}}</td><td>{{.Reason}}</td></tr>{{else}}<tr><td colspan="8" class="muted">Waiting for real order snapshots.</td></tr>{{end}}</table>
 <h2>Focused watches</h2><table><tr><th>ID</th><th>Signature</th><th>Created</th><th>Expires</th></tr>{{range .Orders.Watches}}<tr><td>{{.ID}}</td><td><code>{{.Signature}}</code></td><td>{{clock .CreatedAt}}</td><td>{{clock .ExpiresAt}}</td></tr>{{else}}<tr><td colspan="4" class="muted">No active focused watches.</td></tr>{{end}}</table>
-<h2>Recent confirmed reductions</h2><table><tr><th>Item</th><th>Order</th><th>Observer</th><th>Units</th><th>Unit reward</th><th>Observed</th></tr>{{range .Orders.RecentFills}}<tr><td><code>{{.Signature}}</code></td><td>{{.OrderKey}}</td><td>{{.ObserverID}}</td><td>{{.Units}}</td><td>{{money .UnitReward}}</td><td>{{clock .ObservedAt}}</td></tr>{{else}}<tr><td colspan="6" class="muted">No confirmed quantity reductions yet. Disappearances are not counted.</td></tr>{{end}}</table>
+<h2>Recent confirmed reductions</h2><table><tr><th>Item</th><th>Order</th><th>Observer</th><th>Units</th><th>Unit reward</th><th>Observed</th></tr>{{range .Orders.RecentFills}}<tr><td><code>{{.Signature}}</code></td><td>{{.OrderKey}}</td><td>{{.ObserverID}}</td><td>{{.Units}}</td><td>{{moneyCents .UnitRewardCents}}</td><td>{{clock .ObservedAt}}</td></tr>{{else}}<tr><td colspan="6" class="muted">No confirmed quantity reductions yet. Disappearances are not counted.</td></tr>{{end}}</table>
 <h2>$10M reference portfolio</h2><table><tr><th>Route</th><th>Item</th><th>Batches</th><th>Capital</th><th>Risk-adjusted/day</th></tr>{{range .Orders.ReferencePortfolio}}<tr><td>{{.Route}}</td><td>{{.ItemName}}</td><td>{{.Batches}}</td><td>{{money .Capital}}</td><td>{{money .RiskAdjustedProfitDay}}</td></tr>{{else}}<tr><td colspan="5" class="muted">No READY candidates fit the reference balance. Real player portfolios remain local to Fabric.</td></tr>{{end}}</table>
 <h2>Candidate pool</h2><table><tr><th>State</th><th>Route</th><th>Item/batch</th><th>Capital</th><th>Proceeds</th><th>Conservative profit</th><th>Risk-adjusted/day</th><th>Slots O/A/I</th><th>Volume / queue</th><th>Reason</th></tr>{{range .Orders.Candidates}}<tr><td class="{{.State}}">{{.State}}</td><td>{{.Route}}</td><td>{{.Quantity}}× {{.ItemName}}</td><td>{{money .AcquisitionCost}}</td><td>{{money .ExpectedProceeds}}</td><td>{{money .ConservativeProfit}}</td><td>{{money .RiskAdjustedProfitDay}}</td><td>{{.OrderSlots}} / {{.AuctionSlots}} / {{.InventorySlots}}</td><td>{{.ExecutableBatches}} / #{{.QueuePosition}}</td><td>{{.Reason}}</td></tr>{{else}}<tr><td colspan="10" class="muted">No joined order/API candidates yet.</td></tr>{{end}}</table></body></html>`
 
@@ -375,4 +376,10 @@ func max64Service(left, right int64) int64 {
 		return left
 	}
 	return right
+}
+
+func moneyCents(value int64) string {
+	value = max64Service(0, value)
+	dollars, cents := value/100, value%100
+	return "$" + uintString(uint64(dollars)) + "." + string([]byte{'0' + byte(cents/10), '0' + byte(cents%10)})
 }

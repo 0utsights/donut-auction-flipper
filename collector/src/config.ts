@@ -8,7 +8,7 @@ export function loadConfig(path = process.env.DN_COLLECTOR_CONFIG ?? './accounts
   const absolute = resolve(path)
   assertPrivateFile(absolute)
   const value = JSON.parse(readFileSync(absolute, 'utf8')) as Partial<CollectorConfig>
-  if (!isHttpUrl(value.backendUrl) || typeof value.observerToken !== 'string' || value.observerToken.length < 16 || value.observerToken.length > 512) throw new Error('invalid backendUrl or observerToken')
+  if (!isSecureBackendUrl(value.backendUrl) || typeof value.observerToken !== 'string' || value.observerToken.length < 16 || value.observerToken.length > 512) throw new Error('backendUrl must use HTTPS (loopback HTTP is allowed) and observerToken must be 16-512 characters')
   if (typeof value.minecraftHost !== 'string' || value.minecraftHost.length < 1 || value.minecraftHost.length > 255 || !Number.isInteger(value.minecraftPort) || value.minecraftPort! < 1 || value.minecraftPort! > 65535) throw new Error('invalid Minecraft endpoint')
   if (value.version !== '1.21.11') throw new Error('collector is pinned to Minecraft 1.21.11')
   if (!isHttpsUrl(value.expectedEgressCheckUrl)) throw new Error('expectedEgressCheckUrl must use HTTPS')
@@ -38,8 +38,13 @@ function assertPrivateFile(path: string): void {
   if (containerSecret && (mode & 0o022) !== 0) throw new Error(`${path} must not be writable by group/other`)
 }
 
-function isHttpUrl(raw: unknown): boolean {
-  try { return typeof raw === 'string' && ['http:', 'https:'].includes(new URL(raw).protocol) } catch { return false }
+function isSecureBackendUrl(raw: unknown): boolean {
+  try {
+    if (typeof raw !== 'string') return false
+    const url = new URL(raw)
+    if (url.protocol === 'https:') return true
+    return url.protocol === 'http:' && ['127.0.0.1', '::1', 'localhost'].includes(url.hostname)
+  } catch { return false }
 }
 function isHttpsUrl(raw: unknown): boolean {
   try { return typeof raw === 'string' && new URL(raw).protocol === 'https:' } catch { return false }

@@ -18,7 +18,7 @@ export class BackendClient {
   }
 
   async nextTask(signal: AbortSignal): Promise<ObserverTask | undefined> {
-    const result = await this.request(`/api/v1/observers/tasks?observer_id=${encodeURIComponent(this.observerId)}`, 'GET', undefined, signal)
+    const result = await this.request(`/api/v1/observers/tasks?observer_id=${encodeURIComponent(this.observerId)}`, 'GET', undefined, signal, 30_000)
     if (result.status === 204) return undefined
     const body = await result.json() as { task: ObserverTask }
     return body.task
@@ -30,10 +30,12 @@ export class BackendClient {
     await this.request('/api/v1/observers/task-result', 'POST', { observer_id: this.observerId, task_id: taskId, lease_token: leaseToken, status, message })
   }
 
-  private async request(path: string, method: string, body?: unknown, signal?: AbortSignal): Promise<Response> {
+  private async request(path: string, method: string, body?: unknown, signal?: AbortSignal, timeoutMs = 10_000): Promise<Response> {
+    const timeout = AbortSignal.timeout(timeoutMs)
+    const requestSignal = signal === undefined ? timeout : AbortSignal.any([signal, timeout])
     const response = await fetch(new URL(path, this.base), {
       method, headers: { Accept: 'application/json', Authorization: `Bearer ${this.token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }), ...(signal === undefined ? {} : { signal })
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: requestSignal
     })
     if (!response.ok && response.status !== 204) {
       const message = (await response.text()).slice(0, 300).replace(/[\r\n]/g, ' ')

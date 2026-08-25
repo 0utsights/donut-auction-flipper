@@ -82,6 +82,18 @@ Production uses one Compose topology for the Go backend, Mineflayer manager, per
 
 The in-game screen and backend debug page are intentionally plain, information-first interfaces. The Fabric screen uses an opaque fill and does not call `renderBackground`, fixing the Minecraft 1.21.11 `Can only blur once per frame` crash. Styling remains deferred.
 
+## 2026-08-25 — Exact order-price cents and live menu schema
+
+Mineflayer stores order rewards as integer cents (`unit_reward_cents`). This preserves Donut values such as `$0.01`, `$230.10`, and compact `$19.1K` prices without floating-point comparisons or silent rounding. The backend keeps auction/candidate totals in whole dollars: order acquisition costs round up only after multiplying cents by quantity, while expected order proceeds round down. This is conservative and prevents cheap stacked commodities from being inflated or discarded.
+
+The first real 1.21.11 order fixture verified `Orders (Page N)`, listing slots `0–44`, the non-transactional `Orders` refresh book at slot `49`, and the `Next page` arrow at slot `53`. Only those exact fingerprints are enabled. Server-confirmed discovery uses a 750ms click interval; focused watches use a separate 500ms minimum plus their requested freshness delay. Each discovery connection performs one pass and rotates at the real last page, an expired menu, or a 1,000-page runaway guard; the former 200-page cap was removed after the live market exceeded it. `/orders` opens that pass once. Listing rows, `Your Orders`, filter, search, shop, create, deliver, and every unknown or changed control remain non-clickable. Parsed signatures remain modifier-incomplete and therefore research-only until stable order identity and modifier equivalence are proven.
+
+Focused watches locate their assigned item only by traversing the same verified pagination control; they never type into a sign, invoke an unverified search, or click a listing. Remote collector-to-backend traffic requires HTTPS, while loopback HTTP remains permitted for development. Backend calls use explicit timeouts, reconnect backoff is based on rapid failures rather than the lifetime reconnect diagnostic, and a configured egress mismatch disables only the affected account.
+
+Mineflayer mutates a window optimistically when `clickWindow` is called, before the server confirms a custom-menu page. The collector therefore requires a matching server `window_items` or `open_window` packet and verifies that `Orders (Page N)` advances before submitting another page. Observers are stationary, so after login transfers settle the pinned Mineflayer 4.37.1 mount-state path suspends its otherwise unavoidable idle movement updates. A live acceptance scan completed 364 consecutively confirmed pages (16,380 rows), rotated cleanly at the server-reported end, and resumed from page 1 without the prior `Invalid sequence` kick. A live focused-watch test paginated to its assigned item, refreshed that page repeatedly, and now rotates before returning to discovery so a later full scan cannot inherit a partial page position.
+
+Legacy SQLite `unit_reward` values remain quarantined as whole-dollar development data. Exact observations write to a new `unit_reward_cents` column, and only positive values from that column enter evidence or candidate economics. The system does not guess a conversion for mixed historical rows.
+
 ## 2026-08-22 — Compatibility baseline
 
 The mod targets Minecraft 1.21.11, Java 21, Fabric API 0.141.6, and Fabric Loader 0.19.2 or newer to match the current Prism instance. Fabric Loom 1.17.19 requires Gradle 9.5 or newer for builds; Gradle 9.7 is used in CI.

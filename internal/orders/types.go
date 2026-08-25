@@ -51,7 +51,7 @@ type OrderObservation struct {
 	DisplayName       string    `json:"display_name,omitempty"`
 	Quantity          int       `json:"quantity"`
 	MaxStackSize      int       `json:"max_stack_size"`
-	UnitReward        int64     `json:"unit_reward"`
+	UnitRewardCents   int64     `json:"unit_reward_cents"`
 	RequestedQuantity int64     `json:"requested_quantity"`
 	RemainingQuantity int64     `json:"remaining_quantity"`
 	Owner             string    `json:"owner,omitempty"`
@@ -108,25 +108,25 @@ type Diagnostic struct {
 }
 
 type Evidence struct {
-	Signature         string    `json:"signature"`
-	ItemID            string    `json:"item_id"`
-	DisplayName       string    `json:"display_name"`
-	Tier              string    `json:"tier"`
-	CompleteScans     int       `json:"complete_scans"`
-	FillEvents        int       `json:"fill_events"`
-	DistinctOrders    int       `json:"distinct_orders"`
-	FilledUnits24h    int64     `json:"filled_units_24h"`
-	AvailableUnits    int64     `json:"available_units"`
-	BestUnitReward    int64     `json:"best_unit_reward"`
-	BestPricePosition int       `json:"best_price_position"`
-	ObservedQuantity  int       `json:"observed_quantity"`
-	MaxStackSize      int       `json:"max_stack_size"`
-	FirstSeenAt       time.Time `json:"first_seen_at"`
-	LastSeenAt        time.Time `json:"last_seen_at"`
-	Stable            bool      `json:"stable"`
-	Conflict          bool      `json:"conflict"`
-	SignatureComplete bool      `json:"signature_complete"`
-	Reason            string    `json:"reason,omitempty"`
+	Signature           string    `json:"signature"`
+	ItemID              string    `json:"item_id"`
+	DisplayName         string    `json:"display_name"`
+	Tier                string    `json:"tier"`
+	CompleteScans       int       `json:"complete_scans"`
+	FillEvents          int       `json:"fill_events"`
+	DistinctOrders      int       `json:"distinct_orders"`
+	FilledUnits24h      int64     `json:"filled_units_24h"`
+	AvailableUnits      int64     `json:"available_units"`
+	BestUnitRewardCents int64     `json:"best_unit_reward_cents"`
+	BestPricePosition   int       `json:"best_price_position"`
+	ObservedQuantity    int       `json:"observed_quantity"`
+	MaxStackSize        int       `json:"max_stack_size"`
+	FirstSeenAt         time.Time `json:"first_seen_at"`
+	LastSeenAt          time.Time `json:"last_seen_at"`
+	Stable              bool      `json:"stable"`
+	Conflict            bool      `json:"conflict"`
+	SignatureComplete   bool      `json:"signature_complete"`
+	Reason              string    `json:"reason,omitempty"`
 }
 
 type Candidate struct {
@@ -198,10 +198,10 @@ type ScanCoverage struct {
 }
 
 type FillEvidence struct {
-	Signature  string    `json:"signature"`
-	OrderKey   string    `json:"order_key"`
-	ObserverID string    `json:"observer_id"`
-	Units      int64     `json:"units"`
-	UnitReward int64     `json:"unit_reward"`
-	ObservedAt time.Time `json:"observed_at"`
+	Signature       string    `json:"signature"`
+	OrderKey        string    `json:"order_key"`
+	ObserverID      string    `json:"observer_id"`
+	Units           int64     `json:"units"`
+	UnitRewardCents int64     `json:"unit_reward_cents"`
+	ObservedAt      time.Time `json:"observed_at"`
 }

@@ -1,9 +1,14 @@
 import { createHash } from 'node:crypto'
+import { simplify } from 'prismarine-nbt'
 import type { ItemView, ParsedOrder } from './types.js'
 
-const moneyPattern = /(?:reward|unit reward|price|paying|each)\s*[:=-]?\s*\$?([0-9][0-9,]*(?:\.[0-9]+)?)\s*([kmbt])?/i
+const moneyPatterns = [
+  /\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*([kmbt])?\s*(?:each|per item)\b/i,
+  /(?:reward|unit reward|price|paying)\s*[:=-]?\s*\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*([kmbt])?/i
+]
 const remainingPattern = /(?:remaining|amount left|quantity left)\s*[:=-]?\s*([0-9][0-9,]*)/i
 const requestedPattern = /(?:requested|total amount|quantity)\s*[:=-]?\s*([0-9][0-9,]*)/i
+const deliveredPattern = /([0-9][0-9,]*(?:\.[0-9]+)?)\s*([kmbt])?\s*\/\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*([kmbt])?\s+delivered\b/i
 const ownerPattern = /(?:owner|buyer|created by)\s*[:=-]\s*([A-Za-z0-9_]{1,32})/i
 const idPattern = /(?:order id|order #|id)\s*[:#=-]?\s*([A-Za-z0-9_-]{3,128})/i
 const positionPattern = /(?:position|queue|rank)\s*[:#=-]?\s*#?([0-9][0-9,]*)/i
@@ -16,29 +21,39 @@ export function projectItem(item: unknown, slot: number): ItemView | undefined {
   if (!itemId) return undefined
   const count = integer(value.count, 1)
   const maxStackSize = integer(value.stackSize ?? value.maxStackSize, 64)
-  const displayName = stripFormatting(stringValue(value.displayName ?? value.customName ?? value.name))
-  const text = collectStrings(value).map(stripFormatting).filter((entry, index, all) => entry.length > 0 && all.indexOf(entry) === index).slice(0, 64)
+  const componentValues = mapComponentValues(value.componentMap)
+  const simplifiedNbt = simplifyItemNbt(value.nbt)
+  const readableNbt = simplifiedNbt ?? value.nbt
+  const customName = value.customName ?? componentValues.custom_name ?? findNamedValue(readableNbt, 'custom_name')
+  const customLore = value.customLore ?? componentValues.lore ?? findNamedValue(readableNbt, 'lore')
+  const displayName = plainText(customName) || plainText(value.displayName) || stripFormatting(stringValue(value.name))
+  const componentText = [customName, customLore].flatMap(collectComponentText)
+  const fallbackText = collectStrings([componentValues, readableNbt, value.components]).map(plainText)
+  const text = [...componentText, ...fallbackText, displayName].map(stripFormatting).filter((entry, index, all) => entry.length > 0 && all.indexOf(entry) === index).slice(0, 64)
   return { slot, itemId, count: clamp(count, 1, 1728), maxStackSize: clamp(maxStackSize, 1, 99), displayName, text, raw: item }
 }
 
 export function parseOrder(view: ItemView): ParsedOrder | undefined {
   const text = view.text.join('\n')
-  const money = moneyPattern.exec(text)
+  const money = moneyPatterns.map(pattern => pattern.exec(text)).find(match => match !== null)
   const remaining = remainingPattern.exec(text)
   const requested = requestedPattern.exec(text)
-  if (!money || !remaining) return undefined
-  const unitReward = parseMoney(money[1] ?? '', money[2] ?? '')
-  const remainingQuantity = parseInteger(remaining[1] ?? '')
-  const requestedQuantity = requested ? parseInteger(requested[1] ?? '') : remainingQuantity
-  if (unitReward <= 0 || remainingQuantity < 0 || requestedQuantity < remainingQuantity) return undefined
+  const delivered = deliveredPattern.exec(text)
+  if (!money || (!remaining && !delivered)) return undefined
+  const unitRewardCents = parseScaledInteger(money[1] ?? '', money[2] ?? '', 100n)
+  const deliveredQuantity = parseScaledInteger(delivered?.[1] ?? '', delivered?.[2] ?? '', 1n)
+  const deliveredTotal = parseScaledInteger(delivered?.[3] ?? '', delivered?.[4] ?? '', 1n)
+  const remainingQuantity = delivered ? deliveredTotal - deliveredQuantity : parseInteger(remaining?.[1] ?? '')
+  const requestedQuantity = delivered ? deliveredTotal : (requested ? parseInteger(requested[1] ?? '') : remainingQuantity)
+  if (unitRewardCents <= 0 || remainingQuantity < 0 || requestedQuantity < remainingQuantity) return undefined
   const owner = ownerPattern.exec(text)?.[1] ?? ''
   const rawHash = hash(JSON.stringify({ itemId: view.itemId, count: view.count, displayName: view.displayName, text: view.text }))
 	const explicitId = idPattern.exec(text)?.[1]
 	const pricePosition = parseInteger(positionPattern.exec(text)?.[1] ?? '')
-  const orderKey = explicitId ?? rawHash
+  const orderKey = explicitId ?? hash(JSON.stringify({ itemId: view.itemId, displayName: view.displayName, unitRewardCents, requestedQuantity, owner, pricePosition, slot: view.slot }))
   return {
     order_key: orderKey, item_id: view.itemId, signature: view.itemId, ...(view.displayName ? { display_name: view.displayName } : {}),
-    quantity: view.count, max_stack_size: view.maxStackSize, unit_reward: unitReward,
+    quantity: view.count, max_stack_size: view.maxStackSize, unit_reward_cents: unitRewardCents,
 		requested_quantity: requestedQuantity, remaining_quantity: remainingQuantity, ...(owner ? { owner } : {}),
 		...(pricePosition > 0 ? { price_position: pricePosition } : {}),
     slot: view.slot, raw_field_hash: rawHash,
@@ -55,6 +70,60 @@ export function fingerprintWindow(title: string, views: readonly ItemView[]): st
 
 export function hash(value: string): string { return createHash('sha256').update(value).digest('hex') }
 
+export function plainText(value: unknown): string {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+      try { return plainText(JSON.parse(trimmed)) } catch { /* use the literal string */ }
+    }
+    return stripFormatting(value)
+  }
+  if (Array.isArray(value)) return value.map(plainText).filter(Boolean).join('')
+  if (typeof value !== 'object') return String(value)
+  const component = value as Record<string, unknown>
+  if (component.type === 'string' && typeof component.value === 'string') return plainText(component.value)
+  if ((component.type === 'compound' || component.type === 'list') && component.value !== undefined) return plainText(component.value)
+  const direct = plainText(component.text)
+  const translated = direct || plainText(component.translate)
+  const argumentsText = plainText(component.with)
+  const extra = plainText(component.extra)
+  return `${translated}${argumentsText}${extra}`
+}
+
+function collectComponentText(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(plainText).filter(Boolean)
+  const text = plainText(value)
+  return text ? [text] : []
+}
+
+function mapComponentValues(value: unknown): Record<string, unknown> {
+  if (!(value instanceof Map)) return {}
+  const result: Record<string, unknown> = {}
+  for (const [key, component] of value.entries()) {
+    if (typeof key !== 'string' || component === null || typeof component !== 'object') continue
+    result[key] = (component as Record<string, unknown>).data
+  }
+  return result
+}
+
+function simplifyItemNbt(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') return undefined
+  try { return simplify(value as Parameters<typeof simplify>[0]) } catch { return undefined }
+}
+
+function findNamedValue(value: unknown, name: string, depth = 0): unknown {
+  if (depth > 8 || value === null || typeof value !== 'object') return undefined
+  if (Array.isArray(value)) {
+    for (const child of value) { const found = findNamedValue(child, name, depth + 1); if (found !== undefined) return found }
+    return undefined
+  }
+  const record = value as Record<string, unknown>
+  if (record[name] !== undefined) return record[name]
+  for (const child of Object.values(record)) { const found = findNamedValue(child, name, depth + 1); if (found !== undefined) return found }
+  return undefined
+}
+
 function collectStrings(value: unknown, depth = 0, result: string[] = []): string[] {
   if (depth > 6 || result.length >= 128 || value === null || value === undefined) return result
   if (typeof value === 'string') { result.push(value); return result }
@@ -68,7 +137,7 @@ function collectStrings(value: unknown, depth = 0, result: string[] = []): strin
   return result
 }
 
-function parseMoney(number: string, suffix: string): number {
+function parseScaledInteger(number: string, suffix: string, outputScale: bigint): number {
   const normalized = number.replace(/,/g, '')
   if (!/^\d+(?:\.\d+)?$/.test(normalized)) return -1
   const [whole = '0', fractional = ''] = normalized.split('.')
@@ -76,7 +145,7 @@ function parseMoney(number: string, suffix: string): number {
   if (multiplier === undefined) return -1
   const scale = 10n ** BigInt(fractional.length)
   const raw = BigInt(whole) * scale + BigInt(fractional || '0')
-  const result = raw * multiplier
+  const result = raw * multiplier * outputScale
   if (result % scale !== 0n || result / scale > BigInt(Number.MAX_SAFE_INTEGER)) return -1
   return Number(result / scale)
 }

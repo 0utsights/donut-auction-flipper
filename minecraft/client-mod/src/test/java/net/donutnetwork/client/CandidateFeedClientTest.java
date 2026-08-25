@@ -7,6 +7,14 @@ import java.nio.charset.StandardCharsets;
 import static org.junit.jupiter.api.Assertions.*;
 
 class CandidateFeedClientTest {
+    @Test void decodesEmptyCandidateFeed() {
+        String json = """
+                {"version":0,"generated_at":"2026-08-23T20:00:00Z","candidates":[]}
+                """;
+        CandidateFeedClient.DecodedFeed feed = CandidateFeedClient.decode(json.getBytes(StandardCharsets.UTF_8));
+        assertTrue(feed.candidates().isEmpty());
+    }
+
     @Test void decodesBoundedCandidateFeed() {
         String json = """
                 {"version":3,"generated_at":"2026-08-23T20:00:00Z","candidates":[{

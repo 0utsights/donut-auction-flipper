@@ -82,7 +82,7 @@ func (s *System) Backup(ctx context.Context) (string, error) { return s.store.Ba
 func (s *System) CandidateFeed() CandidateFeed {
 	current := s.candidates.Load()
 	copyFeed := *current
-	copyFeed.Candidates = append([]Candidate(nil), current.Candidates...)
+	copyFeed.Candidates = append([]Candidate{}, current.Candidates...)
 	return copyFeed
 }
 
@@ -180,7 +180,7 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 		if quantity > 1 {
 			quickUnit = min64(quickUnit, valuation.QuantityQuickSell)
 		}
-		if quickUnit <= 0 || evidence.BestUnitReward <= 0 {
+		if quickUnit <= 0 || evidence.BestUnitRewardCents <= 0 {
 			continue
 		}
 		completion := completionBPS(evidence, valuation)
@@ -219,8 +219,8 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 			}
 		}
 
-		competitiveUnit := evidence.BestUnitReward + max64(1, evidence.BestUnitReward/10_000)
-		orderCost := mulMoney(competitiveUnit, int64(quantity))
+		competitiveUnitCents := evidence.BestUnitRewardCents + max64(1, evidence.BestUnitRewardCents/10_000)
+		orderCost := centsForQuantity(competitiveUnitCents, int64(quantity), true)
 		auctionGross := mulMoney(quickUnit, int64(quantity))
 		auctionNet := applyFee(auctionGross, cfg.AuctionFeeBPS)
 		cycle := max(1, valuation.ExpectedSellMinutes+estimatedFillMinutes(evidence, quantity))
@@ -236,7 +236,7 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 		activeUnit := valuation.ActiveBestAsk
 		if activeUnit > 0 {
 			auctionCost := mulMoney(activeUnit, int64(quantity))
-			orderGross := mulMoney(evidence.BestUnitReward, int64(quantity))
+			orderGross := centsForQuantity(evidence.BestUnitRewardCents, int64(quantity), false)
 			orderNet := applyFee(orderGross, cfg.OrderFeeBPS)
 			immediateExecutable := min(int(evidence.AvailableUnits/int64(quantity)), valuation.ActiveDepth)
 			immediateState, immediateReason := state, reason
@@ -272,15 +272,17 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 
 func candidate(value Candidate) Candidate {
 	profit := value.ExpectedProceeds - value.AcquisitionCost
-	value.ConservativeProfit = profit * int64(min(value.ConfidenceBPS, value.CompletionBPS)) / 10_000
+	value.ConservativeProfit = mulDivNonNegative(profit, int64(min(value.ConfidenceBPS, value.CompletionBPS)), 10_000)
 	if profit > 0 && value.AcquisitionCost > 0 {
-		value.MarginBPS = int(min64(math.MaxInt32, profit*10_000/value.AcquisitionCost))
+		ratio := float64(profit) / float64(value.AcquisitionCost) * 10_000
+		value.MarginBPS = int(math.Min(float64(math.MaxInt32), ratio))
 	}
 	if value.InventorySlots > 0 {
 		value.ProfitInventorySlot = value.ConservativeProfit / int64(value.InventorySlots)
 	}
 	if value.ExpectedCycleMinutes > 0 && value.ConservativeProfit > 0 {
-		value.RiskAdjustedProfitDay = value.ConservativeProfit * int64(value.CompletionBPS) * 1440 / 10_000 / int64(value.ExpectedCycleMinutes)
+		completed := mulDivNonNegative(value.ConservativeProfit, int64(value.CompletionBPS), 10_000)
+		value.RiskAdjustedProfitDay = mulDivNonNegative(completed, 1440, int64(value.ExpectedCycleMinutes))
 	}
 	if profit <= 0 {
 		value.State = "REJECTED"
@@ -364,7 +366,9 @@ func fmtInt(value int) string {
 	return string(buffer[position:])
 }
 
-func applyFee(value int64, bps int) int64 { return value - value*int64(bps)/10_000 }
+func applyFee(value int64, bps int) int64 {
+	return value - mulDivNonNegative(value, int64(bps), 10_000)
+}
 func mulMoney(left, right int64) int64 {
 	if left <= 0 || right <= 0 {
 		return 0
@@ -373,6 +377,35 @@ func mulMoney(left, right int64) int64 {
 		return math.MaxInt64
 	}
 	return left * right
+}
+func centsForQuantity(unitCents, quantity int64, roundUp bool) int64 {
+	totalCents := mulMoney(unitCents, quantity)
+	if totalCents == math.MaxInt64 {
+		return math.MaxInt64
+	}
+	dollars := totalCents / 100
+	if roundUp && totalCents%100 != 0 {
+		dollars++
+	}
+	return dollars
+}
+func mulDivNonNegative(value, multiplier, divisor int64) int64 {
+	if value <= 0 || multiplier <= 0 || divisor <= 0 {
+		return 0
+	}
+	quotient, remainder := value/divisor, value%divisor
+	if quotient > math.MaxInt64/multiplier {
+		return math.MaxInt64
+	}
+	result := quotient * multiplier
+	if remainder > math.MaxInt64/multiplier {
+		return math.MaxInt64
+	}
+	extra := remainder * multiplier / divisor
+	if result > math.MaxInt64-extra {
+		return math.MaxInt64
+	}
+	return result + extra
 }
 func min64(left, right int64) int64 {
 	if left < right {

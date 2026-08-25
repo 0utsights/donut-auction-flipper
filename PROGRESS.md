@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-08-24
+Last updated: 2026-08-25
 
 ## Implemented on `codex/auction-orders`
 
@@ -18,9 +18,9 @@ Last updated: 2026-08-24
 ## Verified locally
 
 - `go test ./...` and `go vet ./...` pass. Tests cover authenticated leases, idempotent scans, capture-only exclusion, fill/disappearance semantics, current-price freshness, shared-watch lifecycle, exact-quantity valuation, candidate executable volume, backups, scoped auth, API handlers, and diagnostic redaction.
-- Node TypeScript build and six parser/navigation tests pass; `npm audit --omit=dev` reports zero vulnerabilities.
+- Node TypeScript build and 17 parser, navigation, proxy, configuration, and redaction tests pass; `npm audit --omit=dev` reports zero vulnerabilities.
 - Fabric JUnit/build passes on Minecraft 1.21.11, Java 21, Loader 0.19.2, Fabric API 0.141.6, Loom 1.17.19, and Gradle 9.6.1.
-- Candidate-frontier benchmark: approximately 118µs/op for 100 evidence rows on the local i5-11600K. Existing market benchmarks remain near or under roughly 2ms/op for their checked-in workloads.
+- Candidate-frontier benchmark: approximately 135–204µs/op for 100 evidence rows on the local i5-11600K, with the upper result measured while the live backend and observer were running. Existing market benchmarks remain near or under roughly 2ms/op for their checked-in workloads.
 - `docker compose config --quiet` validates with placeholder environment credentials. The Docker Desktop Linux daemon is not running, so containers could not be executed locally.
 - Windows `go test -race` is unavailable because the local Go race build requires CGO. The normal suite is pure Go; race instrumentation remains a Linux CI/deployment-host gate.
 
@@ -31,20 +31,22 @@ Last updated: 2026-08-24
 3. Replaced invented one-batch volume with strict two-sided executable limits, separated current order capacity from historical fill velocity, and stopped retained historical high rewards/queue ranks from leaking into current candidates.
 4. Deduplicated shared focused-watch tasks, prevented one client watch deletion from stopping another, added current scan/fill/watch/reference-portfolio debug surfaces, scoped credentials, diagnostic rate limiting, and bounded retention/backups.
 5. Hardened collector secret permissions, focused-watch refresh cadence, reconnect backoff reset, exact command/control denial, and assigned the combined Fabric artifact a distinct `2.0.0-alpha.1` identity.
+6. Verified the real 1.21.11 Donut order layout, exact cent parsing, server-acknowledged pagination, proxy/SRV login, credential redaction, and fail-closed schema behavior. A single live pass completed 364 pages / 16,380 rows without a sequence kick.
+7. Fixed optimistic window-state submissions, partial-page connection reuse, watch deletion versus active-lease races, insecure remote HTTP configuration, unbounded backend calls, lifetime-based reconnect delays, and proxy-egress restart loops.
 
 A final fresh pass found no further code-only improvement that outweighed the risk of inventing behavior without real Donut order-menu and transaction-message fixtures.
 
 ## Shadow-mode limitations
 
-- No real order-menu schema is enabled. `collector/order-schemas.json` is intentionally empty, so collectors capture unknown layouts and stop instead of clicking.
-- Microsoft login reuse, each proxy type, signed `/orders`, real item components/lore, pagination, refresh cadence, scoreboard messages, and reconnect behavior cannot be certified without operator accounts and sanitized live fixtures.
-- Therefore combined candidates should be treated as research-only until repeated real scans and fill-rate calibration graduate an item to actionable evidence.
+- The verified schema enables only `/orders`, the exact refresh book, and the exact next-page arrow. Changed layouts remain capture-only.
+- The current generic signature is item-ID based and deliberately marked modifier-incomplete. Real rows therefore remain research-only until stable order identity, modifier equivalence, queue position, and repeated fill evidence are proven.
+- Only the configured HTTP CONNECT proxy has completed the live acceptance path; every additional proxy type/account still requires its own egress and login check.
 - Local position inference is fail-closed until real success/failure message fixtures exist; used slots remain manually adjustable and no transaction or complete inventory data is uploaded.
 
 ## Next rollout gates
 
-1. Copy the collector account example to a permission-restricted host secret and bootstrap each Microsoft account.
-2. Run one observer through each configured proxy and collect unknown-menu diagnostics without navigation.
-3. Review and version a real order-menu fixture, then enable only the proven non-transactional controls.
-4. Run multiple observers in shadow mode and measure coverage, disagreement, attainable refresh cadence, and prediction error.
+1. Add and bootstrap any additional observer accounts in separate permission-restricted profiles and verify each configured proxy egress.
+2. Run multiple observers in shadow mode and measure overlap, disagreement, full-pass duration, and attainable focused-watch cadence.
+3. Capture stable order identity/modifier/queue fields if Donut exposes them; keep actionability disabled if equivalence cannot be proven.
+4. Calibrate observed quantity reductions against real fills and exact-quantity auction exits.
 5. Enable Fabric `READY` notifications only after fill velocity, exact-quantity exits, and stability calibration pass.
