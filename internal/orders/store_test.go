@@ -551,6 +551,42 @@ func TestFocusedWatchCannotConfirmNeighborItemFill(t *testing.T) {
 	}
 }
 
+func TestFocusedWatchCannotConfirmSyntheticOrderIdentity(t *testing.T) {
+	system, err := NewSystem(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	ctx := context.Background()
+	_, _ = system.Register(ctx, ObserverRegistration{ObserverID: "one", ParserVersion: "p1", ProxyLabel: "proxy"})
+	if _, err := system.AddWatch(ctx, "minecraft:diamond"); err != nil {
+		t.Fatal(err)
+	}
+	task, err := system.LeaseTask(ctx, "one")
+	if err != nil || task == nil || task.Kind != "focused_watch" {
+		t.Fatalf("focused task=%+v err=%v", task, err)
+	}
+	now := time.Now().UTC()
+	firstOrder := order("synthetic", 100)
+	firstOrder.IdentityVerified = false
+	secondOrder := firstOrder
+	secondOrder.RemainingQuantity = 50
+	first := scan("one", task.ID, "first", 1, now, firstOrder)
+	second := scan("one", task.ID, "second", 1, now.Add(time.Second), secondOrder)
+	first.LeaseToken, second.LeaseToken = task.LeaseToken, task.LeaseToken
+	second.ContentHash = strings.Repeat("e", 64)
+	if _, err := system.SaveScan(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := system.SaveScan(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := system.store.Evidence(ctx)
+	if err != nil || len(evidence) != 1 || evidence[0].FillEvents != 0 {
+		t.Fatalf("synthetic identity became fill evidence: evidence=%+v err=%v", evidence, err)
+	}
+}
+
 func TestCandidateBuilderIsQuantityAndEvidenceSafe(t *testing.T) {
 	now := time.Now().UTC()
 	evidence := Evidence{Signature: "minecraft:diamond_block", ItemID: "minecraft:diamond_block", DisplayName: "Diamond Block",
@@ -637,7 +673,7 @@ func scan(observer, task, session string, page int, at time.Time, values ...Orde
 
 func order(key string, remaining int64) OrderObservation {
 	return OrderObservation{OrderKey: key, ItemID: "minecraft:diamond", Signature: "minecraft:diamond", DisplayName: "Diamond",
-		Quantity: 1, MaxStackSize: 64, UnitRewardCents: 100, RequestedQuantity: 100, RemainingQuantity: remaining,
+		Quantity: 1, MaxStackSize: 64, UnitRewardCents: 100, RequestedQuantity: 100, RemainingQuantity: remaining, IdentityVerified: true,
 		Owner: "buyer", PricePosition: 1, Slot: 1, RawFieldHash: strings.Repeat("a", 64), SignatureComplete: true}
 }
 

@@ -1,5 +1,5 @@
 export const SCHEMA_VERSION = 'orders-v1'
-export const PARSER_VERSION = 'mineflayer-orders-1.2.0'
+export const PARSER_VERSION = 'mineflayer-orders-1.3.0'
 
 export interface AccountConfig {
   id: string
@@ -50,6 +50,7 @@ export interface ParsedOrder {
   slot: number
   raw_field_hash: string
   signature_complete: boolean
+  identity_verified: boolean
 }
 
 export interface ScanBatch {

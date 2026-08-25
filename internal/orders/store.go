@@ -83,7 +83,8 @@ func (s *Store) migrate() error {
 			unit_reward INTEGER NOT NULL DEFAULT 0, unit_reward_cents INTEGER NOT NULL,
 			requested_quantity INTEGER NOT NULL, remaining_quantity INTEGER NOT NULL,
 			owner TEXT NOT NULL DEFAULT '', expires_ms INTEGER NOT NULL DEFAULT 0, price_position INTEGER NOT NULL DEFAULT 0,
-			slot INTEGER NOT NULL, raw_field_hash TEXT NOT NULL, signature_complete INTEGER NOT NULL DEFAULT 0, observed_ms INTEGER NOT NULL)`,
+			slot INTEGER NOT NULL, raw_field_hash TEXT NOT NULL, signature_complete INTEGER NOT NULL DEFAULT 0,
+			identity_verified INTEGER NOT NULL DEFAULT 0, observed_ms INTEGER NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS order_rows_signature_time ON order_rows(signature, observed_ms DESC)`,
 		`CREATE INDEX IF NOT EXISTS order_rows_order_time ON order_rows(observer_id, order_key, observed_ms DESC)`,
 		`CREATE TABLE IF NOT EXISTS order_evidence_summary (
@@ -118,6 +119,9 @@ func (s *Store) migrate() error {
 	if _, err := s.db.Exec(`ALTER TABLE order_rows ADD COLUMN signature_complete INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 		return fmt.Errorf("migrate signature completeness: %w", err)
 	}
+	if _, err := s.db.Exec(`ALTER TABLE order_rows ADD COLUMN identity_verified INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return fmt.Errorf("migrate order identity verification: %w", err)
+	}
 	// Never reinterpret the legacy whole-dollar columns as cents. Existing rows
 	// receive zero in the new columns and are therefore excluded from economics;
 	// fresh observations repopulate exact cent values without an unsafe guess.
@@ -147,7 +151,8 @@ func (s *Store) migrate() error {
 		JOIN scans older_scan ON older_scan.id=older.scan_id
 		WHERE newer.observer_id=fill_events.observer_id AND newer.order_key=fill_events.order_key
 			AND newer.unit_reward_cents=fill_events.unit_reward_cents AND newer.observed_ms=fill_events.observed_ms
-			AND newer_scan.page=older_scan.page AND newer_scan.task_id=older_scan.task_id)`); err != nil {
+			AND newer_scan.page=older_scan.page AND newer_scan.task_id=older_scan.task_id
+			AND newer.identity_verified=1 AND older.identity_verified=1)`); err != nil {
 		return fmt.Errorf("quarantine cross-page fill evidence: %w", err)
 	}
 	availabilityAdded := false
@@ -388,20 +393,21 @@ func (s *Store) SaveScan(ctx context.Context, batch ScanBatch) (bool, error) {
 		}
 		for _, order := range batch.Orders {
 			var previous, previousObserved int64
-			previousErr := tx.QueryRowContext(ctx, `SELECT r.remaining_quantity,r.observed_ms FROM order_rows r JOIN scans prior_scan ON prior_scan.id=r.scan_id
+			var previousIdentity bool
+			previousErr := tx.QueryRowContext(ctx, `SELECT r.remaining_quantity,r.observed_ms,r.identity_verified FROM order_rows r JOIN scans prior_scan ON prior_scan.id=r.scan_id
 				WHERE r.observer_id=? AND r.order_key=? AND r.unit_reward_cents=? AND prior_scan.page=? AND prior_scan.task_id=? AND r.observed_ms<?
-				ORDER BY r.observed_ms DESC LIMIT 1`, batch.ObserverID, order.OrderKey, order.UnitRewardCents, batch.Page, batch.TaskID, batch.ObservedAt.UnixMilli()).Scan(&previous, &previousObserved)
-			_, err = tx.ExecContext(ctx, `INSERT INTO order_rows(scan_id,observer_id,order_key,item_id,signature,display_name,quantity,max_stack_size,unit_reward,unit_reward_cents,requested_quantity,remaining_quantity,owner,expires_ms,price_position,slot,raw_field_hash,signature_complete,observed_ms)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, scanID, batch.ObserverID, order.OrderKey, order.ItemID, order.Signature,
+				ORDER BY r.observed_ms DESC LIMIT 1`, batch.ObserverID, order.OrderKey, order.UnitRewardCents, batch.Page, batch.TaskID, batch.ObservedAt.UnixMilli()).Scan(&previous, &previousObserved, &previousIdentity)
+			_, err = tx.ExecContext(ctx, `INSERT INTO order_rows(scan_id,observer_id,order_key,item_id,signature,display_name,quantity,max_stack_size,unit_reward,unit_reward_cents,requested_quantity,remaining_quantity,owner,expires_ms,price_position,slot,raw_field_hash,signature_complete,identity_verified,observed_ms)
+				VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, scanID, batch.ObserverID, order.OrderKey, order.ItemID, order.Signature,
 				order.DisplayName, order.Quantity, order.MaxStackSize, 0, order.UnitRewardCents, order.RequestedQuantity, order.RemainingQuantity,
-				order.Owner, timeMillis(order.ExpiresAt), order.PricePosition, order.Slot, order.RawFieldHash, boolInt(order.SignatureComplete), batch.ObservedAt.UnixMilli())
+				order.Owner, timeMillis(order.ExpiresAt), order.PricePosition, order.Slot, order.RawFieldHash, boolInt(order.SignatureComplete), boolInt(order.IdentityVerified), batch.ObservedAt.UnixMilli())
 			if err != nil {
 				return false, err
 			}
 			if previousErr == nil && previous > order.RemainingQuantity && batch.Complete {
 				confirmation := 0
 				gap := batch.ObservedAt.UnixMilli() - previousObserved
-				if taskKind == "focused_watch" && taskSignature == order.Signature && gap > 0 && gap <= (2*time.Minute).Milliseconds() {
+				if taskKind == "focused_watch" && taskSignature == order.Signature && order.IdentityVerified && previousIdentity && gap > 0 && gap <= (2*time.Minute).Milliseconds() {
 					confirmation = 2
 				}
 				_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO fill_events(signature,order_key,observer_id,units,unit_reward,unit_reward_cents,confirmation_level,previous_observed_ms,observed_ms) VALUES(?,?,?,?,?,?,?,?,?)`,

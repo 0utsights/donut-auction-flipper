@@ -60,6 +60,7 @@ type OrderObservation struct {
 	Slot              int       `json:"slot"`
 	RawFieldHash      string    `json:"raw_field_hash"`
 	SignatureComplete bool      `json:"signature_complete"`
+	IdentityVerified  bool      `json:"identity_verified"`
 }
 
 type ScanBatch struct {

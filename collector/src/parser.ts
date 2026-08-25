@@ -82,7 +82,8 @@ export function parseOrder(view: ItemView): ParsedOrder | undefined {
 		requested_quantity: requestedQuantity, remaining_quantity: remainingQuantity, ...(owner ? { owner } : {}),
 		...(pricePosition > 0 ? { price_position: pricePosition } : {}),
     slot: view.slot, raw_field_hash: rawHash,
-    signature_complete: baseSignatureComplete(view)
+    signature_complete: baseSignatureComplete(view),
+    identity_verified: explicitId !== undefined || owner !== ''
   }
 }
 

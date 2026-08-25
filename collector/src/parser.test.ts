@@ -12,6 +12,7 @@ test('parses a conservative order fixture', () => {
   assert.equal(order.remaining_quantity, 640)
   assert.equal(order.requested_quantity, 1000)
   assert.equal(order.order_key, 'ord_123')
+  assert.equal(order.identity_verified, true)
   assert.equal(order.price_position, 2)
   assert.equal(order.signature_complete, true)
 })
@@ -26,6 +27,7 @@ test('preserves fractional currency as integer cents', () => {
   const view = projectItem({ name: 'iron_ingot', count: 1, nbt: { lore: ['Unit Reward: $0.01', 'Remaining: 64'] } }, 2)
   assert.ok(view)
   assert.equal(parseOrder(view)?.unit_reward_cents, 1)
+  assert.equal(parseOrder(view)?.identity_verified, false)
 })
 
 test('reads modern item component names and lore', () => {
