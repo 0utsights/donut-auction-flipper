@@ -57,7 +57,7 @@ An order disappearance is not a fill. A fill event requires a decrease in the sa
 - `research`: at least three complete scans spanning ten minutes.
 - `actionable`: five fill events across three orders, at least 15 minutes of evidence, stable current pricing, no observer conflict, and a fresh snapshot.
 
-Combined actionability also requires five exact-quantity, near-target auction sales from three sellers in 24 hours.
+Combined actionability also requires five exact-quantity, near-target auction sales from three sellers in 24 hours, at least 50% model confidence, and target-price sale evidence no older than two hours.
 
 Routes are:
 
@@ -69,6 +69,12 @@ Each candidate includes fees, capital, market/inventory slots, completion probab
 `risk-adjusted profit/day = conservative profit × completion probability ÷ cycle days`
 
 No absolute order-auction profit floor exists.
+
+Priority is the risk-adjusted profit/day multiplied by conservative attainable batch capacity, capped by the 18 auction-slot limit. Only signature-complete base commodities receive a priority rank. Exact full-stack auction evidence is preferred; single-item evidence is a fallback only when no exact stack cohort exists. One acquisition order may fill several identical resale batches and therefore consumes one order slot while each relisted batch consumes one auction slot.
+
+Outstanding quantity in other players' buy orders is demand, not sell-side fill capacity. It is shown as context and may bound the immediate auction-to-existing-order route, but cannot scale a new order-to-auction position. An uncalibrated order-to-auction research idea receives one exploratory batch; only confirmed short-gap fill velocity unlocks multi-batch capacity.
+
+Fill evidence is trusted only when the same observer sees the same stable order identity and price decrease within two minutes. Older inferred reductions remain stored with confirmation level zero for audit, but do not contribute volume, evidence graduation, completion estimates, or ranking.
 
 ## Fabric allocation
 

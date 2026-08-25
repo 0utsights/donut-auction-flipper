@@ -345,7 +345,7 @@ func TestCurrentPriceAndQueueDoNotUseHistoricalBest(t *testing.T) {
 	if err != nil || len(evidence) != 1 {
 		t.Fatalf("evidence=%+v err=%v", evidence, err)
 	}
-	if evidence[0].BestUnitRewardCents != 100 || evidence[0].BestPricePosition != 3 {
+	if evidence[0].BestUnitRewardCents != 100 || evidence[0].BestPricePosition != 1 {
 		t.Fatalf("historical price leaked into current evidence: %+v", evidence[0])
 	}
 }
@@ -379,8 +379,12 @@ func TestFillInferenceRequiresObservedQuantityDecrease(t *testing.T) {
 	if len(evidence) != 1 {
 		t.Fatalf("evidence=%+v", evidence)
 	}
-	if evidence[0].FillEvents < 5 || evidence[0].DistinctOrders < 3 || evidence[0].Tier != "actionable" {
+	if evidence[0].FillEvents != 6 || evidence[0].DistinctOrders != 3 || evidence[0].Tier != "actionable" {
 		t.Fatalf("expected actionable fill evidence, got %+v", evidence[0])
+	}
+	var confirmed, quarantined int
+	if err := system.store.db.QueryRow(`SELECT SUM(CASE WHEN confirmation_level>=2 THEN 1 ELSE 0 END),SUM(CASE WHEN confirmation_level<2 THEN 1 ELSE 0 END) FROM fill_events`).Scan(&confirmed, &quarantined); err != nil || confirmed != 6 || quarantined != 5 {
+		t.Fatalf("fill confirmation split confirmed=%d quarantined=%d err=%v", confirmed, quarantined, err)
 	}
 	// A missing row is deliberately ambiguous and does not create a fill event.
 	before := evidence[0].FillEvents
@@ -397,7 +401,7 @@ func TestCandidateBuilderIsQuantityAndEvidenceSafe(t *testing.T) {
 	now := time.Now().UTC()
 	evidence := Evidence{Signature: "minecraft:diamond_block", ItemID: "minecraft:diamond_block", DisplayName: "Diamond Block",
 		Tier: "actionable", CompleteScans: 10, FillEvents: 8, DistinctOrders: 3, FilledUnits24h: 640, AvailableUnits: 640,
-		BestUnitRewardCents: 400_000, BestPricePosition: 1, ObservedQuantity: 64, MaxStackSize: 64, LastSeenAt: now, Stable: true}
+		BestUnitRewardCents: 400_000, BestPricePosition: 1, ObservedQuantity: 64, MaxStackSize: 64, LastSeenAt: now, Stable: true, SignatureComplete: true}
 	valuation := market.Valuation{Signature: evidence.Signature, QuickSellValue: 5_000, QuantityQuickSell: 5_000,
 		PricingQuantity: 64, Volume24h: 640, PriceSellerCount: 4, ConfidenceBPS: 9_000,
 		ExpectedSellMinutes: 30, ActiveBestAsk: 3_000, ActiveDepth: 20, GeneratedAt: now}
@@ -406,7 +410,7 @@ func TestCandidateBuilderIsQuantityAndEvidenceSafe(t *testing.T) {
 		t.Fatalf("candidates=%+v", values)
 	}
 	for _, candidate := range values {
-		if candidate.State != "READY" || candidate.Quantity != 64 || candidate.InventorySlots != 1 || candidate.ConservativeProfit <= 0 {
+		if candidate.State != "READY" || candidate.PriorityRank <= 0 || candidate.PriorityScore <= 0 || candidate.Quantity != 64 || candidate.InventorySlots != 1 || candidate.ConservativeProfit <= 0 {
 			t.Fatalf("unsafe candidate: %+v", candidate)
 		}
 	}
@@ -420,6 +424,17 @@ func TestCandidateBuilderIsQuantityAndEvidenceSafe(t *testing.T) {
 	for _, value := range buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now) {
 		if value.State == "READY" || value.ExecutableBatches != 0 {
 			t.Fatalf("candidate invented executable volume: %+v", value)
+		}
+		if value.Route == "ORDER_TO_AUCTION" && value.ResearchBatches > 1 {
+			t.Fatalf("competing order demand became speculative fill capacity: %+v", value)
+		}
+	}
+	evidence.AvailableUnits = 640
+	evidence.FilledUnits24h = 640
+	evidence.SignatureComplete = false
+	for _, value := range buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now) {
+		if value.PriorityRank != 0 || value.PriorityScore != 0 {
+			t.Fatalf("modifier-ambiguous evidence received priority: %+v", value)
 		}
 	}
 }
@@ -472,5 +487,25 @@ func BenchmarkBuildCandidateFrontier(b *testing.B) {
 	b.ResetTimer()
 	for iteration := 0; iteration < b.N; iteration++ {
 		_ = buildCandidates(evidence, valuations, Config{AuctionFeeBPS: 250, CandidateLimit: 100}, now)
+	}
+}
+
+func BenchmarkEvidencePopulated(b *testing.B) {
+	path := strings.TrimSpace(os.Getenv("DN_BENCHMARK_DB"))
+	if path == "" {
+		b.Skip("set DN_BENCHMARK_DB to a disposable populated SQLite copy")
+	}
+	store, err := OpenStore(path)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		if _, err := store.Evidence(ctx); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

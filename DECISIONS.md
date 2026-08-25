@@ -104,6 +104,20 @@ The mod targets Minecraft 1.21.11, Java 21, Fabric API 0.141.6, and Fabric Loade
 
 The official Donut API schema remains the primary contract, and the retained in-repository API client is more defensive than the surveyed community clients. `cancel-cloud/Donuts-Auctions` is MIT-licensed and useful as a parser/reference implementation, but its automation features are not imported. GPL code from `RubyImpala/Glaze` is not copied into this differently licensed codebase. Projects without an explicit license are reference-only. See `docs/open-source-review.md`.
 
+## 2026-08-25 — Conservative order evidence and capacity priority
+
+Order-to-auction priority is `risk-adjusted profit/day × conservative attainable batches`, with batch capacity capped at the 18 auction-listing limit. The allocator treats one acquisition order for an item as one order slot even when it can supply several same-quantity auction batches; each resale batch still consumes one auction slot. Priority is therefore comparable across cheap, high-volume commodities and expensive, slot-efficient commodities without a hardcoded balance or profit floor.
+
+The exact full maximum-stack auction cohort is preferred for stackable commodities because the player will relist the same quantity. Single-item valuation is only a fallback when the API has no qualifying exact-stack cohort. The current best order reward is treated as the price to beat by one cent, so the displayed queue position is a target position of one, not a claim that Donut exposes the true hidden queue.
+
+Only a conservative allowlist of base commodities can be signature-complete and receive a priority rank. Any modifier marker, or an inherently variant-sensitive item such as equipment, books, potions, maps, heads, shulker boxes, or music discs, remains unranked research until a future canonical component parser proves equivalence. This deliberately trades market breadth for executable-price correctness.
+
+Legacy inferred fill reductions are retained rather than erased, but have confirmation level zero and are excluded from scoring. A fill counts only when the same observer sees the same stable order key at the same price decrease within two minutes. This quarantines impossible long-gap volume while new focused watches rebuild trustworthy fill velocity. The dashboard exposes confirmed and quarantined totals separately.
+
+Outstanding quantity in competing buy orders does not imply that sellers will fill a newly created order. It is excluded from order-to-auction capacity. Until confirmed fill velocity exists, a research candidate receives at most one exploratory batch; confirmed velocity is required before capacity can scale.
+
+`READY` additionally requires at least 50% exact-quantity auction confidence and a latest target-price sale no older than two hours. The 24-hour volume window remains useful for capacity, but does not by itself make older evidence executable.
+
 ## Assumptions made without operator input
 
 - The official API retains its bearer-authenticated listing and transaction endpoints and 250 requests/minute published limit.

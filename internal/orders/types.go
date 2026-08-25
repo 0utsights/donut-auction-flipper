@@ -131,6 +131,8 @@ type Evidence struct {
 
 type Candidate struct {
 	ID                    string    `json:"id"`
+	PriorityRank          int       `json:"priority_rank"`
+	PriorityScore         int64     `json:"priority_score"`
 	Route                 string    `json:"route"`
 	State                 string    `json:"state"`
 	Reason                string    `json:"reason,omitempty"`
@@ -141,19 +143,29 @@ type Candidate struct {
 	MaxStackSize          int       `json:"max_stack_size"`
 	AcquisitionCost       int64     `json:"acquisition_cost"`
 	ExpectedProceeds      int64     `json:"expected_proceeds"`
+	GrossProfit           int64     `json:"gross_profit"`
 	ConservativeProfit    int64     `json:"conservative_profit"`
 	MarginBPS             int       `json:"margin_bps"`
 	CompletionBPS         int       `json:"completion_bps"`
 	ExpectedCycleMinutes  int       `json:"expected_cycle_minutes"`
 	RiskAdjustedProfitDay int64     `json:"risk_adjusted_profit_day"`
 	ExecutableBatches     int       `json:"executable_batches"`
+	ResearchBatches       int       `json:"research_batches"`
 	QueuePosition         int       `json:"queue_position"`
 	OrderSlots            int       `json:"order_slots"`
 	AuctionSlots          int       `json:"auction_slots"`
 	InventorySlots        int       `json:"inventory_slots"`
 	ProfitInventorySlot   int64     `json:"profit_per_inventory_slot"`
 	ConfidenceBPS         int       `json:"confidence_bps"`
+	AuctionVolume24h      int       `json:"auction_volume_24h"`
+	AuctionSellerCount    int       `json:"auction_seller_count"`
+	OrderFilledUnits24h   int64     `json:"order_filled_units_24h"`
+	OrderAvailableUnits   int64     `json:"order_available_units"`
+	VolatilityBPS         int       `json:"volatility_bps"`
+	ReferenceAgeSeconds   int64     `json:"reference_age_seconds"`
+	RiskFlags             []string  `json:"risk_flags,omitempty"`
 	OrderTier             string    `json:"order_tier"`
+	SignatureComplete     bool      `json:"signature_complete"`
 	OrderFreshAt          time.Time `json:"order_fresh_at"`
 	AuctionFreshAt        time.Time `json:"auction_fresh_at"`
 	OrderCommand          string    `json:"order_command"`
@@ -188,20 +200,25 @@ type ReferenceSelection struct {
 }
 
 type ScanCoverage struct {
-	Total         int       `json:"total"`
-	Complete      int       `json:"complete"`
-	Incomplete    int       `json:"incomplete"`
-	UnknownSchema int       `json:"unknown_schema"`
-	DistinctPages int       `json:"distinct_pages"`
-	HighestPage   int       `json:"highest_page"`
-	LastScanAt    time.Time `json:"last_scan_at"`
+	Total              int       `json:"total"`
+	Complete           int       `json:"complete"`
+	Incomplete         int       `json:"incomplete"`
+	UnknownSchema      int       `json:"unknown_schema"`
+	DistinctPages      int       `json:"distinct_pages"`
+	HighestPage        int       `json:"highest_page"`
+	ConfirmedFills     int       `json:"confirmed_fills"`
+	QuarantinedFills   int       `json:"quarantined_fills"`
+	CompleteSignatures int       `json:"complete_signatures"`
+	LastScanAt         time.Time `json:"last_scan_at"`
 }
 
 type FillEvidence struct {
-	Signature       string    `json:"signature"`
-	OrderKey        string    `json:"order_key"`
-	ObserverID      string    `json:"observer_id"`
-	Units           int64     `json:"units"`
-	UnitRewardCents int64     `json:"unit_reward_cents"`
-	ObservedAt      time.Time `json:"observed_at"`
+	Signature          string    `json:"signature"`
+	OrderKey           string    `json:"order_key"`
+	ObserverID         string    `json:"observer_id"`
+	Units              int64     `json:"units"`
+	UnitRewardCents    int64     `json:"unit_reward_cents"`
+	ConfirmationLevel  int       `json:"confirmation_level"`
+	PreviousObservedAt time.Time `json:"previous_observed_at"`
+	ObservedAt         time.Time `json:"observed_at"`
 }

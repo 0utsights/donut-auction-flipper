@@ -14,7 +14,7 @@ class PortfolioAllocatorTest {
         for (int index = 0; index < 30; index++) candidates.add(candidate("item_" + index, 250_000, 100_000 - index, 1, 1, 5));
         PortfolioAllocator.Allocation allocation = new PortfolioAllocator().allocate(candidates, 10_000_000, 3, 2);
         long capital = allocation.selections().stream().mapToLong(selection -> selection.candidate().acquisitionCost() * selection.batches()).sum();
-        int orders = allocation.selections().stream().mapToInt(selection -> selection.candidate().orderSlots() * selection.batches()).sum();
+        int orders = allocation.selections().stream().mapToInt(selection -> selection.candidate().orderSlots()).sum();
         int auctions = allocation.selections().stream().mapToInt(selection -> selection.candidate().auctionSlots() * selection.batches()).sum();
         assertTrue(capital <= allocation.deployable());
         assertTrue(orders <= 17);
@@ -35,6 +35,12 @@ class PortfolioAllocatorTest {
     @Test void researchCandidatesCannotConsumeCapitalOrSlots() {
         CandidateFeedClient.Candidate research = withState(candidate("research", 1, 1_000_000, 1, 1, 100), "RESEARCH");
         assertTrue(new PortfolioAllocator().allocate(List.of(research), 10_000_000, 0, 0).selections().isEmpty());
+    }
+
+    @Test void multipleBatchesFromOneBuyOrderUseOneOrderSlot() {
+        CandidateFeedClient.Candidate bulk = candidate("bulk", 100_000, 50_000, 1, 1, 5);
+        PortfolioAllocator.Allocation allocation = new PortfolioAllocator().allocate(List.of(bulk), 10_000_000, 19, 0);
+        assertEquals(5, allocation.selections().getFirst().batches());
     }
 
     private static CandidateFeedClient.Candidate candidate(String id, long cost, long score, int orderSlots, int auctionSlots, int batches) {

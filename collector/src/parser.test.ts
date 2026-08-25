@@ -13,7 +13,7 @@ test('parses a conservative order fixture', () => {
   assert.equal(order.requested_quantity, 1000)
   assert.equal(order.order_key, 'ord_123')
   assert.equal(order.price_position, 2)
-  assert.equal(order.signature_complete, false)
+  assert.equal(order.signature_complete, true)
 })
 
 test('does not guess when price or remaining quantity is absent', () => {
@@ -38,6 +38,23 @@ test('reads modern item component names and lore', () => {
   assert.equal(view.displayName, 'Diamond Block')
   assert.deepEqual(view.text.slice(0, 4), ['Diamond Block', 'Unit Reward: $5,000', 'Remaining: 640', 'Requested: 1,000'])
   assert.equal(parseOrder(view)?.unit_reward_cents, 500_000)
+  assert.equal(parseOrder(view)?.signature_complete, true)
+})
+
+test('keeps modifier-bearing and variant items out of base auction evidence', () => {
+  const enchantedCommodity = projectItem({ name: 'diamond_block', customLore: ['$5Keach', '0/64 Delivered', 'enchantments'] }, 1)
+  const variantItem = projectItem({ name: 'enchanted_book', customLore: ['$5Keach', '0/64 Delivered'] }, 2)
+  assert.ok(enchantedCommodity)
+  assert.ok(variantItem)
+  assert.equal(parseOrder(enchantedCommodity)?.signature_complete, false)
+  assert.equal(parseOrder(variantItem)?.signature_complete, false)
+
+  const component = projectItem({
+    name: 'diamond', customLore: ['$5Keach', '0/64 Delivered'],
+    componentMap: new Map([['minecraft:enchantments', { data: { levels: { fortune: 3 } } }]])
+  }, 3)
+  assert.ok(component)
+  assert.equal(parseOrder(component)?.signature_complete, false)
 })
 
 test('parses Donut delivered progress as remaining quantity', () => {

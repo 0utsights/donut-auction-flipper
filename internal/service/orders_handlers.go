@@ -118,7 +118,7 @@ func (s *Server) observerOrderScans(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if inserted {
-		s.refreshOrderCandidates(r.Context())
+		s.refreshOrderCandidatesIfDue(r.Context())
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"accepted": true, "duplicate": !inserted})
 }
@@ -197,6 +197,34 @@ func (s *Server) deleteWatch(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) dashboardWatch(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid form"})
+		return
+	}
+	signature := strings.TrimSpace(r.FormValue("signature"))
+	if !safeSignature(signature) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid signature"})
+		return
+	}
+	found := false
+	for _, candidate := range s.orders.CandidateFeed().Candidates {
+		if candidate.Signature == signature && candidate.Route == "ORDER_TO_AUCTION" && candidate.PriorityRank > 0 {
+			found = true
+			break
+		}
+	}
+	if !found {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "ranked order-to-auction candidate is not available"})
+		return
+	}
+	if _, err := s.orders.AddWatch(r.Context(), signature); err != nil {
+		s.orderError(w, "add dashboard focused watch", err)
+		return
+	}
+	http.Redirect(w, r, "/order-auction-flipper#priority", http.StatusSeeOther)
+}
+
 func (s *Server) clientDiagnostics(w http.ResponseWriter, r *http.Request) {
 	var values []orders.Diagnostic
 	if !decodeRequest(w, r, &values) {
@@ -223,12 +251,12 @@ func (s *Server) clientDiagnostics(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) refreshOrderCandidates(ctx context.Context) {
+func (s *Server) refreshOrderCandidatesIfDue(ctx context.Context) {
 	engine := s.engine.Load()
 	if engine == nil {
 		return
 	}
-	if err := s.orders.Refresh(ctx, engine); err != nil {
+	if _, err := s.orders.RefreshIfDue(ctx, engine, 750*time.Millisecond); err != nil {
 		s.logger.Warn("refresh order candidates", "error", err)
 	}
 }
@@ -344,13 +372,30 @@ func uintString(value uint64) string {
 }
 
 type orderPageData struct {
-	Auction Snapshot
-	Orders  orders.DebugSnapshot
+	Auction       Snapshot
+	Orders        orders.DebugSnapshot
+	Priority      []orders.Candidate
+	Immediate     []orders.Candidate
+	Blocked       []orders.Candidate
+	ReadyCount    int
+	ResearchCount int
 }
 
 var orderAuctionTemplateV2 = template.Must(template.New("order-auction-v2").Funcs(template.FuncMap{
-	"money":      func(value int64) string { return "$" + uintString(uint64(max64Service(0, value))) },
+	"money":      formatMoney,
 	"moneyCents": moneyCents,
+	"pct": func(value int) string {
+		return strconv.Itoa(value/100) + "." + string([]byte{'0' + byte((value%100)/10), '0' + byte(value%10)}) + "%"
+	},
+	"age": func(seconds int64) string {
+		if seconds < 60 {
+			return strconv.FormatInt(seconds, 10) + "s"
+		}
+		if seconds < 3600 {
+			return strconv.FormatInt(seconds/60, 10) + "m"
+		}
+		return strconv.FormatInt(seconds/3600, 10) + "h"
+	},
 	"clock": func(value time.Time) string {
 		if value.IsZero() {
 			return "never"
@@ -359,17 +404,42 @@ var orderAuctionTemplateV2 = template.Must(template.New("order-auction-v2").Func
 	},
 }).Parse(orderAuctionHTMLV2))
 
-const orderAuctionHTMLV2 = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta http-equiv="refresh" content="2"><title>Order-auction flipper</title>
-<style>body{font:14px monospace;max-width:1400px;margin:20px auto;padding:0 14px;color:#ddd;background:#111}h1,h2{color:#fff}table{border-collapse:collapse;width:100%;margin-bottom:22px}th,td{text-align:left;padding:6px;border-bottom:1px solid #333;vertical-align:top}a,code{color:#9cdcfe}.READY{color:#6fda78}.HOLD,.STALE,.REJECTED{color:#ff7777}.RESEARCH,.CAPTURED{color:#f0ca6b}.muted{color:#999}.box{border:1px solid #333;padding:10px;margin:12px 0}</style></head><body>
-<nav><a href="/">Auction API</a> · <a href="/order-auction-flipper">Order-auction flipper</a></nav><h1>Order-auction flipper</h1>
-<div class="box">Auction API: {{.Auction.Status.State}} · {{.Auction.Status.ValuationCount}} valuations · order observers: {{len .Orders.Observers}} · watches: {{len .Orders.Watches}} · diagnostics (14d): {{.Orders.Diagnostics}}<br><span class="muted">Reference UI only. Each Fabric client keeps its real balance, positions, reserve, and 20/18-slot portfolio locally. No simulated market rows.</span></div>
-<div class="box">Order scans: {{.Orders.ScanCoverage.Total}} total · {{.Orders.ScanCoverage.Complete}} complete · {{.Orders.ScanCoverage.Incomplete}} incomplete · {{.Orders.ScanCoverage.UnknownSchema}} unknown schema · {{.Orders.ScanCoverage.DistinctPages}} distinct pages through page {{.Orders.ScanCoverage.HighestPage}} · last {{clock .Orders.ScanCoverage.LastScanAt}}</div>
-<h2>Mineflayer observers</h2><table><tr><th>ID</th><th>State</th><th>Parser</th><th>Proxy label</th><th>Task/page</th><th>Latency</th><th>Reconnects</th><th>Last seen</th></tr>{{range .Orders.Observers}}<tr><td>{{.ObserverID}}</td><td>{{.State}}</td><td>{{.ParserVersion}}</td><td>{{.ProxyLabel}}</td><td>{{.CurrentTaskID}} / {{.CurrentPage}}</td><td>{{printf "%.0f" .LatencyMS}}ms</td><td>{{.ReconnectCount}}</td><td>{{clock .LastSeenAt}}</td></tr>{{else}}<tr><td colspan="8" class="muted">No Mineflayer observer has registered yet.</td></tr>{{end}}</table>
-<h2>Evidence</h2><table><tr><th>Item</th><th>Tier</th><th>Scans</th><th>Fills/orders</th><th>24h filled / available</th><th>Best reward / queue</th><th>Fresh</th><th>Reason</th></tr>{{range .Orders.Evidence}}<tr><td><code>{{.Signature}}</code></td><td>{{.Tier}}</td><td>{{.CompleteScans}}</td><td>{{.FillEvents}} / {{.DistinctOrders}}</td><td>{{.FilledUnits24h}} / {{.AvailableUnits}}</td><td>{{moneyCents .BestUnitRewardCents}} / #{{.BestPricePosition}}</td><td>{{clock .LastSeenAt}}</td><td>{{.Reason}}</td></tr>{{else}}<tr><td colspan="8" class="muted">Waiting for real order snapshots.</td></tr>{{end}}</table>
-<h2>Focused watches</h2><table><tr><th>ID</th><th>Signature</th><th>Created</th><th>Expires</th></tr>{{range .Orders.Watches}}<tr><td>{{.ID}}</td><td><code>{{.Signature}}</code></td><td>{{clock .CreatedAt}}</td><td>{{clock .ExpiresAt}}</td></tr>{{else}}<tr><td colspan="4" class="muted">No active focused watches.</td></tr>{{end}}</table>
-<h2>Recent confirmed reductions</h2><table><tr><th>Item</th><th>Order</th><th>Observer</th><th>Units</th><th>Unit reward</th><th>Observed</th></tr>{{range .Orders.RecentFills}}<tr><td><code>{{.Signature}}</code></td><td>{{.OrderKey}}</td><td>{{.ObserverID}}</td><td>{{.Units}}</td><td>{{moneyCents .UnitRewardCents}}</td><td>{{clock .ObservedAt}}</td></tr>{{else}}<tr><td colspan="6" class="muted">No confirmed quantity reductions yet. Disappearances are not counted.</td></tr>{{end}}</table>
-<h2>$10M reference portfolio</h2><table><tr><th>Route</th><th>Item</th><th>Batches</th><th>Capital</th><th>Risk-adjusted/day</th></tr>{{range .Orders.ReferencePortfolio}}<tr><td>{{.Route}}</td><td>{{.ItemName}}</td><td>{{.Batches}}</td><td>{{money .Capital}}</td><td>{{money .RiskAdjustedProfitDay}}</td></tr>{{else}}<tr><td colspan="5" class="muted">No READY candidates fit the reference balance. Real player portfolios remain local to Fabric.</td></tr>{{end}}</table>
-<h2>Candidate pool</h2><table><tr><th>State</th><th>Route</th><th>Item/batch</th><th>Capital</th><th>Proceeds</th><th>Conservative profit</th><th>Risk-adjusted/day</th><th>Slots O/A/I</th><th>Volume / queue</th><th>Reason</th></tr>{{range .Orders.Candidates}}<tr><td class="{{.State}}">{{.State}}</td><td>{{.Route}}</td><td>{{.Quantity}}× {{.ItemName}}</td><td>{{money .AcquisitionCost}}</td><td>{{money .ExpectedProceeds}}</td><td>{{money .ConservativeProfit}}</td><td>{{money .RiskAdjustedProfitDay}}</td><td>{{.OrderSlots}} / {{.AuctionSlots}} / {{.InventorySlots}}</td><td>{{.ExecutableBatches}} / #{{.QueuePosition}}</td><td>{{.Reason}}</td></tr>{{else}}<tr><td colspan="10" class="muted">No joined order/API candidates yet.</td></tr>{{end}}</table></body></html>`
+const orderAuctionHTMLV2 = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Order → auction priorities</title>
+<style>
+body{font:14px ui-monospace,SFMono-Regular,Consolas,monospace;max-width:1550px;margin:16px auto;padding:0 14px;color:#ddd;background:#101010}h1,h2{color:#fff;margin:18px 0 8px}h1{font-size:22px}h2{font-size:17px}a,code{color:#9cdcfe}nav{position:sticky;top:0;background:#101010;padding:9px 0;border-bottom:1px solid #444;z-index:2}nav a{margin-right:14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin:10px 0}.card,.box{border:1px solid #3a3a3a;padding:9px;background:#151515}.metric{font-size:18px;color:#fff}.muted{color:#999}.good,.READY{color:#72d47d}.warn,.RESEARCH,.CAPTURED{color:#e5c45e}.bad,.HOLD,.STALE,.REJECTED{color:#ff7a7a}table{border-collapse:collapse;width:100%;margin:8px 0 18px}th,td{text-align:left;padding:6px;border-bottom:1px solid #333;vertical-align:top;white-space:nowrap}th{position:sticky;top:38px;background:#171717}td.wrap{white-space:normal;min-width:220px}.rank{font-size:16px;color:#fff}button,input{font:inherit;color:#ddd;background:#222;border:1px solid #555;padding:4px 7px}button{cursor:pointer}button:hover{border-color:#aaa}.controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0}.scroll{overflow:auto;max-height:720px;border:1px solid #2d2d2d}details{border-top:1px solid #333;padding-top:8px;margin-top:16px}summary{cursor:pointer;color:#fff;font-size:16px}.route{color:#b8a1ff}.flags{color:#ffb2b2;font-size:12px}
+</style></head><body>
+<nav><a href="#priority">Priority</a><a href="#portfolio">$10M portfolio</a><a href="#immediate">Auction → order</a><a href="#operations">Operations</a><a href="#evidence">Evidence</a><a href="/">Auction API debug</a></nav>
+<h1>Order → auction priority queue</h1>
+<p class="muted">Create the order at the shown competitive unit reward, then relist the exact shown batch quantity. READY has confirmed short-gap fills and a stable, liquid auction exit. RESEARCH is ranked economics that still needs a focused watch.</p>
+<div class="grid">
+<div class="card"><div class="metric good">{{.ReadyCount}} READY</div><div class="muted">eligible now</div></div>
+<div class="card"><div class="metric warn">{{.ResearchCount}} RESEARCH</div><div class="muted">ranked, needs evidence</div></div>
+<div class="card"><div class="metric">{{.Auction.Status.ValuationCount}}</div><div class="muted">auction valuations</div></div>
+<div class="card"><div class="metric">{{.Orders.ScanCoverage.CompleteSignatures}}</div><div class="muted">current base-safe order items</div></div>
+<div class="card"><div class="metric">{{.Orders.ScanCoverage.ConfirmedFills}}</div><div class="muted">confirmed reductions</div></div>
+<div class="card"><div class="metric">{{.Orders.ScanCoverage.QuarantinedFills}}</div><div class="muted">legacy reductions quarantined</div></div>
+</div>
+<div class="controls"><label>Filter <input id="filter" type="search" placeholder="item or state"></label><button type="button" onclick="location.reload()">Refresh now</button><label><input id="auto" type="checkbox"> auto-refresh 5s</label><span class="muted">generated {{clock .Orders.GeneratedAt}}</span></div>
+<section id="priority"><h2>Highest-priority order → auction candidates</h2>
+<div class="scroll"><table id="priority-table"><thead><tr><th>#</th><th>State</th><th>Item / exact batch</th><th>Order cost</th><th>Auction net</th><th>Conservative profit</th><th>ROI</th><th>Priority/day</th><th>Capacity</th><th>Evidence</th><th>Action</th></tr></thead><tbody>
+{{range .Priority}}<tr data-row="{{.ItemName}} {{.Signature}} {{.State}}"><td class="rank">{{.PriorityRank}}</td><td class="{{.State}}">{{.State}}</td><td><strong>{{.Quantity}}× {{.ItemName}}</strong><br><code>{{.ItemID}}</code></td><td>{{money .AcquisitionCost}}<br><span class="muted">queue #{{.QueuePosition}}</span></td><td>{{money .ExpectedProceeds}}<br><span class="muted">{{.AuctionVolume24h}} sales / {{.AuctionSellerCount}} sellers</span></td><td>{{money .ConservativeProfit}}<br><span class="muted">gross {{money .GrossProfit}}</span></td><td>{{pct .MarginBPS}}</td><td><strong>{{money .PriorityScore}}</strong><br><span class="muted">{{money .RiskAdjustedProfitDay}} / batch</span></td><td>{{.ExecutableBatches}} executable<br><span class="muted">{{.ResearchBatches}} research · {{.InventorySlots}} inv slot</span></td><td class="wrap">{{.OrderFilledUnits24h}} confirmed units · confidence {{pct .ConfidenceBPS}} · completion {{pct .CompletionBPS}} · volatility {{pct .VolatilityBPS}} · refs {{age .ReferenceAgeSeconds}}{{range .RiskFlags}}<br><span class="flags">{{.}}</span>{{end}}{{if .Reason}}<br><span class="warn">{{.Reason}}</span>{{end}}</td><td><form method="post" action="/order-auction-flipper/watch"><input type="hidden" name="signature" value="{{.Signature}}"><button type="submit">Focused watch</button></form><a href="/api/v1/debug/valuation?signature={{urlquery .Signature}}">valuation JSON</a><br><code>{{.OrderCommand}}</code><br><code>{{.AuctionCommand}}</code></td></tr>{{else}}<tr><td colspan="11" class="muted">No profitable, base-safe order → auction candidates yet. The collector is rebuilding trusted evidence.</td></tr>{{end}}
+</tbody></table></div></section>
+<section id="portfolio"><h2>$10M reference portfolio</h2><table><tr><th>Route</th><th>Item</th><th>Batches</th><th>Capital</th><th>Risk-adjusted/day</th></tr>{{range .Orders.ReferencePortfolio}}<tr><td class="route">{{.Route}}</td><td>{{.ItemName}}</td><td>{{.Batches}}</td><td>{{money .Capital}}</td><td>{{money .RiskAdjustedProfitDay}}</td></tr>{{else}}<tr><td colspan="5" class="muted">No READY candidates fit the reference balance yet. Real balances and positions remain local to Fabric.</td></tr>{{end}}</table></section>
+<section id="immediate"><h2>Auction → existing order</h2><p class="muted">Secondary route. These buy an auction and manually fulfill an observed order; they do not consume a new order or auction listing slot.</p><table><tr><th>#</th><th>State</th><th>Item</th><th>Cost</th><th>Order proceeds</th><th>Profit</th><th>Priority/day</th><th>Capacity</th><th>Reason</th></tr>{{range .Immediate}}<tr><td>{{.PriorityRank}}</td><td class="{{.State}}">{{.State}}</td><td>{{.Quantity}}× {{.ItemName}}</td><td>{{money .AcquisitionCost}}</td><td>{{money .ExpectedProceeds}}</td><td>{{money .ConservativeProfit}}</td><td>{{money .PriorityScore}}</td><td>{{.ExecutableBatches}}</td><td class="wrap">{{.Reason}}</td></tr>{{else}}<tr><td colspan="9" class="muted">No ranked immediate route.</td></tr>{{end}}</table></section>
+<section id="operations"><h2>Operations</h2><div class="box">Auction API: <span class="{{.Auction.Status.State}}">{{.Auction.Status.State}}</span> · observer count {{len .Orders.Observers}} · active watches {{len .Orders.Watches}} · last order scan {{clock .Orders.ScanCoverage.LastScanAt}} · pages 1–{{.Orders.ScanCoverage.HighestPage}} · {{.Orders.ScanCoverage.Incomplete}} incomplete · {{.Orders.ScanCoverage.UnknownSchema}} unknown schema</div>
+<table><tr><th>Observer</th><th>State</th><th>Parser</th><th>Proxy</th><th>Task / page</th><th>Latency</th><th>Reconnects</th><th>Last seen</th></tr>{{range .Orders.Observers}}<tr><td>{{.ObserverID}}</td><td>{{.State}}</td><td>{{.ParserVersion}}</td><td>{{.ProxyLabel}}</td><td>{{.CurrentTaskID}} / {{.CurrentPage}}</td><td>{{printf "%.0f" .LatencyMS}}ms</td><td>{{.ReconnectCount}}</td><td>{{clock .LastSeenAt}}</td></tr>{{else}}<tr><td colspan="8" class="bad">No observer registered.</td></tr>{{end}}</table>
+<h2>Focused watches</h2><table><tr><th>Signature</th><th>Created</th><th>Expires</th></tr>{{range .Orders.Watches}}<tr><td><code>{{.Signature}}</code></td><td>{{clock .CreatedAt}}</td><td>{{clock .ExpiresAt}}</td></tr>{{else}}<tr><td colspan="3" class="muted">No active watch. Start one from the priority table to validate fill velocity.</td></tr>{{end}}</table></section>
+<details id="evidence"><summary>Order evidence and rejection details</summary><div class="scroll"><table><tr><th>Item</th><th>Tier</th><th>Scans</th><th>Confirmed fills / orders</th><th>24h filled / available</th><th>Best unit reward</th><th>Fresh</th><th>Reason</th></tr>{{range .Orders.Evidence}}<tr data-row="{{.DisplayName}} {{.Signature}} {{.Tier}}"><td>{{.DisplayName}}<br><code>{{.Signature}}</code></td><td class="{{.Tier}}">{{.Tier}}</td><td>{{.CompleteScans}}</td><td>{{.FillEvents}} / {{.DistinctOrders}}</td><td>{{.FilledUnits24h}} / {{.AvailableUnits}}</td><td>{{moneyCents .BestUnitRewardCents}}</td><td>{{clock .LastSeenAt}}</td><td class="wrap">{{.Reason}}</td></tr>{{else}}<tr><td colspan="8" class="muted">Waiting for trusted order snapshots.</td></tr>{{end}}</table></div></details>
+<details><summary>Blocked and stale candidate diagnostics</summary><div class="scroll"><table><tr><th>State</th><th>Route</th><th>Item</th><th>Profit</th><th>Priority</th><th>Reason</th><th>Risks</th></tr>{{range .Blocked}}<tr><td class="{{.State}}">{{.State}}</td><td>{{.Route}}</td><td>{{.Quantity}}× {{.ItemName}}</td><td>{{money .ConservativeProfit}}</td><td>{{money .PriorityScore}}</td><td class="wrap">{{.Reason}}</td><td class="wrap">{{range .RiskFlags}}{{.}} {{end}}</td></tr>{{else}}<tr><td colspan="7" class="muted">None.</td></tr>{{end}}</table></div></details>
+<details><summary>Recent confirmed short-gap reductions</summary><table><tr><th>Item</th><th>Order</th><th>Units</th><th>Unit reward</th><th>Interval</th><th>Observed</th></tr>{{range .Orders.RecentFills}}<tr><td><code>{{.Signature}}</code></td><td>{{.OrderKey}}</td><td>{{.Units}}</td><td>{{moneyCents .UnitRewardCents}}</td><td>{{clock .PreviousObservedAt}} → {{clock .ObservedAt}}</td><td>{{clock .ObservedAt}}</td></tr>{{else}}<tr><td colspan="6" class="muted">No confirmed reductions yet. Historical long-gap reductions are quarantined and disappearances never count.</td></tr>{{end}}</table></details>
+<script>
+const filter=document.getElementById('filter'),auto=document.getElementById('auto');
+filter.value=sessionStorage.getItem('orderFilter')||'';
+function applyFilter(){const q=filter.value.toLowerCase();document.querySelectorAll('[data-row]').forEach(row=>row.hidden=q&&!row.dataset.row.toLowerCase().includes(q));sessionStorage.setItem('orderFilter',filter.value)}
+filter.addEventListener('input',applyFilter);applyFilter();
+auto.checked=localStorage.getItem('orderAutoRefresh')==='1';auto.addEventListener('change',()=>localStorage.setItem('orderAutoRefresh',auto.checked?'1':'0'));
+const saved=Number(sessionStorage.getItem('orderScroll')||0);if(saved)scrollTo(0,saved);setInterval(()=>{if(auto.checked){sessionStorage.setItem('orderScroll',String(scrollY));location.reload()}},5000);
+</script></body></html>`
 
 func max64Service(left, right int64) int64 {
 	if left > right {
@@ -378,8 +448,31 @@ func max64Service(left, right int64) int64 {
 	return right
 }
 
+func formatMoney(value int64) string {
+	return "$" + groupedUint(uint64(max64Service(0, value)))
+}
+
+func groupedUint(value uint64) string {
+	raw := uintString(value)
+	if len(raw) <= 3 {
+		return raw
+	}
+	first := len(raw) % 3
+	if first == 0 {
+		first = 3
+	}
+	var out strings.Builder
+	out.Grow(len(raw) + len(raw)/3)
+	out.WriteString(raw[:first])
+	for index := first; index < len(raw); index += 3 {
+		out.WriteByte(',')
+		out.WriteString(raw[index : index+3])
+	}
+	return out.String()
+}
+
 func moneyCents(value int64) string {
 	value = max64Service(0, value)
 	dollars, cents := value/100, value%100
-	return "$" + uintString(uint64(dollars)) + "." + string([]byte{'0' + byte(cents/10), '0' + byte(cents%10)})
+	return "$" + groupedUint(uint64(dollars)) + "." + string([]byte{'0' + byte(cents/10), '0' + byte(cents%10)})
 }

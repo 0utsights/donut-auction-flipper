@@ -74,7 +74,7 @@ final class PortfolioAllocator {
             long baseUsed = baseExposure.getOrDefault(base, 0L);
             int maximum = candidate.executableBatches();
             if (candidate.acquisitionCost() > 0) maximum = Math.min(maximum, (int) Math.min(Integer.MAX_VALUE, (cashLimit - cash) / candidate.acquisitionCost()));
-            if (candidate.orderSlots() > 0) maximum = Math.min(maximum, (orderLimit - orders) / candidate.orderSlots());
+            if (candidate.orderSlots() > 0 && orders + candidate.orderSlots() > orderLimit) maximum = 0;
             if (candidate.auctionSlots() > 0) maximum = Math.min(maximum, (auctionLimit - auctions) / candidate.auctionSlots());
             maximum = Math.min(maximum, (int) Math.max(0, (exactCap - exactUsed) / candidate.acquisitionCost()));
             maximum = Math.min(maximum, (int) Math.max(0, (baseCap - baseUsed) / candidate.acquisitionCost()));
@@ -85,7 +85,7 @@ final class PortfolioAllocator {
                     exactExposure.put(candidate.signature(), exactUsed + capital);
                     baseExposure.put(base, baseUsed + capital);
                 }
-                run(index + 1, cash + capital, orders + candidate.orderSlots() * count,
+                run(index + 1, cash + capital, orders + (count > 0 ? candidate.orderSlots() : 0),
                         auctions + candidate.auctionSlots() * count,
                         safeAdd(score, safeMultiply(candidate.riskAdjustedProfitDay(), count)), counts,
                         exactExposure, baseExposure);

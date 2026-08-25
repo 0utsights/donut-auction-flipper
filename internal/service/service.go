@@ -383,7 +383,7 @@ func (s *Server) CollectFastOnce(ctx context.Context) error {
 	if s.engine.Load() != engine {
 		return nil
 	}
-	if err := s.orders.Refresh(ctx, engine); err != nil {
+	if _, err := s.orders.RefreshIfDue(ctx, engine, 750*time.Millisecond); err != nil {
 		s.logger.Warn("fast order candidates refresh failed", "error", err)
 	}
 	status := Status{ValuationCount: len(marketSnapshot.Valuations), FlipCount: len(flips), API: s.upstream.Stats()}
@@ -462,6 +462,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/watches/{id}", s.authorizeWith(s.fabricAuth, s.deleteWatch))
 	mux.HandleFunc("POST /api/v1/client/diagnostics", s.authorizeWith(s.fabricAuth, s.clientDiagnostics))
 	mux.HandleFunc("GET /order-auction-flipper", s.authorize(s.orderAuctionPage))
+	mux.HandleFunc("POST /order-auction-flipper/watch", s.authorize(s.dashboardWatch))
 	mux.HandleFunc("GET /", s.authorize(s.debugPage))
 	return securityHeaders(mux)
 }
@@ -530,8 +531,36 @@ func (s *Server) orderAuctionPage(w http.ResponseWriter, r *http.Request) {
 		s.orderError(w, "load order debug", err)
 		return
 	}
+	priority := make([]orders.Candidate, 0, 30)
+	immediate := make([]orders.Candidate, 0, 20)
+	blocked := make([]orders.Candidate, 0, 50)
+	readyCount, researchCount := 0, 0
+	orderRank, immediateRank := 0, 0
+	for _, candidate := range debug.Candidates {
+		if candidate.PriorityRank > 0 && candidate.Route == "ORDER_TO_AUCTION" && len(priority) < 30 {
+			orderRank++
+			candidate.PriorityRank = orderRank
+			if candidate.State == "READY" {
+				readyCount++
+			} else if candidate.State == "RESEARCH" {
+				researchCount++
+			}
+			priority = append(priority, candidate)
+			continue
+		}
+		if candidate.PriorityRank > 0 && candidate.Route == "AUCTION_TO_ORDER" && len(immediate) < 20 {
+			immediateRank++
+			candidate.PriorityRank = immediateRank
+			immediate = append(immediate, candidate)
+			continue
+		}
+		if len(blocked) < 50 {
+			blocked = append(blocked, candidate)
+		}
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := orderAuctionTemplateV2.Execute(w, orderPageData{Auction: s.Snapshot(), Orders: debug}); err != nil {
+	if err := orderAuctionTemplateV2.Execute(w, orderPageData{Auction: s.Snapshot(), Orders: debug,
+		Priority: priority, Immediate: immediate, Blocked: blocked, ReadyCount: readyCount, ResearchCount: researchCount}); err != nil {
 		s.logger.Warn("render order-auction page", "error", err)
 	}
 }

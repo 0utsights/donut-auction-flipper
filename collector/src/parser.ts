@@ -13,6 +13,31 @@ const ownerPattern = /(?:owner|buyer|created by)\s*[:=-]\s*([A-Za-z0-9_]{1,32})/
 const idPattern = /(?:order id|order #|id)\s*[:#=-]?\s*([A-Za-z0-9_-]{3,128})/i
 const positionPattern = /(?:position|queue|rank)\s*[:#=-]?\s*#?([0-9][0-9,]*)/i
 const suffixes: Record<string, bigint> = { '': 1n, k: 1_000n, m: 1_000_000n, b: 1_000_000_000n, t: 1_000_000_000_000n }
+// Only base items whose market identity cannot normally carry economically
+// meaningful variants may join base-item auction evidence. Everything else
+// remains research-only until a canonical component signature is implemented.
+const baseOnlyCommodities = new Set([
+  'minecraft:ancient_debris', 'minecraft:amethyst_shard', 'minecraft:apple', 'minecraft:armadillo_scute',
+  'minecraft:blaze_powder', 'minecraft:blaze_rod', 'minecraft:bone', 'minecraft:bone_meal',
+  'minecraft:charcoal', 'minecraft:coal', 'minecraft:coal_block', 'minecraft:cobblestone',
+  'minecraft:copper_ingot', 'minecraft:crying_obsidian', 'minecraft:diamond', 'minecraft:diamond_block',
+  'minecraft:dirt', 'minecraft:emerald', 'minecraft:emerald_block', 'minecraft:end_crystal',
+  'minecraft:ender_eye', 'minecraft:ender_pearl', 'minecraft:enchanted_golden_apple', 'minecraft:experience_bottle',
+  'minecraft:feather', 'minecraft:fermented_spider_eye', 'minecraft:ghast_tear', 'minecraft:glass',
+  'minecraft:glow_ink_sac', 'minecraft:gold_ingot', 'minecraft:gold_nugget', 'minecraft:golden_apple',
+  'minecraft:golden_carrot', 'minecraft:gravel', 'minecraft:gunpowder', 'minecraft:heart_of_the_sea',
+  'minecraft:honey_block', 'minecraft:honeycomb', 'minecraft:honeycomb_block', 'minecraft:ink_sac',
+  'minecraft:iron_ingot', 'minecraft:iron_nugget', 'minecraft:lapis_block', 'minecraft:lapis_lazuli',
+  'minecraft:leather', 'minecraft:magma_cream', 'minecraft:nether_quartz_ore', 'minecraft:netherite_block',
+  'minecraft:netherite_ingot', 'minecraft:netherite_scrap', 'minecraft:obsidian', 'minecraft:phantom_membrane',
+  'minecraft:prismarine_crystals', 'minecraft:prismarine_shard', 'minecraft:quartz', 'minecraft:quartz_block',
+  'minecraft:rabbit_foot', 'minecraft:rabbit_hide', 'minecraft:raw_copper', 'minecraft:raw_copper_block',
+  'minecraft:raw_gold', 'minecraft:raw_gold_block', 'minecraft:raw_iron', 'minecraft:raw_iron_block',
+  'minecraft:red_sand', 'minecraft:redstone', 'minecraft:redstone_block', 'minecraft:rotten_flesh',
+  'minecraft:sand', 'minecraft:scute', 'minecraft:slime_ball', 'minecraft:spider_eye',
+  'minecraft:stone', 'minecraft:string', 'minecraft:totem_of_undying'
+])
+const modifierMarkers = /^(attribute_modifiers|bundle_contents|charged_projectiles|container|custom_model_data|damage|dyed_color|enchantments|firework_explosion|fireworks|instrument|map_decorations|map_id|potion_contents|stored_enchantments|trim)$/i
 
 export function projectItem(item: unknown, slot: number): ItemView | undefined {
   if (item === null || typeof item !== 'object') return undefined
@@ -57,11 +82,35 @@ export function parseOrder(view: ItemView): ParsedOrder | undefined {
 		requested_quantity: requestedQuantity, remaining_quantity: remainingQuantity, ...(owner ? { owner } : {}),
 		...(pricePosition > 0 ? { price_position: pricePosition } : {}),
     slot: view.slot, raw_field_hash: rawHash,
-    // The generic compatibility parser cannot yet prove equivalence with the
-    // backend's modifier-aware signature. Real versioned menu fixtures must
-    // provide that mapping before an item can graduate beyond research.
-    signature_complete: false
+    signature_complete: baseSignatureComplete(view)
   }
+}
+
+export function baseSignatureComplete(view: ItemView): boolean {
+  if (!baseOnlyCommodities.has(view.itemId)) return false
+  if (view.text.some(value => modifierMarkers.test(value.trim()))) return false
+  return !hasModifierComponent(view.raw)
+}
+
+function hasModifierComponent(value: unknown, depth = 0): boolean {
+  if (depth > 8 || value === null || typeof value !== 'object') return false
+  if (value instanceof Map) {
+    for (const [key, child] of value.entries()) {
+      if (modifierKey(key) || hasModifierComponent(child, depth + 1)) return true
+    }
+    return false
+  }
+  if (Array.isArray(value)) return value.some(child => hasModifierComponent(child, depth + 1))
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (modifierKey(key) || hasModifierComponent(child, depth + 1)) return true
+  }
+  return false
+}
+
+function modifierKey(value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  const normalized = value.toLowerCase().replace(/^minecraft:/, '')
+  return modifierMarkers.test(normalized)
 }
 
 export function fingerprintWindow(title: string, views: readonly ItemView[]): string {

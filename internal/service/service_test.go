@@ -270,7 +270,7 @@ func TestOrderAuctionPageReportsRealObserverStateWithoutFakeRows(t *testing.T) {
 		t.Fatalf("order-auction page code=%d", response.Code)
 	}
 	body := response.Body.String()
-	for _, expected := range []string{"Order-auction flipper", "No Mineflayer observer has registered yet.", "Waiting for real order snapshots.", "No simulated market rows."} {
+	for _, expected := range []string{"Order → auction priority queue", "No observer registered.", "Waiting for trusted order snapshots.", "No profitable, base-safe order → auction candidates yet."} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("order-auction page missing %q", expected)
 		}

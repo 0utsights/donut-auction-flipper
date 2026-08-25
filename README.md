@@ -43,13 +43,15 @@ npm start
 
 Configure one entry per Microsoft account in `collector/accounts.json`. Every account has an isolated token cache and authenticated SOCKS5 or HTTP CONNECT proxy. The configured egress IP must match before the account joins; a mismatch disables that account instead of entering a restart loop. On Linux, use `chmod 600 collector/accounts.json`.
 
-The checked-in schema was verified against the real 1.21.11 Donut order menu. It permits only the exact `Orders` refresh book and `Next page` arrow fingerprints. A changed or unknown layout is captured under `collector/captures/`, reported as `schema_hold`, and never clicked. The generic parser marks modifier signatures incomplete, so its rows remain `RESEARCH`; a versioned real-menu adapter must prove canonical modifier equivalence before `READY` is possible. Purchase, fulfillment, creation, confirmation, cancellation, claim, listing, and inventory-transfer operations are absent from the collector interface.
+The checked-in schema was verified against the real 1.21.11 Donut order menu. It permits only the exact `Orders` refresh book and `Next page` arrow fingerprints. A changed or unknown layout is captured under `collector/captures/`, reported as `schema_hold`, and never clicked. The parser marks only a conservative allowlist of unmodified base commodities as signature-complete. Enchanted, damaged, named, container-bearing, potion, map, music-disc, tool, armor, and otherwise variant-sensitive rows remain `RESEARCH` and cannot receive a priority rank. Purchase, fulfillment, creation, confirmation, cancellation, claim, listing, and inventory-transfer operations are absent from the collector interface.
 
 The collector paces server-confirmed discovery clicks at 750ms. Focused watches use a separate 500ms minimum lane, plus the backend's requested freshness delay, and locate an assigned item only by traversing the verified next-page control. Each discovery connection performs one pass through the server-reported last page, then rotates cleanly instead of reusing stale server state. A 1,000-page runaway guard fails closed if pagination is ever cyclic or malformed. A pass opens `/orders` once and paginates only through verified controls.
 
 Navigation accepts a page only after the server sends a matching window update; Mineflayer's optimistic local click state is never submitted as a new page. After login transfers settle, the stationary observer also suspends Mineflayer's idle movement ticks. This avoids Donut's 1.21.x `Invalid sequence` disconnect while preserving keepalives, teleport handling, chat, and window packets. Transient disconnects renew the same leased task and retry; only a schema hold permanently stops discovery.
 
 One manager process launches and restarts every configured observer. The backend leases discovery, focused-watch, verification, and schema-probe tasks over HTTP long polling.
+
+The order-auction dashboard ranks trustworthy order-to-auction research and ready candidates first. It prefers the item's exact full-stack resale cohort, scores conservative profit per day across attainable batches, and exposes the evidence, liquidity, price stability, and focused-watch controls behind every rank. Historical fill guesses from long observation gaps are retained for audit but quarantined from scoring.
 
 ## Fabric client
 

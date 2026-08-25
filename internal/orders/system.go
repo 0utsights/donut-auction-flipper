@@ -23,12 +23,13 @@ type Config struct {
 }
 
 type System struct {
-	store      *Store
-	cfg        Config
-	now        func() time.Time
-	version    atomic.Uint64
-	candidates atomic.Pointer[CandidateFeed]
-	refreshMu  sync.Mutex
+	store       *Store
+	cfg         Config
+	now         func() time.Time
+	version     atomic.Uint64
+	lastRefresh atomic.Int64
+	candidates  atomic.Pointer[CandidateFeed]
+	refreshMu   sync.Mutex
 }
 
 func NewSystem(cfg Config) (*System, error) {
@@ -89,16 +90,49 @@ func (s *System) CandidateFeed() CandidateFeed {
 func (s *System) Refresh(ctx context.Context, engine *market.Engine) error {
 	s.refreshMu.Lock()
 	defer s.refreshMu.Unlock()
+	return s.refreshLocked(ctx, engine)
+}
+
+// RefreshIfDue coalesces rapid collector pages and fast auction polls. It never
+// queues behind another refresh, so the ingestion request path stays bounded.
+func (s *System) RefreshIfDue(ctx context.Context, engine *market.Engine, interval time.Duration) (bool, error) {
+	nowMillis := s.now().UnixMilli()
+	last := s.lastRefresh.Load()
+	if (last > 0 && nowMillis-last < interval.Milliseconds()) || !s.refreshMu.TryLock() {
+		return false, nil
+	}
+	defer s.refreshMu.Unlock()
+	last = s.lastRefresh.Load()
+	if last > 0 && nowMillis-last < interval.Milliseconds() {
+		return false, nil
+	}
+	if err := s.refreshLocked(ctx, engine); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func (s *System) refreshLocked(ctx context.Context, engine *market.Engine) error {
 	evidence, err := s.store.Evidence(ctx)
 	if err != nil {
 		return err
 	}
 	valuations := make(map[string]market.Valuation, len(evidence))
 	for _, item := range evidence {
-		quantity := max(1, item.ObservedQuantity)
+		// Prefer a full inventory slot. QuantityValuation still requires both
+		// singular and exact-batch sale evidence, so this cannot inflate a stack
+		// from the singular market. Fall back to one only when the exact stack
+		// cohort has not accumulated enough evidence yet.
+		quantity := max(1, item.MaxStackSize)
 		valuation, ok := engine.QuantityValuation(item.Signature, quantity)
 		if !ok && item.ItemID != item.Signature {
 			valuation, ok = engine.QuantityValuation(item.ItemID, quantity)
+		}
+		if !ok && quantity > 1 {
+			valuation, ok = engine.QuantityValuation(item.Signature, 1)
+			if !ok && item.ItemID != item.Signature {
+				valuation, ok = engine.QuantityValuation(item.ItemID, 1)
+			}
 		}
 		if ok {
 			valuations[item.Signature] = valuation
@@ -111,6 +145,7 @@ func (s *System) Refresh(ctx context.Context, engine *market.Engine) error {
 	}
 	version := s.version.Add(1)
 	s.candidates.Store(&CandidateFeed{Version: version, GeneratedAt: now, Candidates: candidates})
+	s.lastRefresh.Store(s.now().UnixMilli())
 	return nil
 }
 
@@ -136,8 +171,8 @@ func referencePortfolio(candidates []Candidate, balance int64) []ReferenceSelect
 		}
 		maximum := value.ExecutableBatches
 		maximum = min(maximum, int((deployable-cash)/value.AcquisitionCost))
-		if value.OrderSlots > 0 {
-			maximum = min(maximum, (20-ordersUsed)/value.OrderSlots)
+		if value.OrderSlots > 0 && ordersUsed+value.OrderSlots > 20 {
+			maximum = 0
 		}
 		if value.AuctionSlots > 0 {
 			maximum = min(maximum, (18-auctionsUsed)/value.AuctionSlots)
@@ -149,7 +184,9 @@ func referencePortfolio(candidates []Candidate, balance int64) []ReferenceSelect
 		}
 		capital := mulMoney(value.AcquisitionCost, int64(maximum))
 		cash += capital
-		ordersUsed += value.OrderSlots * maximum
+		// One order can request multiple exact resale batches. It occupies one
+		// order slot, while each concurrently listed batch consumes an auction slot.
+		ordersUsed += value.OrderSlots
 		auctionsUsed += value.AuctionSlots * maximum
 		exactExposure[value.Signature] += capital
 		itemExposure[value.ItemID] += capital
@@ -185,7 +222,8 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 		}
 		completion := completionBPS(evidence, valuation)
 		fresh := now.Sub(evidence.LastSeenAt) <= 30*time.Second
-		ready := evidence.Tier == "actionable" && fresh && valuation.Volume24h >= 5 && valuation.PriceSellerCount >= 3
+		marketReason := marketHoldReason(valuation, now)
+		ready := evidence.Tier == "actionable" && fresh && valuation.Volume24h >= 5 && valuation.PriceSellerCount >= 3 && valuation.ConfidenceBPS >= 5_000 && marketReason == ""
 		state, reason := strings.ToUpper(evidence.Tier), evidence.Reason
 		if ready {
 			state, reason = "READY", ""
@@ -204,11 +242,22 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 				reason = "auction exit lacks five near-target sales from three sellers"
 			}
 		}
+		if valuation.ConfidenceBPS < 5_000 && reason == "" {
+			state, reason = "RESEARCH", "exact-quantity auction confidence is below 50%"
+		}
+		if marketReason != "" {
+			state, reason = "HOLD", marketReason
+		}
 		maxStack := max(1, evidence.MaxStackSize)
 		inventorySlots := (quantity + maxStack - 1) / maxStack
 		filledBatches := int(evidence.FilledUnits24h / int64(quantity))
 		auctionBatches := valuation.Volume24h
 		executable := min(filledBatches, auctionBatches)
+		// Existing remaining order quantity is competing buyer demand, not proof
+		// that sellers will fill our new order. Before measured fills qualify a
+		// market, rank at most one exploratory batch. Confirmed fill velocity is
+		// the only source of multi-batch ORDER_TO_AUCTION capacity.
+		researchBatches := min(1, auctionBatches)
 		orderState, orderReason := state, reason
 		if executable <= 0 {
 			if orderState == "READY" {
@@ -228,8 +277,11 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 			ID: candidateID("order_to_auction", evidence.Signature, quantity), Route: "ORDER_TO_AUCTION", State: orderState, Reason: orderReason,
 			Signature: evidence.Signature, ItemID: evidence.ItemID, ItemName: displayName(evidence), Quantity: quantity, MaxStackSize: maxStack,
 			AcquisitionCost: orderCost, ExpectedProceeds: auctionNet, CompletionBPS: completion, ExpectedCycleMinutes: cycle,
-			ExecutableBatches: executable, QueuePosition: max(1, evidence.BestPricePosition), OrderSlots: 1, AuctionSlots: 1, InventorySlots: inventorySlots,
-			ConfidenceBPS: valuation.ConfidenceBPS, OrderTier: evidence.Tier, OrderFreshAt: evidence.LastSeenAt, AuctionFreshAt: valuation.GeneratedAt,
+			ExecutableBatches: executable, ResearchBatches: researchBatches, QueuePosition: 1, OrderSlots: 1, AuctionSlots: 1, InventorySlots: inventorySlots,
+			ConfidenceBPS: valuation.ConfidenceBPS, OrderTier: evidence.Tier, SignatureComplete: evidence.SignatureComplete, OrderFreshAt: evidence.LastSeenAt, AuctionFreshAt: valuation.GeneratedAt,
+			AuctionVolume24h: valuation.Volume24h, AuctionSellerCount: valuation.PriceSellerCount, OrderFilledUnits24h: evidence.FilledUnits24h,
+			OrderAvailableUnits: evidence.AvailableUnits, VolatilityBPS: valuation.VolatilityBPS, ReferenceAgeSeconds: valuation.ReferenceAgeSeconds,
+			RiskFlags:    append([]string(nil), valuation.RiskFlags...),
 			OrderCommand: "/orders", AuctionCommand: auctionCommand(evidence.ItemID),
 		}))
 
@@ -252,26 +304,40 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 				ID: candidateID("auction_to_order", evidence.Signature, quantity), Route: "AUCTION_TO_ORDER", State: immediateState, Reason: immediateReason,
 				Signature: evidence.Signature, ItemID: evidence.ItemID, ItemName: displayName(evidence), Quantity: quantity, MaxStackSize: maxStack,
 				AcquisitionCost: auctionCost, ExpectedProceeds: orderNet, CompletionBPS: completion, ExpectedCycleMinutes: 2,
-				ExecutableBatches: immediateExecutable, QueuePosition: max(1, evidence.BestPricePosition), OrderSlots: 0, AuctionSlots: 0, InventorySlots: inventorySlots,
-				ConfidenceBPS: valuation.ConfidenceBPS, OrderTier: evidence.Tier, OrderFreshAt: evidence.LastSeenAt, AuctionFreshAt: valuation.GeneratedAt,
+				ExecutableBatches: immediateExecutable, ResearchBatches: immediateExecutable, QueuePosition: 0, OrderSlots: 0, AuctionSlots: 0, InventorySlots: inventorySlots,
+				ConfidenceBPS: valuation.ConfidenceBPS, OrderTier: evidence.Tier, SignatureComplete: evidence.SignatureComplete, OrderFreshAt: evidence.LastSeenAt, AuctionFreshAt: valuation.GeneratedAt,
+				AuctionVolume24h: valuation.Volume24h, AuctionSellerCount: valuation.PriceSellerCount, OrderFilledUnits24h: evidence.FilledUnits24h,
+				OrderAvailableUnits: evidence.AvailableUnits, VolatilityBPS: valuation.VolatilityBPS, ReferenceAgeSeconds: valuation.ReferenceAgeSeconds,
+				RiskFlags:    append([]string(nil), valuation.RiskFlags...),
 				OrderCommand: "/orders", AuctionCommand: auctionCommand(evidence.ItemID),
 			}))
 		}
 	}
 	sort.Slice(result, func(i, j int) bool {
-		if result[i].RiskAdjustedProfitDay != result[j].RiskAdjustedProfitDay {
-			return result[i].RiskAdjustedProfitDay > result[j].RiskAdjustedProfitDay
+		if candidateStateRank(result[i].State) != candidateStateRank(result[j].State) {
+			return candidateStateRank(result[i].State) < candidateStateRank(result[j].State)
+		}
+		if result[i].PriorityScore != result[j].PriorityScore {
+			return result[i].PriorityScore > result[j].PriorityScore
 		}
 		if result[i].ProfitInventorySlot != result[j].ProfitInventorySlot {
 			return result[i].ProfitInventorySlot > result[j].ProfitInventorySlot
 		}
 		return result[i].ID < result[j].ID
 	})
+	rank := 0
+	for index := range result {
+		if result[index].SignatureComplete && (result[index].State == "READY" || result[index].State == "RESEARCH") && result[index].PriorityScore > 0 {
+			rank++
+			result[index].PriorityRank = rank
+		}
+	}
 	return result
 }
 
 func candidate(value Candidate) Candidate {
 	profit := value.ExpectedProceeds - value.AcquisitionCost
+	value.GrossProfit = profit
 	value.ConservativeProfit = mulDivNonNegative(profit, int64(min(value.ConfidenceBPS, value.CompletionBPS)), 10_000)
 	if profit > 0 && value.AcquisitionCost > 0 {
 		ratio := float64(profit) / float64(value.AcquisitionCost) * 10_000
@@ -284,6 +350,15 @@ func candidate(value Candidate) Candidate {
 		completed := mulDivNonNegative(value.ConservativeProfit, int64(value.CompletionBPS), 10_000)
 		value.RiskAdjustedProfitDay = mulDivNonNegative(completed, 1440, int64(value.ExpectedCycleMinutes))
 	}
+	capacity := value.ExecutableBatches
+	if capacity <= 0 {
+		capacity = value.ResearchBatches
+	}
+	if !value.SignatureComplete {
+		capacity = 0
+	}
+	capacity = min(18, max(0, capacity))
+	value.PriorityScore = mulMoney(value.RiskAdjustedProfitDay, int64(capacity))
 	if profit <= 0 {
 		value.State = "REJECTED"
 		value.Reason = "conservative route is not profitable"
@@ -302,11 +377,49 @@ func completionBPS(evidence Evidence, valuation market.Valuation) int {
 	if evidence.Tier == "hold" {
 		tier = 1_000
 	}
-	queue := 4_000
-	if evidence.BestPricePosition > 0 {
-		queue = max(3_000, 10_000-(evidence.BestPricePosition-1)*500)
+	return min(tier, valuation.ConfidenceBPS)
+}
+
+func marketHoldReason(valuation market.Valuation, now time.Time) string {
+	if valuation.GeneratedAt.IsZero() || now.Sub(valuation.GeneratedAt) > 2*time.Minute {
+		return "auction valuation is older than two minutes"
 	}
-	return min(min(tier, queue), valuation.ConfidenceBPS)
+	if valuation.ReferenceAgeSeconds > int64((2 * time.Hour).Seconds()) {
+		return "latest target-price auction sale is older than two hours"
+	}
+	blocking := map[string]string{
+		"api_modifier_blindspot":            "auction API evidence is modifier-blind",
+		"falling_market":                    "auction exit market is falling",
+		"high_volatility":                   "auction exit price is too volatile",
+		"seller_concentration":              "auction evidence is concentrated in too few sellers",
+		"stale_references":                  "auction sale references are stale",
+		"target_price_seller_concentration": "target-price sales are seller-concentrated",
+	}
+	for _, flag := range valuation.RiskFlags {
+		if reason := blocking[flag]; reason != "" {
+			return reason
+		}
+	}
+	return ""
+}
+
+func candidateStateRank(state string) int {
+	switch state {
+	case "READY":
+		return 0
+	case "RESEARCH":
+		return 1
+	case "HOLD":
+		return 2
+	case "STALE":
+		return 3
+	case "CAPTURED":
+		return 4
+	case "REJECTED":
+		return 5
+	default:
+		return 6
+	}
 }
 
 func estimatedFillMinutes(evidence Evidence, quantity int) int {
