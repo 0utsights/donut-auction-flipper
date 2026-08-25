@@ -512,6 +512,45 @@ func TestDiscoveryScanCannotConfirmFill(t *testing.T) {
 	}
 }
 
+func TestFocusedWatchCannotConfirmNeighborItemFill(t *testing.T) {
+	system, err := NewSystem(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	ctx := context.Background()
+	_, _ = system.Register(ctx, ObserverRegistration{ObserverID: "one", ParserVersion: "p1", ProxyLabel: "proxy"})
+	if _, err := system.AddWatch(ctx, "minecraft:diamond"); err != nil {
+		t.Fatal(err)
+	}
+	task, err := system.LeaseTask(ctx, "one")
+	if err != nil || task == nil || task.Kind != "focused_watch" {
+		t.Fatalf("focused task=%+v err=%v", task, err)
+	}
+	now := time.Now().UTC()
+	firstOrder := order("neighbor", 100)
+	firstOrder.ItemID, firstOrder.Signature, firstOrder.DisplayName = "minecraft:dirt", "minecraft:dirt", "Dirt"
+	secondOrder := firstOrder
+	secondOrder.RemainingQuantity = 50
+	first := scan("one", task.ID, "first", 1, now, firstOrder)
+	second := scan("one", task.ID, "second", 1, now.Add(time.Second), secondOrder)
+	first.LeaseToken, second.LeaseToken = task.LeaseToken, task.LeaseToken
+	second.ContentHash = strings.Repeat("d", 64)
+	if _, err := system.SaveScan(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := system.SaveScan(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := system.store.Evidence(ctx)
+	if err != nil || len(evidence) != 1 {
+		t.Fatalf("evidence=%+v err=%v", evidence, err)
+	}
+	if evidence[0].FillEvents != 0 || evidence[0].FilledUnits24h != 0 {
+		t.Fatalf("neighbor item became focused fill evidence: %+v", evidence[0])
+	}
+}
+
 func TestCandidateBuilderIsQuantityAndEvidenceSafe(t *testing.T) {
 	now := time.Now().UTC()
 	evidence := Evidence{Signature: "minecraft:diamond_block", ItemID: "minecraft:diamond_block", DisplayName: "Diamond Block",

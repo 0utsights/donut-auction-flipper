@@ -141,7 +141,7 @@ func (s *Store) migrate() error {
 	// from the same page in the same Minecraft connection session.
 	if _, err := s.db.Exec(`UPDATE fill_events SET confirmation_level=0 WHERE confirmation_level>=2 AND NOT EXISTS (
 		SELECT 1 FROM order_rows newer JOIN scans newer_scan ON newer_scan.id=newer.scan_id
-		JOIN tasks source_task ON source_task.id=newer_scan.task_id AND source_task.kind='focused_watch'
+		JOIN tasks source_task ON source_task.id=newer_scan.task_id AND source_task.kind='focused_watch' AND source_task.signature=newer.signature
 		JOIN order_rows older ON older.observer_id=newer.observer_id AND older.order_key=newer.order_key
 			AND older.unit_reward_cents=newer.unit_reward_cents AND older.observed_ms=fill_events.previous_observed_ms
 		JOIN scans older_scan ON older_scan.id=older.scan_id
@@ -348,10 +348,10 @@ func (s *Store) SaveScan(ctx context.Context, batch ScanBatch) (bool, error) {
 	if registered != 1 {
 		return false, errors.New("observer is not registered")
 	}
-	taskKind := ""
+	taskKind, taskSignature := "", ""
 	if batch.TaskID != "" {
-		if err := tx.QueryRowContext(ctx, `SELECT kind FROM tasks WHERE id=? AND state='leased' AND assigned_observer=? AND lease_token=? AND lease_expires_ms>?`,
-			batch.TaskID, batch.ObserverID, batch.LeaseToken, s.now().UnixMilli()).Scan(&taskKind); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT kind,signature FROM tasks WHERE id=? AND state='leased' AND assigned_observer=? AND lease_token=? AND lease_expires_ms>?`,
+			batch.TaskID, batch.ObserverID, batch.LeaseToken, s.now().UnixMilli()).Scan(&taskKind, &taskSignature); err != nil {
 			if !errors.Is(err, sql.ErrNoRows) {
 				return false, err
 			}
@@ -401,7 +401,7 @@ func (s *Store) SaveScan(ctx context.Context, batch ScanBatch) (bool, error) {
 			if previousErr == nil && previous > order.RemainingQuantity && batch.Complete {
 				confirmation := 0
 				gap := batch.ObservedAt.UnixMilli() - previousObserved
-				if taskKind == "focused_watch" && gap > 0 && gap <= (2*time.Minute).Milliseconds() {
+				if taskKind == "focused_watch" && taskSignature == order.Signature && gap > 0 && gap <= (2*time.Minute).Milliseconds() {
 					confirmation = 2
 				}
 				_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO fill_events(signature,order_key,observer_id,units,unit_reward,unit_reward_cents,confirmation_level,previous_observed_ms,observed_ms) VALUES(?,?,?,?,?,?,?,?,?)`,
