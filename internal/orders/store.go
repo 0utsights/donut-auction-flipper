@@ -141,12 +141,13 @@ func (s *Store) migrate() error {
 	// from the same page in the same Minecraft connection session.
 	if _, err := s.db.Exec(`UPDATE fill_events SET confirmation_level=0 WHERE confirmation_level>=2 AND NOT EXISTS (
 		SELECT 1 FROM order_rows newer JOIN scans newer_scan ON newer_scan.id=newer.scan_id
+		JOIN tasks source_task ON source_task.id=newer_scan.task_id AND source_task.kind='focused_watch'
 		JOIN order_rows older ON older.observer_id=newer.observer_id AND older.order_key=newer.order_key
 			AND older.unit_reward_cents=newer.unit_reward_cents AND older.observed_ms=fill_events.previous_observed_ms
 		JOIN scans older_scan ON older_scan.id=older.scan_id
 		WHERE newer.observer_id=fill_events.observer_id AND newer.order_key=fill_events.order_key
 			AND newer.unit_reward_cents=fill_events.unit_reward_cents AND newer.observed_ms=fill_events.observed_ms
-			AND newer_scan.page=older_scan.page AND newer_scan.session_id=older_scan.session_id)`); err != nil {
+			AND newer_scan.page=older_scan.page AND newer_scan.task_id=older_scan.task_id)`); err != nil {
 		return fmt.Errorf("quarantine cross-page fill evidence: %w", err)
 	}
 	availabilityAdded := false
@@ -329,13 +330,13 @@ func (s *Store) SaveScan(ctx context.Context, batch ScanBatch) (bool, error) {
 	if registered != 1 {
 		return false, errors.New("observer is not registered")
 	}
+	taskKind := ""
 	if batch.TaskID != "" {
-		var leased int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE id=? AND state='leased' AND assigned_observer=? AND lease_token=? AND lease_expires_ms>?`,
-			batch.TaskID, batch.ObserverID, batch.LeaseToken, s.now().UnixMilli()).Scan(&leased); err != nil {
-			return false, err
-		}
-		if leased != 1 {
+		if err := tx.QueryRowContext(ctx, `SELECT kind FROM tasks WHERE id=? AND state='leased' AND assigned_observer=? AND lease_token=? AND lease_expires_ms>?`,
+			batch.TaskID, batch.ObserverID, batch.LeaseToken, s.now().UnixMilli()).Scan(&taskKind); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				return false, err
+			}
 			return false, errors.New("task lease is invalid or expired")
 		}
 	}
@@ -370,8 +371,8 @@ func (s *Store) SaveScan(ctx context.Context, batch ScanBatch) (bool, error) {
 		for _, order := range batch.Orders {
 			var previous, previousObserved int64
 			previousErr := tx.QueryRowContext(ctx, `SELECT r.remaining_quantity,r.observed_ms FROM order_rows r JOIN scans prior_scan ON prior_scan.id=r.scan_id
-				WHERE r.observer_id=? AND r.order_key=? AND r.unit_reward_cents=? AND prior_scan.page=? AND prior_scan.session_id=? AND r.observed_ms<?
-				ORDER BY r.observed_ms DESC LIMIT 1`, batch.ObserverID, order.OrderKey, order.UnitRewardCents, batch.Page, batch.SessionID, batch.ObservedAt.UnixMilli()).Scan(&previous, &previousObserved)
+				WHERE r.observer_id=? AND r.order_key=? AND r.unit_reward_cents=? AND prior_scan.page=? AND prior_scan.task_id=? AND r.observed_ms<?
+				ORDER BY r.observed_ms DESC LIMIT 1`, batch.ObserverID, order.OrderKey, order.UnitRewardCents, batch.Page, batch.TaskID, batch.ObservedAt.UnixMilli()).Scan(&previous, &previousObserved)
 			_, err = tx.ExecContext(ctx, `INSERT INTO order_rows(scan_id,observer_id,order_key,item_id,signature,display_name,quantity,max_stack_size,unit_reward,unit_reward_cents,requested_quantity,remaining_quantity,owner,expires_ms,price_position,slot,raw_field_hash,signature_complete,observed_ms)
 			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, scanID, batch.ObserverID, order.OrderKey, order.ItemID, order.Signature,
 				order.DisplayName, order.Quantity, order.MaxStackSize, 0, order.UnitRewardCents, order.RequestedQuantity, order.RemainingQuantity,
@@ -382,7 +383,7 @@ func (s *Store) SaveScan(ctx context.Context, batch ScanBatch) (bool, error) {
 			if previousErr == nil && previous > order.RemainingQuantity && batch.Complete {
 				confirmation := 0
 				gap := batch.ObservedAt.UnixMilli() - previousObserved
-				if gap > 0 && gap <= (2*time.Minute).Milliseconds() {
+				if taskKind == "focused_watch" && gap > 0 && gap <= (2*time.Minute).Milliseconds() {
 					confirmation = 2
 				}
 				_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO fill_events(signature,order_key,observer_id,units,unit_reward,unit_reward_cents,confirmation_level,previous_observed_ms,observed_ms) VALUES(?,?,?,?,?,?,?,?,?)`,

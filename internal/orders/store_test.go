@@ -358,6 +358,13 @@ func TestFillInferenceRequiresObservedQuantityDecrease(t *testing.T) {
 	t.Cleanup(func() { _ = system.Close() })
 	ctx := context.Background()
 	_, _ = system.Register(ctx, ObserverRegistration{ObserverID: "one", ParserVersion: "p1", ProxyLabel: "proxy"})
+	if _, err := system.AddWatch(ctx, "minecraft:diamond"); err != nil {
+		t.Fatal(err)
+	}
+	task, err := system.LeaseTask(ctx, "one")
+	if err != nil || task == nil || task.Kind != "focused_watch" {
+		t.Fatalf("focused task=%+v err=%v", task, err)
+	}
 	base := time.Now().UTC().Add(-20 * time.Minute)
 	observedAt := []time.Duration{0, 10 * time.Minute, 18 * time.Minute, 18*time.Minute + 45*time.Second, 19*time.Minute + 15*time.Second, 20 * time.Minute}
 	orders := []OrderObservation{order("a", 100), order("b", 100), order("c", 100)}
@@ -369,6 +376,7 @@ func TestFillInferenceRequiresObservedQuantityDecrease(t *testing.T) {
 		}
 		batch := scan("one", "", "steady-session", 1, base.Add(observedAt[index]), orders...)
 		batch.ContentHash = fmt.Sprintf("%064x", index+100)
+		batch.TaskID, batch.LeaseToken = task.ID, task.LeaseToken
 		if _, err := system.SaveScan(ctx, batch); err != nil {
 			t.Fatal(err)
 		}
@@ -406,9 +414,18 @@ func TestCrossPagePseudoIdentityCannotConfirmFill(t *testing.T) {
 	t.Cleanup(func() { _ = system.Close() })
 	ctx := context.Background()
 	_, _ = system.Register(ctx, ObserverRegistration{ObserverID: "one", ParserVersion: "p1", ProxyLabel: "proxy"})
+	if _, err := system.AddWatch(ctx, "minecraft:diamond"); err != nil {
+		t.Fatal(err)
+	}
+	task, err := system.LeaseTask(ctx, "one")
+	if err != nil || task == nil || task.Kind != "focused_watch" {
+		t.Fatalf("focused task=%+v err=%v", task, err)
+	}
 	now := time.Now().UTC()
 	first := scan("one", "", "same-session", 1, now, order("pseudo", 100))
 	second := scan("one", "", "same-session", 2, now.Add(time.Second), order("pseudo", 50))
+	first.TaskID, first.LeaseToken = task.ID, task.LeaseToken
+	second.TaskID, second.LeaseToken = task.ID, task.LeaseToken
 	if _, err := system.SaveScan(ctx, first); err != nil {
 		t.Fatal(err)
 	}
@@ -421,6 +438,35 @@ func TestCrossPagePseudoIdentityCannotConfirmFill(t *testing.T) {
 	}
 	if evidence[0].FillEvents != 0 || evidence[0].FilledUnits24h != 0 {
 		t.Fatalf("cross-page collision became confirmed fill: %+v", evidence[0])
+	}
+}
+
+func TestDiscoveryScanCannotConfirmFill(t *testing.T) {
+	system, err := NewSystem(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	ctx := context.Background()
+	_, _ = system.Register(ctx, ObserverRegistration{ObserverID: "one", ParserVersion: "p1", ProxyLabel: "proxy"})
+	task, err := system.LeaseTask(ctx, "one")
+	if err != nil || task == nil || task.Kind != "discovery" {
+		t.Fatalf("discovery task=%+v err=%v", task, err)
+	}
+	now := time.Now().UTC()
+	first := scan("one", task.ID, "session", 1, now, order("pseudo", 100))
+	second := scan("one", task.ID, "session", 1, now.Add(time.Second), order("pseudo", 50))
+	first.LeaseToken, second.LeaseToken = task.LeaseToken, task.LeaseToken
+	second.ContentHash = strings.Repeat("c", 64)
+	if _, err := system.SaveScan(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := system.SaveScan(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := system.store.Evidence(ctx)
+	if err != nil || len(evidence) != 1 || evidence[0].FillEvents != 0 {
+		t.Fatalf("discovery reduction became trusted evidence: evidence=%+v err=%v", evidence, err)
 	}
 }
 
