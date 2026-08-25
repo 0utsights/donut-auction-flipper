@@ -243,6 +243,24 @@ func (s *Store) Heartbeat(ctx context.Context, heartbeat Heartbeat) error {
 	return nil
 }
 
+// ShouldYieldDiscovery lets a low-priority discovery pass hand its observer to
+// an explicitly requested focused watch. It only returns true for the exact
+// live discovery lease presented by that observer; a stale or forged task ID
+// can never interrupt another collector.
+func (s *Store) ShouldYieldDiscovery(ctx context.Context, heartbeat Heartbeat) (bool, error) {
+	if heartbeat.TaskID == "" || heartbeat.LeaseToken == "" {
+		return false, nil
+	}
+	var ready int
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM tasks active
+		WHERE active.id=? AND active.kind='discovery' AND active.state='leased'
+			AND active.assigned_observer=? AND active.lease_token=? AND active.lease_expires_ms>?
+			AND EXISTS(SELECT 1 FROM tasks focused WHERE focused.kind='focused_watch' AND focused.state='ready')
+	)`, heartbeat.TaskID, heartbeat.ObserverID, heartbeat.LeaseToken, s.now().UnixMilli()).Scan(&ready)
+	return ready == 1, err
+}
+
 func (s *Store) LeaseTask(ctx context.Context, observerID string, lease time.Duration) (*Task, error) {
 	now := s.now()
 	tx, err := s.db.BeginTx(ctx, nil)

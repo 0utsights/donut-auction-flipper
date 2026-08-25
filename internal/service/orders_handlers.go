@@ -60,6 +60,14 @@ func (s *Server) observerHeartbeat(w http.ResponseWriter, r *http.Request) {
 		s.orderError(w, "observer heartbeat", err)
 		return
 	}
+	yield, err := s.orders.ShouldYieldDiscovery(r.Context(), value)
+	if err != nil {
+		s.orderError(w, "check focused watch priority", err)
+		return
+	}
+	if yield {
+		w.Header().Set("X-DN-Yield", "focused_watch")
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

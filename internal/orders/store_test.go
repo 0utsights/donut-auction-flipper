@@ -87,6 +87,48 @@ func TestObserverLeaseAndIdempotentScan(t *testing.T) {
 	}
 }
 
+func TestFocusedWatchRequestsCurrentDiscoveryLeaseToYield(t *testing.T) {
+	system, err := NewSystem(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	ctx := context.Background()
+	if _, err := system.Register(ctx, ObserverRegistration{ObserverID: "one", ParserVersion: "p1", ProxyLabel: "proxy"}); err != nil {
+		t.Fatal(err)
+	}
+	discovery, err := system.LeaseTask(ctx, "one")
+	if err != nil || discovery == nil || discovery.Kind != "discovery" {
+		t.Fatalf("discovery=%+v err=%v", discovery, err)
+	}
+	heartbeat := Heartbeat{ObserverID: "one", State: "scanning", TaskID: discovery.ID, LeaseToken: discovery.LeaseToken, Page: 3}
+	if yield, err := system.ShouldYieldDiscovery(ctx, heartbeat); err != nil || yield {
+		t.Fatalf("discovery yielded without focused work: yield=%v err=%v", yield, err)
+	}
+	watch, err := system.AddWatch(ctx, "minecraft:diamond")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if watch.ExpiresAt.Sub(watch.CreatedAt) != 15*time.Minute {
+		t.Fatalf("watch lifetime=%s", watch.ExpiresAt.Sub(watch.CreatedAt))
+	}
+	if yield, err := system.ShouldYieldDiscovery(ctx, heartbeat); err != nil || !yield {
+		t.Fatalf("focused work did not preempt discovery: yield=%v err=%v", yield, err)
+	}
+	wrong := heartbeat
+	wrong.LeaseToken = "lease_wrong"
+	if yield, err := system.ShouldYieldDiscovery(ctx, wrong); err != nil || yield {
+		t.Fatalf("wrong lease interrupted discovery: yield=%v err=%v", yield, err)
+	}
+	if err := system.CompleteTask(ctx, TaskResult{ObserverID: "one", TaskID: discovery.ID, LeaseToken: discovery.LeaseToken, Status: "complete"}); err != nil {
+		t.Fatal(err)
+	}
+	focused, err := system.LeaseTask(ctx, "one")
+	if err != nil || focused == nil || focused.Kind != "focused_watch" {
+		t.Fatalf("focused=%+v err=%v", focused, err)
+	}
+}
+
 func TestLegacyDollarRewardsAreQuarantinedFromCentEvidence(t *testing.T) {
 	system, err := NewSystem(Config{})
 	if err != nil {
@@ -485,6 +527,9 @@ func TestCandidateBuilderIsQuantityAndEvidenceSafe(t *testing.T) {
 	for _, candidate := range values {
 		if candidate.State != "READY" || candidate.PriorityRank <= 0 || candidate.PriorityScore <= 0 || candidate.Quantity != 64 || candidate.InventorySlots != 1 || candidate.ConservativeProfit <= 0 {
 			t.Fatalf("unsafe candidate: %+v", candidate)
+		}
+		if candidate.Route == "ORDER_TO_AUCTION" && candidate.AcquisitionCost != 256_001 {
+			t.Fatalf("competitive order did not add exactly one cent per unit: %+v", candidate)
 		}
 	}
 	valuation.QuantityQuickSell = 0

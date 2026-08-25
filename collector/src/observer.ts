@@ -17,6 +17,10 @@ process.umask(0o077)
 // lane and expose whatever cadence the real menu actually sustains.
 const DISCOVERY_CLICK_DELAY_MS = 750
 const FOCUSED_CLICK_DELAY_MS = 500
+// The backend renews the short failure-detection lease on every successful
+// heartbeat. A focused scan therefore needs its own bounded work horizon so it
+// can traverse a large order book instead of stopping after the initial lease.
+const FOCUSED_WATCH_RUNTIME_MS = 4 * 60_000
 // A runaway guard, not a normal scan boundary. The live market has exceeded
 // 200 pages, so discovery must continue until the server removes pagination or
 // refuses to advance it. Connections are rotated after every completed pass.
@@ -75,7 +79,7 @@ class ObserverRuntime {
         this.activePage = 0
       }
       await this.backend.finishTask(task.id, task.lease_token, status, message).catch(this.report)
-      if (reconnect) await this.reconnect()
+      if (reconnect) await this.reconnect(status === 'complete')
     }
   }
 
@@ -122,12 +126,12 @@ class ObserverRuntime {
     this.connectedAt = Date.now()
   }
 
-  private async reconnect(): Promise<void> {
+  private async reconnect(plannedRotation = false): Promise<void> {
     this.reconnects++
-    // A healthy, long-lived scan resets the failure streak. Total reconnects
-    // remain monotonic for diagnostics, while repeated short-lived sessions
-    // still receive exponential backoff.
-    if (Date.now() - this.connectedAt >= 60_000) this.reconnectStreak = 0
+    // Planned end-of-scan rotations are success, even when a small live order
+    // book completes in under a minute. Only unexpected short-lived failures
+    // accumulate exponential backoff. Total reconnects remains diagnostic.
+    if (plannedRotation || Date.now() - this.connectedAt >= 60_000) this.reconnectStreak = 0
     this.reconnectStreak++
     const delay = Math.min(60_000, 1_000 * 2 ** Math.min(6, this.reconnectStreak - 1))
     await sleep(delay)
@@ -158,7 +162,7 @@ class ObserverRuntime {
     let sessionId = randomUUID()
     const seen = new Set<string>()
     const limit = DISCOVERY_PAGE_LIMIT
-    const taskDeadline = Date.parse(task.lease_expires_at) - 2_000
+    const taskDeadline = task.kind === 'focused_watch' ? Date.now() + FOCUSED_WATCH_RUNTIME_MS : Date.parse(task.lease_expires_at) - 2_000
     for (let pageIndex = 0; pageIndex < limit; pageIndex++) {
       this.ensureConnected(bot)
       const captured = this.capture(window as unknown as WindowView)
@@ -181,7 +185,10 @@ class ObserverRuntime {
       await this.backend.submitScan(scan)
       this.ensureConnected(bot)
       this.log('page_submitted', `page=${scan.page} orders=${parsed.length} complete=${scan.complete}`)
-      await this.backend.heartbeat(schema && complete ? 'scanning' : 'schema_hold', task.id, task.lease_token, scan.page, bot.player?.ping ?? 0, this.reconnects)
+      const yieldToFocus = await this.backend.heartbeat(schema && complete ? 'scanning' : 'schema_hold', task.id, task.lease_token, scan.page, bot.player?.ping ?? 0, this.reconnects)
+      if (yieldToFocus && task.kind === 'discovery') {
+        throw new ReconnectRequiredError('discovery yielded to a focused watch')
+      }
       if (!schema || !complete) {
         this.writeCapture(task.id, captured.hash, captured.title, captured.views)
         this.log('schema_hold', `content=${captured.hash.slice(0, 12)}`)

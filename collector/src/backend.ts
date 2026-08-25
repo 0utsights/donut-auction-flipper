@@ -11,10 +11,11 @@ export class BackendClient {
     })
   }
 
-  async heartbeat(state: string, taskId = '', leaseToken = '', page = 0, latencyMs = 0, reconnectCount = 0): Promise<void> {
-    await this.request('/api/v1/observers/heartbeat', 'POST', {
+  async heartbeat(state: string, taskId = '', leaseToken = '', page = 0, latencyMs = 0, reconnectCount = 0): Promise<boolean> {
+    const response = await this.request('/api/v1/observers/heartbeat', 'POST', {
       observer_id: this.observerId, state, task_id: taskId, lease_token: leaseToken, page, latency_ms: latencyMs, reconnect_count: reconnectCount
     })
+    return response.headers.get('x-dn-yield') === 'focused_watch'
   }
 
   async nextTask(signal: AbortSignal): Promise<ObserverTask | undefined> {

@@ -59,6 +59,9 @@ func (s *System) Register(ctx context.Context, value ObserverRegistration) (Obse
 func (s *System) Heartbeat(ctx context.Context, value Heartbeat) error {
 	return s.store.Heartbeat(ctx, value)
 }
+func (s *System) ShouldYieldDiscovery(ctx context.Context, value Heartbeat) (bool, error) {
+	return s.store.ShouldYieldDiscovery(ctx, value)
+}
 func (s *System) LeaseTask(ctx context.Context, observerID string) (*Task, error) {
 	return s.store.LeaseTask(ctx, observerID, 30*time.Second)
 }
@@ -69,7 +72,7 @@ func (s *System) CompleteTask(ctx context.Context, value TaskResult) error {
 	return s.store.CompleteTask(ctx, value)
 }
 func (s *System) AddWatch(ctx context.Context, signature string) (Watch, error) {
-	return s.store.AddWatch(ctx, signature, 5*time.Minute)
+	return s.store.AddWatch(ctx, signature, 15*time.Minute)
 }
 func (s *System) DeleteWatch(ctx context.Context, id string) error {
 	return s.store.DeleteWatch(ctx, id)
@@ -268,7 +271,9 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 			}
 		}
 
-		competitiveUnitCents := evidence.BestUnitRewardCents + max64(1, evidence.BestUnitRewardCents/10_000)
+		// Donut rewards are cent-precise. Beat the current best buy order by the
+		// smallest representable amount instead of scaling the increment with price.
+		competitiveUnitCents := evidence.BestUnitRewardCents + 1
 		orderCost := centsForQuantity(competitiveUnitCents, int64(quantity), true)
 		auctionGross := mulMoney(quickUnit, int64(quantity))
 		auctionNet := applyFee(auctionGross, cfg.AuctionFeeBPS)

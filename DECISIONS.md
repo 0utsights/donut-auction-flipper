@@ -108,7 +108,7 @@ The official Donut API schema remains the primary contract, and the retained in-
 
 Order-to-auction priority is `risk-adjusted profit/day × conservative attainable batches`, with batch capacity capped at the 18 auction-listing limit. The allocator treats one acquisition order for an item as one order slot even when it can supply several same-quantity auction batches; each resale batch still consumes one auction slot. Priority is therefore comparable across cheap, high-volume commodities and expensive, slot-efficient commodities without a hardcoded balance or profit floor.
 
-The exact full maximum-stack auction cohort is preferred for stackable commodities because the player will relist the same quantity. Single-item valuation is only a fallback when the API has no qualifying exact-stack cohort. The current best order reward is treated as the price to beat by one cent, so the displayed queue position is a target position of one, not a claim that Donut exposes the true hidden queue.
+The exact full maximum-stack auction cohort is preferred for stackable commodities because the player will relist the same quantity. Single-item valuation is only a fallback when the API has no qualifying exact-stack cohort. The current best order reward is treated as the price to beat by exactly one cent per unit, the smallest representable Donut reward increment, so the displayed queue position is a target position of one, not a claim that Donut exposes the true hidden queue.
 
 Only a conservative allowlist of base commodities can be signature-complete and receive a priority rank. Any modifier marker, or an inherently variant-sensitive item such as equipment, books, potions, maps, heads, shulker boxes, or music discs, remains unranked research until a future canonical component parser proves equivalence. This deliberately trades market breadth for executable-price correctness.
 
@@ -119,6 +119,10 @@ Outstanding quantity in competing buy orders does not imply that sellers will fi
 `READY` additionally requires at least 50% exact-quantity auction confidence and a latest target-price sale no older than two hours. The 24-hour volume window remains useful for capacity, but does not by itself make older evidence executable.
 
 Conservative profit applies the auction model's price-confidence haircut once. Risk-adjusted profit/day then applies completion probability once and divides by cycle duration. Keeping these terms separate matches the published formula and avoids double-discounting completion.
+
+Focused watches preempt discovery after the currently submitted page. The backend signals this only on the observer's authenticated live discovery lease; the collector completes and rotates that passive task, then leases the higher-priority focused task. Focused work uses a four-minute bounded work horizon while successful per-page heartbeats renew the backend's short failure-detection lease. A watch remains requested for 15 minutes, allowing deep pagination and repeated same-page samples without turning a lost collector into a long-lived lease.
+
+Completed discovery and focused-watch rotations reset reconnect failure backoff. The monotonic reconnect counter remains visible for diagnostics, but only unexpected short-lived connection or menu failures can increase the delay. This prevents a legitimately small order book from eventually imposing a 60-second idle penalty between successful passes.
 
 ## Assumptions made without operator input
 
