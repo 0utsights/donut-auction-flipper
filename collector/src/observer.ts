@@ -228,7 +228,7 @@ class ObserverRuntime {
         this.ensureConnected(bot)
         window = bot.currentWindow ?? await waitForWindow(bot, 3_000)
         const nextTitle = plainText(window.title).slice(0, 128)
-        if (parsePage(nextTitle, 0) <= previousPage) throw new MenuSessionEndedError('server did not advance focused-watch pagination')
+        if (parsePage(nextTitle, 0) <= previousPage) throw new ReconnectRequiredError('focused item was not present before pagination ended')
         continue
       }
       if (pageIndex+1 >= limit) {
