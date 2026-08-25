@@ -143,6 +143,8 @@ type Candidate struct {
 	MaxStackSize          int       `json:"max_stack_size"`
 	AcquisitionCost       int64     `json:"acquisition_cost"`
 	ExpectedProceeds      int64     `json:"expected_proceeds"`
+	OrderUnitRewardCents  int64     `json:"order_unit_reward_cents"`
+	TargetListPrice       int64     `json:"target_list_price"`
 	GrossProfit           int64     `json:"gross_profit"`
 	ConservativeProfit    int64     `json:"conservative_profit"`
 	MarginBPS             int       `json:"margin_bps"`

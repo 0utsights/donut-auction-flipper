@@ -281,7 +281,8 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 		result = append(result, candidate(Candidate{
 			ID: candidateID("order_to_auction", evidence.Signature, quantity), Route: "ORDER_TO_AUCTION", State: orderState, Reason: orderReason,
 			Signature: evidence.Signature, ItemID: evidence.ItemID, ItemName: displayName(evidence), Quantity: quantity, MaxStackSize: maxStack,
-			AcquisitionCost: orderCost, ExpectedProceeds: auctionNet, CompletionBPS: completion, ExpectedCycleMinutes: cycle,
+			AcquisitionCost: orderCost, ExpectedProceeds: auctionNet, OrderUnitRewardCents: competitiveUnitCents, TargetListPrice: auctionGross,
+			CompletionBPS: completion, ExpectedCycleMinutes: cycle,
 			ExecutableBatches: executable, ResearchBatches: researchBatches, QueuePosition: 1, OrderSlots: 1, AuctionSlots: 1, InventorySlots: inventorySlots,
 			ConfidenceBPS: valuation.ConfidenceBPS, OrderTier: evidence.Tier, SignatureComplete: evidence.SignatureComplete, OrderFreshAt: evidence.LastSeenAt, AuctionFreshAt: valuation.GeneratedAt,
 			AuctionVolume24h: valuation.Volume24h, AuctionSellerCount: valuation.PriceSellerCount, OrderFilledUnits24h: evidence.FilledUnits24h,
@@ -308,7 +309,8 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 			result = append(result, candidate(Candidate{
 				ID: candidateID("auction_to_order", evidence.Signature, quantity), Route: "AUCTION_TO_ORDER", State: immediateState, Reason: immediateReason,
 				Signature: evidence.Signature, ItemID: evidence.ItemID, ItemName: displayName(evidence), Quantity: quantity, MaxStackSize: maxStack,
-				AcquisitionCost: auctionCost, ExpectedProceeds: orderNet, CompletionBPS: completion, ExpectedCycleMinutes: 2,
+				AcquisitionCost: auctionCost, ExpectedProceeds: orderNet, OrderUnitRewardCents: evidence.BestUnitRewardCents,
+				CompletionBPS: completion, ExpectedCycleMinutes: 2,
 				ExecutableBatches: immediateExecutable, ResearchBatches: immediateExecutable, QueuePosition: 0, OrderSlots: 0, AuctionSlots: 0, InventorySlots: inventorySlots,
 				ConfidenceBPS: valuation.ConfidenceBPS, OrderTier: evidence.Tier, SignatureComplete: evidence.SignatureComplete, OrderFreshAt: evidence.LastSeenAt, AuctionFreshAt: valuation.GeneratedAt,
 				AuctionVolume24h: valuation.Volume24h, AuctionSellerCount: valuation.PriceSellerCount, OrderFilledUnits24h: evidence.FilledUnits24h,

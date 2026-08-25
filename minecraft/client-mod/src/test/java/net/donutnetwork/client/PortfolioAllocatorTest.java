@@ -45,7 +45,8 @@ class PortfolioAllocatorTest {
 
     private static CandidateFeedClient.Candidate candidate(String id, long cost, long score, int orderSlots, int auctionSlots, int batches) {
         return new CandidateFeedClient.Candidate(id, "ORDER_TO_AUCTION", "READY", "", "minecraft:" + id,
-                "minecraft:" + id, id, 64, 64, cost, cost + score, score, 1000, 9000, 30,
+                "minecraft:" + id, id, 64, 64, cost, cost + score, Math.max(1, cost * 100 / 64), cost + score,
+                score, 1000, 9000, 30,
                 score, batches, 1, orderSlots, auctionSlots, 1, score, 9000, "actionable", Instant.now(), Instant.now(),
                 "/orders", "/ah " + id);
     }
@@ -53,6 +54,7 @@ class PortfolioAllocatorTest {
     private static CandidateFeedClient.Candidate withState(CandidateFeedClient.Candidate value, String state) {
         return new CandidateFeedClient.Candidate(value.id(), value.route(), state, value.reason(), value.signature(), value.itemId(),
                 value.itemName(), value.quantity(), value.maxStackSize(), value.acquisitionCost(), value.expectedProceeds(),
+                value.orderUnitRewardCents(), value.targetListPrice(),
                 value.conservativeProfit(), value.marginBps(), value.completionBps(), value.expectedCycleMinutes(),
                 value.riskAdjustedProfitDay(), value.executableBatches(), value.queuePosition(), value.orderSlots(), value.auctionSlots(),
                 value.inventorySlots(), value.profitInventorySlot(), value.confidenceBps(), value.orderTier(), value.orderFreshAt(),

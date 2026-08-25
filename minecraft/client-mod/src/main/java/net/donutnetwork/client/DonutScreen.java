@@ -40,6 +40,7 @@ final class DonutScreen extends Screen {
                     + FlipNotifier.format(candidate.conservativeProfit()) + "  $" + FlipNotifier.format(candidate.riskAdjustedProfitDay()) + "/day";
             addDrawableChild(ButtonWidget.builder(Text.literal(label), button -> CandidateNotifier.open(client, candidates, candidate))
                     .tooltip(Tooltip.of(Text.literal(candidate.route() + " · capital $" + FlipNotifier.format(candidate.acquisitionCost())
+                            + (candidate.route().equals("ORDER_TO_AUCTION") ? " · list $" + FlipNotifier.format(candidate.targetListPrice()) : "")
                             + " · slots O/A/I " + candidate.orderSlots() + "/" + candidate.auctionSlots() + "/" + candidate.inventorySlots()
                             + " · queue #" + candidate.queuePosition() + " · " + candidate.orderTier()))).dimensions(left, top + 92 + index * 22, WIDTH, 20).build());
         }

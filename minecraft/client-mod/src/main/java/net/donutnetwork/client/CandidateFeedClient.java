@@ -45,6 +45,7 @@ final class CandidateFeedClient implements AutoCloseable {
 
     record Candidate(String id, String route, String state, String reason, String signature, String itemId,
                      String itemName, int quantity, int maxStackSize, long acquisitionCost, long expectedProceeds,
+                     long orderUnitRewardCents, long targetListPrice,
                      long conservativeProfit, int marginBps, int completionBps, int expectedCycleMinutes,
                      long riskAdjustedProfitDay, int executableBatches, int queuePosition, int orderSlots, int auctionSlots,
                      int inventorySlots, long profitInventorySlot, int confidenceBps, String orderTier,
@@ -212,7 +213,8 @@ final class CandidateFeedClient implements AutoCloseable {
                     oneOf(value, "state", "READY", "RESEARCH", "CAPTURED", "HOLD", "STALE", "REJECTED"), optional(value, "reason", 200),
                     required(value, "signature", 2048), itemId, required(value, "item_name", 128), boundedInt(value, "quantity", 1, 1728),
                     boundedInt(value, "max_stack_size", 1, 99), boundedLong(value, "acquisition_cost", 1, Long.MAX_VALUE),
-                    boundedLong(value, "expected_proceeds", 0, Long.MAX_VALUE), boundedLong(value, "conservative_profit", Long.MIN_VALUE, Long.MAX_VALUE),
+                    boundedLong(value, "expected_proceeds", 0, Long.MAX_VALUE), boundedLong(value, "order_unit_reward_cents", 0, Long.MAX_VALUE),
+                    boundedLong(value, "target_list_price", 0, Long.MAX_VALUE), boundedLong(value, "conservative_profit", Long.MIN_VALUE, Long.MAX_VALUE),
                     boundedInt(value, "margin_bps", 0, Integer.MAX_VALUE), boundedInt(value, "completion_bps", 0, 10_000),
                     boundedInt(value, "expected_cycle_minutes", 1, 1_000_000), boundedLong(value, "risk_adjusted_profit_day", 0, Long.MAX_VALUE),
                     boundedInt(value, "executable_batches", 0, 1_000_000), boundedInt(value, "queue_position", 0, 1_000_000), boundedInt(value, "order_slots", 0, 20), boundedInt(value, "auction_slots", 0, 18),

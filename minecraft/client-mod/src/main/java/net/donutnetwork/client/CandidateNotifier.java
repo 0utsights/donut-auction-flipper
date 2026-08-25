@@ -7,6 +7,8 @@ import net.minecraft.text.MutableText;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 
+import java.util.Locale;
+
 final class CandidateNotifier {
     private CandidateNotifier() {}
 
@@ -18,7 +20,7 @@ final class CandidateNotifier {
                 .append(Text.literal("  " + route).formatted(Formatting.GRAY))
                 .append(Text.literal("  +$" + FlipNotifier.format(candidate.conservativeProfit()) + " · $"
                         + FlipNotifier.format(candidate.riskAdjustedProfitDay()) + "/day").formatted(Formatting.GREEN))
-                .append(action("  [OPEN]", primaryCommand(candidate), "Open the relevant market. Recheck item, quantity, and price; every transaction remains manual."));
+                .append(action("  [OPEN]", primaryCommand(candidate), preparedValues(candidate)));
         client.player.sendMessage(message, false);
     }
 
@@ -33,6 +35,19 @@ final class CandidateNotifier {
         String command = candidate.route().equals("AUCTION_TO_ORDER") ? candidate.auctionCommand() : candidate.orderCommand();
         if (!command.equals("/orders") && !command.matches("/ah(?: [a-z0-9_-]{1,64})?")) throw new IllegalArgumentException("unsafe candidate command");
         return command;
+    }
+
+    private static String preparedValues(CandidateFeedClient.Candidate candidate) {
+        if (candidate.route().equals("ORDER_TO_AUCTION")) {
+            return "Create " + candidate.quantity() + " at " + formatCents(candidate.orderUnitRewardCents())
+                    + " each, then list the exact batch for $" + FlipNotifier.format(candidate.targetListPrice())
+                    + ". Recheck all values; every transaction remains manual.";
+        }
+        return "Open the relevant market. Recheck item, quantity, and price; every transaction remains manual.";
+    }
+
+    private static String formatCents(long cents) {
+        return String.format(Locale.ROOT, "$%,d.%02d", cents / 100, cents % 100);
     }
 
     private static MutableText action(String label, String command, String hover) {

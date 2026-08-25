@@ -570,6 +570,9 @@ func TestCandidateBuilderIsQuantityAndEvidenceSafe(t *testing.T) {
 		if candidate.Route == "ORDER_TO_AUCTION" && candidate.AcquisitionCost != 256_001 {
 			t.Fatalf("competitive order did not add exactly one cent per unit: %+v", candidate)
 		}
+		if candidate.Route == "ORDER_TO_AUCTION" && (candidate.OrderUnitRewardCents != 400_001 || candidate.TargetListPrice != 320_000) {
+			t.Fatalf("prepared transaction values are incorrect: %+v", candidate)
+		}
 	}
 	valuation.QuantityQuickSell = 0
 	if got := buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now); len(got) != 0 {
