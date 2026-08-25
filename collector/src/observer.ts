@@ -214,8 +214,12 @@ class ObserverRuntime {
         }
         // Search only by traversing the already verified next-page control.
         // Sign input and server-side search remain deliberately unsupported.
-        if (Date.now() >= taskDeadline) throw new MenuSessionEndedError('focused item was not located before the task deadline')
-        if (!navigator.controlAvailable('next_page')) throw new MenuSessionEndedError('focused item was not present in the current order market')
+        // A target disappearing or not being reached within the bounded sample
+        // is a valid market result, not an infrastructure failure. Complete the
+        // one-shot automatic task so it cannot retry forever and starve discovery;
+        // an active player watch is requeued by the backend independently.
+        if (Date.now() >= taskDeadline) throw new ReconnectRequiredError('focused item was not located before the task deadline')
+        if (!navigator.controlAvailable('next_page')) throw new ReconnectRequiredError('focused item was not present in the current order market')
         const previousPage = scan.page
         this.log('focused_next_page_clicking')
         await sleep(clickDelay)
