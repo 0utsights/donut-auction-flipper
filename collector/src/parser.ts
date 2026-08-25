@@ -87,6 +87,17 @@ export function parseOrder(view: ItemView): ParsedOrder | undefined {
   }
 }
 
+// Donut's "Most Per Item" mode sorts by the unit reward, not by total order
+// value. Requiring a fully parsed page with descending rewards lets us verify
+// the actual server behavior even when menu-color metadata is unavailable.
+export function isMostPerItemOrder(orders: readonly ParsedOrder[], expectedListings: number): boolean {
+  if (expectedListings < 10 || orders.length !== expectedListings) return false
+  for (let index = 1; index < orders.length; index++) {
+    if (orders[index]!.unit_reward_cents > orders[index - 1]!.unit_reward_cents) return false
+  }
+  return true
+}
+
 export function baseSignatureComplete(view: ItemView): boolean {
   if (!baseOnlyCommodities.has(view.itemId)) return false
   if (view.text.some(value => modifierMarkers.test(value.trim()))) return false

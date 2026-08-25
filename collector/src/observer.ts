@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import mineflayer, { type Bot } from 'mineflayer'
 import { BackendClient } from './backend.js'
-import { fingerprintWindow, parseOrder, plainText, projectItem } from './parser.js'
+import { fingerprintWindow, isMostPerItemOrder, parseOrder, plainText, projectItem } from './parser.js'
 import { EgressMismatchError, minecraftConnect, proxyAgent, verifyEgress } from './proxy.js'
 import { redactSensitiveText } from './redaction.js'
 import { SafeNavigator, type WindowView } from './safe-navigation.js'
@@ -160,6 +160,7 @@ class ObserverRuntime {
       window = await waitForWindow(bot, 10_000)
     }
     this.log('orders_window_opened')
+    window = await this.ensureMostPerItem(bot, navigator, window, clickDelay, task.id)
     let sessionId = randomUUID()
     const seen = new Set<string>()
     const limit = DISCOVERY_PAGE_LIMIT
@@ -249,6 +250,36 @@ class ObserverRuntime {
     }
   }
 
+  private async ensureMostPerItem(bot: Bot, navigator: SafeNavigator, initialWindow: NonNullable<Bot['currentWindow']>, clickDelay: number, taskId: string): Promise<NonNullable<Bot['currentWindow']>> {
+    let window = initialWindow
+    for (let attempt = 0; attempt <= 3; attempt++) {
+      this.ensureConnected(bot)
+      const captured = this.capture(window as unknown as WindowView)
+      const schema = navigator.schemaFor(captured.window)
+      if (!schema) {
+        this.writeCapture(taskId, captured.hash, captured.title, captured.views)
+        throw new SchemaHoldError('cannot verify Most Per Item on an unknown order screen')
+      }
+      const listingViews = captured.views.filter(view => schema.listingSlots.has(view.slot))
+      const parsed = listingViews.map(parseOrder).filter(value => value !== undefined)
+      if (isMostPerItemOrder(parsed, listingViews.length)) {
+        this.log('most_per_item_confirmed', `attempt=${attempt + 1} listings=${parsed.length}`)
+        return window
+      }
+      if (attempt === 3 || !navigator.controlAvailable('filter')) {
+        this.writeCapture(taskId, captured.hash, captured.title, captured.views)
+        throw new SchemaHoldError('Most Per Item ordering could not be verified after cycling the hopper')
+      }
+      this.log('most_per_item_filter_clicking', `attempt=${attempt + 1}`)
+      await sleep(clickDelay)
+      this.ensureConnected(bot)
+      await clickControlAndWaitForServer(bot, navigator, 'filter')
+      this.ensureConnected(bot)
+      window = bot.currentWindow ?? await waitForWindow(bot, 3_000)
+    }
+    throw new SchemaHoldError('Most Per Item ordering could not be verified')
+  }
+
   private ensureConnected(bot: Bot): void {
     if (!this.connected || this.bot !== bot || !bot.player) throw new Error('observer disconnected during order scan')
   }
@@ -287,7 +318,7 @@ async function waitForWindow(bot: Bot, timeout: number): Promise<NonNullable<Bot
   return await waitForEvent(bot, 'windowOpen', timeout) as NonNullable<Bot['currentWindow']>
 }
 
-async function clickControlAndWaitForServer(bot: Bot, navigator: SafeNavigator, kind: 'next_page' | 'refresh'): Promise<void> {
+async function clickControlAndWaitForServer(bot: Bot, navigator: SafeNavigator, kind: 'next_page' | 'refresh' | 'filter'): Promise<void> {
   const windowId = bot.currentWindow?.id
   if (windowId === undefined) throw new MenuSessionEndedError('order window closed before navigation')
   const update = serverWindowUpdate(bot, windowId, 5_000)

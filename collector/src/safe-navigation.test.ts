@@ -41,6 +41,18 @@ test('clicks only a verified non-transactional control', async () => {
   assert.deepEqual(bot.clicks, [50])
 })
 
+test('allows only the exact verified hopper filter', async () => {
+  const { bot, schemas, slots } = fixture()
+  slots[47] = { name: 'minecraft:hopper', displayName: 'Filter' }
+  schemas[0]!.controls = new Map([...schemas[0]!.controls, [47, { kind: 'filter', itemName: 'minecraft:hopper', label: /^Filter$/i }]])
+  const navigator = new SafeNavigator(bot, schemas)
+  await navigator.clickControl('filter')
+  assert.deepEqual(bot.clicks, [47])
+  slots[47] = { name: 'minecraft:hopper', displayName: 'Create Order' }
+  assert.equal(navigator.controlAvailable('filter'), false)
+  await assert.rejects(navigator.clickControl('filter'), /navigation denied/)
+})
+
 test('unknown windows are capture-only', async () => {
   const { bot } = fixture(); const navigator = new SafeNavigator(bot, [])
   await assert.rejects(navigator.clickControl('next_page'), /unknown order screen/)

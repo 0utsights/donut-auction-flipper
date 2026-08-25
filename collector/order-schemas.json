@@ -12,6 +12,12 @@
       ],
       "controls": [
         {
+          "slot": 47,
+          "kind": "filter",
+          "itemName": "hopper",
+          "labelPattern": "^Filter$"
+        },
+        {
           "slot": 49,
           "kind": "refresh",
           "itemName": "book",

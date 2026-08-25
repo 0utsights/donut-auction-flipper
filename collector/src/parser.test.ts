@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { parseOrder, projectItem } from './parser.js'
+import { isMostPerItemOrder, parseOrder, projectItem } from './parser.js'
 
 test('parses a conservative order fixture', () => {
   const view = projectItem({ name: 'diamond_block', count: 64, stackSize: 64, displayName: 'Diamond Block', nbt: { lore: ['Unit Reward: $5,000', 'Remaining: 640', 'Requested: 1000', 'Queue: #2', 'Buyer: Test_User', 'Order ID: ord_123'] } }, 10)
@@ -85,4 +85,18 @@ test('parses abbreviated Donut order totals without inflating remaining units', 
   assert.equal(order.unit_reward_cents, 1_910_000)
   assert.equal(order.requested_quantity, 700_000)
   assert.equal(order.remaining_quantity, 80_000)
+})
+
+test('proves most-per-item order only from a complete descending page', () => {
+  const orders = Array.from({ length: 10 }, (_, index) => ({
+    order_key: String(index), item_id: 'minecraft:stone', signature: 'minecraft:stone', quantity: 1,
+    max_stack_size: 64, unit_reward_cents: 10_000 - index, requested_quantity: 1, remaining_quantity: 1,
+    slot: index, raw_field_hash: String(index), signature_complete: true, identity_verified: true
+  }))
+  assert.equal(isMostPerItemOrder(orders, 10), true)
+  assert.equal(isMostPerItemOrder(orders, 11), false)
+  assert.equal(isMostPerItemOrder(orders.slice(0, 9), 9), false)
+  const wrong = [...orders]
+  wrong[6] = { ...wrong[6]!, unit_reward_cents: 20_000 }
+  assert.equal(isMostPerItemOrder(wrong, 10), false)
 })
