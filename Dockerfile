@@ -1,9 +1,12 @@
 FROM golang:1.26-alpine AS build
+ARG BUILD_DNS
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=0 go test ./... && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/donut-server ./cmd/server
+RUN if [ -n "$BUILD_DNS" ]; then echo "nameserver $BUILD_DNS" > /etc/resolv.conf; fi \
+    && CGO_ENABLED=0 go test ./... \
+    && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/donut-server ./cmd/server
 
 FROM alpine:3.22
 RUN adduser -D -u 10001 app && mkdir /data && chown app:app /data

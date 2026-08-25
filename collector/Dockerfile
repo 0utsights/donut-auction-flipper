@@ -1,7 +1,9 @@
 FROM node:22-alpine AS build
+ARG BUILD_DNS
 WORKDIR /app
 COPY package.json package-lock.json tsconfig.json ./
-RUN npm ci
+RUN if [ -n "$BUILD_DNS" ]; then echo "nameserver $BUILD_DNS" > /etc/resolv.conf; fi \
+    && npm ci
 COPY src ./src
 RUN npm test && npm prune --omit=dev
 
