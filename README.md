@@ -93,7 +93,8 @@ The composition runs the backend, multi-account collector, and Caddy HTTPS termi
 For the trusted second-PC deployment where Tailscale HTTPS certificates are not enabled, run only the backend and collector with the loopback-only override:
 
 ```bash
-docker compose -f compose.yaml -f compose.second-pc.yaml up -d --build auction-server order-collector
+./scripts/build-second-pc.sh
+docker compose -f compose.yaml -f compose.second-pc.yaml up -d auction-server order-collector
 ```
 
 From the player PC, run `scripts/second-pc-tunnel.ps1`. The existing Fabric and browser URL remains `http://127.0.0.1:8080`; SSH encrypts and authenticates the hop, and the backend is never bound to LAN. Enabling tailnet HTTPS later allows replacing this tunnel with the normal Caddy deployment.

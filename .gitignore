@@ -4,6 +4,8 @@ data/
 *.exe
 *.test
 *.out
+.second-pc-build/
+collector/.second-pc-build/
 coverage.html
 apps/dashboard/node_modules/
 apps/dashboard/.next/

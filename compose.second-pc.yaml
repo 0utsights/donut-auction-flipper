@@ -2,8 +2,7 @@ services:
   auction-server:
     build:
       context: .
-      args:
-        BUILD_DNS: ${SECOND_PC_BUILD_DNS:-9.9.9.9}
+      dockerfile: Dockerfile.prebuilt
     network_mode: host
     dns:
       - ${SECOND_PC_RUNTIME_DNS:-9.9.9.9}
@@ -18,8 +17,7 @@ services:
   order-collector:
     build:
       context: ./collector
-      args:
-        BUILD_DNS: ${SECOND_PC_BUILD_DNS:-9.9.9.9}
+      dockerfile: Dockerfile.prebuilt
     network_mode: host
     dns:
       - ${SECOND_PC_RUNTIME_DNS:-9.9.9.9}
