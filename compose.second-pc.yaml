@@ -1,0 +1,12 @@
+services:
+  auction-server:
+    network_mode: host
+    environment:
+      DN_ADDRESS: 127.0.0.1:8080
+      DN_CLIENT_TOKEN: ""
+      DN_OBSERVER_TOKEN: ""
+      DN_FABRIC_TOKEN: ""
+
+  order-collector:
+    network_mode: host
+

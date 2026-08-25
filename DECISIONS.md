@@ -78,6 +78,8 @@ Administrator, observer, and Fabric credentials use separate permission scopes a
 
 Production uses one Compose topology for the Go backend, Mineflayer manager, persistent storage, backups, and Caddy HTTPS termination on the second PC or Oracle host. Loopback HTTP is development-only. Collectors launch in shadow/capture mode, and combined `READY` recommendations remain unavailable until real order schemas, fill-rate calibration, observer agreement, and stability checks pass.
 
+The initial second-PC move uses host-networked containers bound only to `127.0.0.1` plus an authenticated SSH local-forward from the player PC. Tailscale HTTPS certificates are not enabled on the tailnet, so this provides encrypted remote access without exposing backend HTTP on LAN or changing tailnet-wide settings. The standard Caddy HTTPS topology remains the production/public path once certificates are enabled.
+
 ## 2026-08-22 — Barebones client and debug UI
 
 The in-game screen and backend debug page are intentionally plain, information-first interfaces. The Fabric screen uses an opaque fill and does not call `renderBackground`, fixing the Minecraft 1.21.11 `Can only blur once per frame` crash. Styling remains deferred.
