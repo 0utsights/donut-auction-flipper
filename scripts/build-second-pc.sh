@@ -16,7 +16,7 @@ docker run --rm --dns "$build_dns" \
   -v "$repo_dir/.second-pc-build:/out" \
   -w /src \
   golang:1.26-alpine \
-  sh -c 'CGO_ENABLED=0 go test ./... && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/donut-server ./cmd/server'
+  sh -c 'CGO_ENABLED=0 go test ./cmd/... ./internal/... && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/donut-server ./cmd/server'
 
 docker run --rm --dns "$build_dns" \
   --user "$user_id:$group_id" \
