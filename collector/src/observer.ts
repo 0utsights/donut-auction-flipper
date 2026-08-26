@@ -28,6 +28,11 @@ const AUTOMATIC_FOCUSED_RUNTIME_MS = 120_000
 // 200 pages, so discovery must continue until the server removes pagination or
 // refuses to advance it. Connections are rotated after every completed pass.
 const DISCOVERY_PAGE_LIMIT = 1_000
+// Device-code authorization requires a human browser round trip and regularly
+// takes longer than the normal network-login budget. Keep one code stable long
+// enough to complete it instead of killing the process and rotating the code.
+// Cached-token logins still resolve this wait as soon as the server spawns.
+const MICROSOFT_LOGIN_TIMEOUT_MS = 10 * 60_000
 
 class ObserverRuntime {
   private bot: Bot | undefined
@@ -124,7 +129,7 @@ class ObserverRuntime {
       }
       this.report(new Error(`connection ended: ${safeText(reason, 200)}`))
     })
-    await waitForEvent(bot, 'spawn', 30_000)
+    await waitForEvent(bot, 'spawn', MICROSOFT_LOGIN_TIMEOUT_MS)
     await waitForStableSpawn(bot, 5_000, 20_000)
     // In Mineflayer 4.37.1 this public event is the supported internal path that
     // suspends idle movement updates. No observer code subscribes to mount and

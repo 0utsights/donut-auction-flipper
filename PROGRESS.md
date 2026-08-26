@@ -38,6 +38,7 @@ Last updated: 2026-08-25
 7. Fixed optimistic window-state submissions, partial-page connection reuse, watch deletion versus active-lease races, insecure remote HTTP configuration, unbounded backend calls, lifetime-based reconnect delays, and proxy-egress restart loops.
 8. Added the Fabric-only one-order execution boundary: a separate explicit arm, exact cent/stack escrow checks, a DonutSMP hostname allowlist, live feed/order/auction freshness, local reserve/slot/session-budget enforcement, verified chest/dialog transitions, exact registry-item review matching, and a single final action.
 9. Hardened that executor against disconnects, stalled screens, changed candidates, duplicate pending signatures, quantity-prefix and money-suffix parser collisions, raw diagnostic leakage, and active-order rows. Server outcomes remain conservatively pending until real success/failure fixtures are captured.
+10. Fixed Microsoft device authentication repeatedly invalidating its own login code: the collector now keeps one device-code attempt alive for ten minutes while cached-token logins still return immediately.
 
 A fresh post-executor pass found no further code-only improvement that outweighed the risk of inventing button or server-outcome behavior without a low-value live acceptance fixture.
 
