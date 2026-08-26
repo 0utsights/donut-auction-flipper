@@ -155,6 +155,33 @@ func TestObserveBatchDoesNotRevalueUnchangedListings(t *testing.T) {
 	}
 }
 
+func TestObserveBatchImmediatelyRevaluesMarketMovingAsk(t *testing.T) {
+	e := NewEngine()
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	e.now = func() time.Time { return now }
+	for index := 0; index < 12; index++ {
+		e.AddTransactions([]Transaction{{
+			SellerName: fmt.Sprintf("seller-%d", index), Item: Item{ID: "diamond", Quantity: 1},
+			TotalPrice: 4_000_000, SoldAt: now.Add(-time.Duration(index) * time.Minute),
+		}})
+	}
+	e.ObserveBatch([]Listing{
+		{AuthoritativeID: "baseline-1", SellerName: "baseline-1", Item: Item{ID: "diamond", Quantity: 1}, TotalPrice: 3_500_000},
+		{AuthoritativeID: "baseline-2", SellerName: "baseline-2", Item: Item{ID: "diamond", Quantity: 1}, TotalPrice: 3_600_000},
+		{AuthoritativeID: "baseline-3", SellerName: "baseline-3", Item: Item{ID: "diamond", Quantity: 1}, TotalPrice: 3_700_000},
+	})
+	version := e.Version()
+	now = now.Add(time.Second)
+	e.ObserveBatch([]Listing{{AuthoritativeID: "non-moving", SellerName: "high", Item: Item{ID: "diamond", Quantity: 1}, TotalPrice: 5_000_000}})
+	if after := e.Version(); after != version {
+		t.Fatalf("non-moving ask bypassed the refresh interval: before=%d after=%d", version, after)
+	}
+	e.ObserveBatch([]Listing{{AuthoritativeID: "market-moving", SellerName: "low", Item: Item{ID: "diamond", Quantity: 1}, TotalPrice: 3_000_000}})
+	if after := e.Version(); after <= version {
+		t.Fatalf("market-moving ask was not applied immediately: before=%d after=%d", version, after)
+	}
+}
+
 func TestStackReferenceIsCappedBySingularUnitValue(t *testing.T) {
 	e := NewEngine()
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)

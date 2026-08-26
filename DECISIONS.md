@@ -88,6 +88,8 @@ The constrained second-PC profile runs the official API newest-page lane every 5
 
 The fast lane scores only the newest page it just fetched; the background broad pass remains responsible for the wider active book. Repeated identical listings refresh their liveness without rebuilding valuations, and an unchanged page republishes freshness from the previous immutable result instead of rescoring thousands of older listings.
 
+A new ask that reaches or beats the current active reference is market-moving and triggers valuation immediately. Higher, non-moving depth is coalesced per item for up to five seconds; same-auction economic edits and removals remain immediate. This preserves low-price flip latency while bounding repeated valuation work on a busy newest page.
+
 Retention deletes are intentionally committed in small batches and yield between batches. The child-row foreign key has a supporting `order_rows(scan_id)` index so cascades do not repeatedly scan the complete observation table. Maintenance therefore shares the single SQLite connection with live observer submissions instead of holding it for a database-wide transaction.
 
 The two-minute evidence window and 24-hour fill window have timestamp-leading indexes. Candidate refreshes must seek directly into fresh rows; they may not scan the retained multi-million-row observation table on every collector page or API poll.

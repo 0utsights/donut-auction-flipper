@@ -8,6 +8,7 @@ import (
 )
 
 const activeListingFallbackTTL = 2 * time.Minute
+const activeValuationRefreshInterval = 5 * time.Second
 const transactionRetention = 31 * 24 * time.Hour
 const QuantityValuationModelVersion = "robust-v4-price-volume-quantity"
 
@@ -165,7 +166,10 @@ func (e *Engine) Observe(raw Listing) (Listing, bool) {
 	if previousSignature != "" && previousSignature != l.Signature.Exact {
 		e.refreshActiveValuationLocked(previousSignature)
 	}
-	if changed {
+	if changed && duplicate {
+		e.lastActiveRecalc[l.Signature.Exact] = now
+		e.refreshActiveValuationLocked(l.Signature.Exact)
+	} else if changed {
 		e.refreshActiveValuationMaybeLocked(l.Signature, l.UnitPrice, now)
 	}
 	return l, duplicate
@@ -192,6 +196,9 @@ func (e *Engine) ObserveBatch(rawListings []Listing) ([]Listing, int) {
 		if !changed {
 			continue
 		}
+		if !duplicate && !e.activeValuationRefreshDueLocked(listing.Signature, listing.UnitPrice, now) {
+			continue
+		}
 		touchedSignatures[listing.Signature.Exact] = struct{}{}
 		touchedBases[listing.Signature.Base] = struct{}{}
 		if previousSignature != "" && previousSignature != listing.Signature.Exact {
@@ -199,6 +206,7 @@ func (e *Engine) ObserveBatch(rawListings []Listing) ([]Listing, int) {
 		}
 	}
 	for signature := range touchedSignatures {
+		e.lastActiveRecalc[signature] = now
 		e.recalculateLocked(signature)
 	}
 	for base := range touchedBases {
@@ -306,10 +314,17 @@ func (e *Engine) recalculateLocked(sig string) {
 }
 
 func (e *Engine) refreshActiveValuationMaybeLocked(signature Signature, unitPrice int64, now time.Time) {
+	if !e.activeValuationRefreshDueLocked(signature, unitPrice, now) {
+		return
+	}
+	e.refreshActiveValuationLocked(signature.Exact)
+}
+
+func (e *Engine) activeValuationRefreshDueLocked(signature Signature, unitPrice int64, now time.Time) bool {
 	hasExactEvidence := len(e.transactions[signature.Exact]) >= 3
 	hasBaseEvidence := signature.Base != signature.Exact && len(e.baseTransactions[signature.Base]) >= 3
 	if !hasExactEvidence && !hasBaseEvidence {
-		return
+		return false
 	}
 	urgent := false
 	if valuation, ok := e.valuations[signature.Exact]; !ok {
@@ -317,11 +332,11 @@ func (e *Engine) refreshActiveValuationMaybeLocked(signature Signature, unitPric
 	} else {
 		urgent = valuation.ActiveReferenceAsk == 0 || (unitPrice > 0 && unitPrice <= valuation.ActiveReferenceAsk)
 	}
-	if !urgent && now.Sub(e.lastActiveRecalc[signature.Exact]) < 250*time.Millisecond {
-		return
+	if !urgent && now.Sub(e.lastActiveRecalc[signature.Exact]) < activeValuationRefreshInterval {
+		return false
 	}
 	e.lastActiveRecalc[signature.Exact] = now
-	e.refreshActiveValuationLocked(signature.Exact)
+	return true
 }
 
 func (e *Engine) deleteValuationLocked(signature string) {
