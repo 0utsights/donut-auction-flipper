@@ -54,8 +54,8 @@ SQLite WAL retains complete/incomplete scans, normalized order rows, proven quan
 An order disappearance is not a fill. A fill event requires a decrease in the same observer/order key. Evidence graduates through:
 
 - `captured`: at least one parsed observation.
-- `research`: at least three complete scans spanning ten minutes.
-- `actionable`: five fill events across three orders, at least 15 minutes of evidence, stable current pricing, no observer conflict, and a fresh snapshot.
+- `research`: at least three independent menu sessions spanning ten seconds.
+- `actionable`: at least five sessions and five bounded focused-watch reductions across three stable keys spanning 30 seconds, stable current pricing, no observer conflict, and a fresh snapshot.
 
 Combined actionability also requires five exact-quantity, near-target auction sales from three sellers in 24 hours, at least 50% model confidence, and target-price sale evidence no older than two hours.
 
@@ -74,7 +74,7 @@ Priority is the risk-adjusted profit/day multiplied by conservative attainable b
 
 Outstanding quantity in other players' buy orders is demand, not sell-side fill capacity. It is shown as context and may bound the immediate auction-to-existing-order route, but cannot scale a new order-to-auction position. An uncalibrated order-to-auction research idea receives one exploratory batch; only confirmed short-gap fill velocity unlocks multi-batch capacity.
 
-Fill evidence is trusted only when the same observer sees the same stable order identity and price decrease within two minutes. Older inferred reductions remain stored with confirmation level zero for audit, but do not contribute volume, evidence graduation, completion estimates, or ranking.
+Donut's live menu does not expose owner/order identity on the focused rows. Fill evidence is therefore trusted at level one only when the same observer sees the same target signature, page, slot-derived stable key, requested quantity, and unit reward decrease within two minutes of the same leased focused-watch task. A server-visible owner/order ID upgrades it to level two. Discovery, neighboring rows, cross-page matches, disappearances, and older inferred reductions remain at level zero and do not contribute volume, graduation, completion estimates, or ranking. Discovery pagination contributes one price/evidence sample per session; focused refreshes contribute separate sessions, so later price tiers cannot masquerade as volatility.
 
 ## Fabric allocation
 

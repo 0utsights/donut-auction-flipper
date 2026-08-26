@@ -451,6 +451,35 @@ func TestCurrentPriceAndQueueDoNotUseHistoricalBest(t *testing.T) {
 	}
 }
 
+func TestPriceStabilityUsesTopOfBookPerSessionNotPaginationDepth(t *testing.T) {
+	system, err := NewSystem(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	ctx := context.Background()
+	_, _ = system.Register(ctx, ObserverRegistration{ObserverID: "one", ParserVersion: "p1", ProxyLabel: "proxy"})
+	base := time.Now().UTC().Add(-40 * time.Second)
+	for pass := 0; pass < 3; pass++ {
+		for page, reward := range []int64{100, 90, 80} {
+			value := order(fmt.Sprintf("order-%d-%d", pass, page), 100)
+			value.UnitRewardCents = reward
+			batch := scan("one", "", fmt.Sprintf("session-%d", pass), page+1, base.Add(time.Duration(pass*15)*time.Second), value)
+			batch.ContentHash = fmt.Sprintf("%064x", 1_000+pass*10+page)
+			if _, err := system.SaveScan(ctx, batch); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	evidence, err := system.store.Evidence(ctx)
+	if err != nil || len(evidence) != 1 {
+		t.Fatalf("evidence=%+v err=%v", evidence, err)
+	}
+	if evidence[0].CompleteScans != 3 || evidence[0].BestUnitRewardCents != 100 || !evidence[0].Stable {
+		t.Fatalf("pagination tiers corrupted top-of-book stability: %+v", evidence[0])
+	}
+}
+
 func TestFillInferenceRequiresObservedQuantityDecrease(t *testing.T) {
 	system, err := NewSystem(Config{})
 	if err != nil {
@@ -475,7 +504,7 @@ func TestFillInferenceRequiresObservedQuantityDecrease(t *testing.T) {
 				orders[orderIndex].RemainingQuantity -= 1
 			}
 		}
-		batch := scan("one", "", "steady-session", 1, base.Add(observedAt[index]), orders...)
+		batch := scan("one", "", fmt.Sprintf("steady-session-%d", index), 1, base.Add(observedAt[index]), orders...)
 		batch.ContentHash = fmt.Sprintf("%064x", index+100)
 		batch.TaskID, batch.LeaseToken = task.ID, task.LeaseToken
 		if _, err := system.SaveScan(ctx, batch); err != nil {
@@ -602,15 +631,12 @@ func TestFocusedWatchCannotConfirmNeighborItemFill(t *testing.T) {
 		t.Fatal(err)
 	}
 	evidence, err := system.store.Evidence(ctx)
-	if err != nil || len(evidence) != 1 {
-		t.Fatalf("evidence=%+v err=%v", evidence, err)
-	}
-	if evidence[0].FillEvents != 0 || evidence[0].FilledUnits24h != 0 {
-		t.Fatalf("neighbor item became focused fill evidence: %+v", evidence[0])
+	if err != nil || len(evidence) != 0 {
+		t.Fatalf("neighbor item entered focused evidence: evidence=%+v err=%v", evidence, err)
 	}
 }
 
-func TestFocusedWatchCannotConfirmSyntheticOrderIdentity(t *testing.T) {
+func TestFocusedWatchConfirmsBoundedSyntheticOrderIdentity(t *testing.T) {
 	system, err := NewSystem(Config{})
 	if err != nil {
 		t.Fatal(err)
@@ -641,8 +667,12 @@ func TestFocusedWatchCannotConfirmSyntheticOrderIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	evidence, err := system.store.Evidence(ctx)
-	if err != nil || len(evidence) != 1 || evidence[0].FillEvents != 0 {
-		t.Fatalf("synthetic identity became fill evidence: evidence=%+v err=%v", evidence, err)
+	if err != nil || len(evidence) != 1 || evidence[0].FillEvents != 1 || evidence[0].FilledUnits24h != 50 {
+		t.Fatalf("bounded synthetic reduction was not retained: evidence=%+v err=%v", evidence, err)
+	}
+	var level int
+	if err := system.store.db.QueryRow(`SELECT confirmation_level FROM fill_events`).Scan(&level); err != nil || level != 1 {
+		t.Fatalf("synthetic confirmation level=%d err=%v", level, err)
 	}
 }
 

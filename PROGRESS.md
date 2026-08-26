@@ -7,6 +7,7 @@ Last updated: 2026-08-25
 - The auction-only release remains frozen at `auction-only-v1.0.0` / `codex/auction-only`.
 - The Go backend still collects auctions from the official API and now persists observer registration, leased tasks, idempotent order snapshots, fill evidence, watches, diagnostics, and backups in SQLite WAL.
 - Order evidence graduates through captured, research, actionable, and conflict/hold states. Disappeared orders are ambiguous; only observed quantity reductions create fills.
+- Live-menu evidence now counts independent sessions rather than pagination pages, compares top-of-book prices per session, and accepts only bounded same-page focused reductions when Donut omits owner/order IDs. The fast path can graduate an actively filling, stable market after 30 seconds of focused evidence; auction liquidity gates remain unchanged.
 - Combined candidates model exact batch quantity, fees, capital, order/auction slots, queue position, completion probability, cycle time, conservative volume, and risk-adjusted profit/day. There is no fixed `$100k` threshold.
 - The `/order-auction-flipper` page exposes real observer health, freshness, scan coverage, disagreements, evidence history, candidates, rejection reasons, and a backend-only `$10M` reference portfolio. It generates no fake market rows.
 - The Mineflayer collector manager launches an isolated child per account, validates dedicated proxy egress, uses separate Microsoft token caches, registers with the backend, long-polls leased tasks, reconnects independently, and submits order snapshots.
@@ -18,7 +19,7 @@ Last updated: 2026-08-25
 ## Verified locally
 
 - `go test ./...` and `go vet ./...` pass. Tests cover authenticated leases, idempotent scans, capture-only exclusion, fill/disappearance semantics, current-price freshness, shared-watch lifecycle, exact-quantity valuation, candidate executable volume, backups, scoped auth, API handlers, and diagnostic redaction.
-- Node TypeScript build and 17 parser, navigation, proxy, configuration, and redaction tests pass; `npm audit --omit=dev` reports zero vulnerabilities.
+- Node TypeScript build and 20 parser, navigation, proxy, configuration, and redaction tests pass; `npm audit --omit=dev` reports zero vulnerabilities.
 - Fabric JUnit/build passes on Minecraft 1.21.11, Java 21, Loader 0.19.2, Fabric API 0.141.6, Loom 1.17.19, and Gradle 9.6.1.
 - Candidate-frontier benchmark: approximately 135–204µs/op for 100 evidence rows on the local i5-11600K, with the upper result measured while the live backend and observer were running. Existing market benchmarks remain near or under roughly 2ms/op for their checked-in workloads.
 - `docker compose config --quiet` validates with placeholder environment credentials. The Docker Desktop Linux daemon is not running, so containers could not be executed locally.

@@ -92,6 +92,11 @@ func (s *Store) migrate() error {
 			complete_scans INTEGER NOT NULL,first_seen_ms INTEGER NOT NULL,last_seen_ms INTEGER NOT NULL,
 			observed_quantity INTEGER NOT NULL,max_stack_size INTEGER NOT NULL,available_units INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE INDEX IF NOT EXISTS order_evidence_recent ON order_evidence_summary(last_seen_ms DESC)`,
+		`CREATE TABLE IF NOT EXISTS order_evidence_sessions (
+			signature TEXT NOT NULL,observer_id TEXT NOT NULL,session_id TEXT NOT NULL,
+			first_seen_ms INTEGER NOT NULL,last_seen_ms INTEGER NOT NULL,
+			PRIMARY KEY(signature,observer_id,session_id))`,
+		`CREATE INDEX IF NOT EXISTS order_evidence_sessions_signature ON order_evidence_sessions(signature,last_seen_ms DESC)`,
 		`CREATE TABLE IF NOT EXISTS fill_events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, signature TEXT NOT NULL, order_key TEXT NOT NULL,
 			observer_id TEXT NOT NULL, units INTEGER NOT NULL, unit_reward INTEGER NOT NULL DEFAULT 0,
@@ -158,6 +163,17 @@ func (s *Store) migrate() error {
 			AND newer.identity_verified=1 AND older.identity_verified=1)`); err != nil {
 		return fmt.Errorf("quarantine cross-page fill evidence: %w", err)
 	}
+	// Count independent menu sessions, not pagination pages. Discovery keeps one
+	// session across the full book, while focused refreshes intentionally rotate
+	// session IDs. A long traversal therefore cannot fake repeated evidence.
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO order_evidence_sessions(signature,observer_id,session_id,first_seen_ms,last_seen_ms)
+		SELECT r.signature,r.observer_id,s.session_id,MIN(r.observed_ms),MAX(r.observed_ms)
+		FROM order_rows r JOIN scans s ON s.id=r.scan_id LEFT JOIN tasks t ON t.id=s.task_id
+		WHERE r.unit_reward_cents>0 AND s.complete=1 AND s.unknown_schema=0
+			AND (COALESCE(t.kind,'')<>'focused_watch' OR t.signature=r.signature)
+		GROUP BY r.signature,r.observer_id,s.session_id`); err != nil {
+		return fmt.Errorf("backfill order evidence sessions: %w", err)
+	}
 	availabilityAdded := false
 	if _, err := s.db.Exec(`ALTER TABLE order_evidence_summary ADD COLUMN available_units INTEGER NOT NULL DEFAULT 0`); err == nil {
 		availabilityAdded = true
@@ -190,6 +206,10 @@ func (s *Store) migrate() error {
 			SELECT MAX(latest.observed_ms) FROM order_rows latest WHERE latest.signature=order_evidence_summary.signature AND latest.unit_reward_cents>0)),0)`); err != nil {
 			return fmt.Errorf("backfill order availability: %w", err)
 		}
+	}
+	if _, err := s.db.Exec(`UPDATE order_evidence_summary SET complete_scans=COALESCE((
+		SELECT COUNT(*) FROM order_evidence_sessions samples WHERE samples.signature=order_evidence_summary.signature),0)`); err != nil {
+		return fmt.Errorf("normalize complete order scans: %w", err)
 	}
 	return nil
 }
@@ -410,8 +430,15 @@ func (s *Store) SaveScan(ctx context.Context, batch ScanBatch) (bool, error) {
 			if previousErr == nil && previous > order.RemainingQuantity && batch.Complete {
 				confirmation := 0
 				gap := batch.ObservedAt.UnixMilli() - previousObserved
-				if taskKind == "focused_watch" && taskSignature == order.Signature && order.IdentityVerified && previousIdentity && gap > 0 && gap <= (2*time.Minute).Milliseconds() {
-					confirmation = 2
+				if taskKind == "focused_watch" && taskSignature == order.Signature && gap > 0 && gap <= (2*time.Minute).Milliseconds() {
+					// The live menu omits owner/order identity. Inside the same
+					// authenticated focused lease and page, the stable synthetic key
+					// still proves an in-place quantity reduction. Explicit identity is
+					// retained as the stronger level-two signal.
+					confirmation = 1
+					if order.IdentityVerified && previousIdentity {
+						confirmation = 2
+					}
 				}
 				_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO fill_events(signature,order_key,observer_id,units,unit_reward,unit_reward_cents,confirmation_level,previous_observed_ms,observed_ms) VALUES(?,?,?,?,?,?,?,?,?)`,
 					order.Signature, order.OrderKey, batch.ObserverID, previous-order.RemainingQuantity, 0, order.UnitRewardCents, confirmation, previousObserved, batch.ObservedAt.UnixMilli())
@@ -424,12 +451,27 @@ func (s *Store) SaveScan(ctx context.Context, batch ScanBatch) (bool, error) {
 		}
 		for _, summary := range summaries {
 			order := summary.order
+			// A focused page also contains unrelated rows. Keep their raw rows for
+			// diagnostics, but only the assigned signature may update evidence.
+			if taskKind == "focused_watch" && taskSignature != order.Signature {
+				continue
+			}
+			sampleResult, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO order_evidence_sessions(signature,observer_id,session_id,first_seen_ms,last_seen_ms)
+				VALUES(?,?,?,?,?)`, order.Signature, batch.ObserverID, batch.SessionID, batch.ObservedAt.UnixMilli(), batch.ObservedAt.UnixMilli())
+			if err != nil {
+				return false, err
+			}
+			newSample, _ := sampleResult.RowsAffected()
+			if _, err = tx.ExecContext(ctx, `UPDATE order_evidence_sessions SET last_seen_ms=MAX(last_seen_ms,?)
+				WHERE signature=? AND observer_id=? AND session_id=?`, batch.ObservedAt.UnixMilli(), order.Signature, batch.ObserverID, batch.SessionID); err != nil {
+				return false, err
+			}
 			_, err = tx.ExecContext(ctx, `INSERT INTO order_evidence_summary(signature,item_id,display_name,complete_scans,first_seen_ms,last_seen_ms,observed_quantity,max_stack_size,available_units)
 				VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(signature) DO UPDATE SET
-				item_id=excluded.item_id,display_name=excluded.display_name,complete_scans=order_evidence_summary.complete_scans+1,
+				item_id=excluded.item_id,display_name=excluded.display_name,complete_scans=order_evidence_summary.complete_scans+?,
 				first_seen_ms=MIN(order_evidence_summary.first_seen_ms,excluded.first_seen_ms),last_seen_ms=MAX(order_evidence_summary.last_seen_ms,excluded.last_seen_ms),
 				observed_quantity=excluded.observed_quantity,max_stack_size=MAX(order_evidence_summary.max_stack_size,excluded.max_stack_size),available_units=excluded.available_units`,
-				order.Signature, order.ItemID, order.DisplayName, 1, batch.ObservedAt.UnixMilli(), batch.ObservedAt.UnixMilli(), order.Quantity, order.MaxStackSize, summary.availableUnits)
+				order.Signature, order.ItemID, order.DisplayName, newSample, batch.ObservedAt.UnixMilli(), batch.ObservedAt.UnixMilli(), order.Quantity, order.MaxStackSize, summary.availableUnits, newSample)
 			if err != nil {
 				return false, err
 			}
@@ -656,7 +698,7 @@ func (s *Store) enrichEvidence(ctx context.Context, evidence []Evidence) error {
 	}
 
 	fillRows, err := s.db.QueryContext(ctx, `SELECT signature,COUNT(*),COALESCE(SUM(units),0),COUNT(DISTINCT order_key)
-		FROM fill_events WHERE unit_reward_cents>0 AND confirmation_level>=2 AND observed_ms>=? GROUP BY signature`, s.now().Add(-24*time.Hour).UnixMilli())
+		FROM fill_events WHERE unit_reward_cents>0 AND confirmation_level>=1 AND observed_ms>=? GROUP BY signature`, s.now().Add(-24*time.Hour).UnixMilli())
 	if err != nil {
 		return err
 	}
@@ -699,10 +741,13 @@ func (s *Store) enrichEvidence(ctx context.Context, evidence []Evidence) error {
 	}
 
 	priceRows, err := s.db.QueryContext(ctx, `WITH samples AS (
-		SELECT signature,MAX(unit_reward_cents) AS reward,
-		COALESCE(MIN(CASE WHEN price_position>0 THEN price_position END),0) AS position,observer_id,
-		ROW_NUMBER() OVER (PARTITION BY signature ORDER BY MAX(observed_ms) DESC) AS sample_rank
-		FROM order_rows WHERE unit_reward_cents>0 AND observed_ms>=? GROUP BY signature,scan_id,observer_id)
+		SELECT r.signature,MAX(r.unit_reward_cents) AS reward,
+		COALESCE(MIN(CASE WHEN r.price_position>0 THEN r.price_position END),0) AS position,r.observer_id,
+		ROW_NUMBER() OVER (PARTITION BY r.signature ORDER BY MAX(r.observed_ms) DESC) AS sample_rank
+		FROM order_rows r JOIN scans s ON s.id=r.scan_id LEFT JOIN tasks t ON t.id=s.task_id
+		WHERE r.unit_reward_cents>0 AND r.observed_ms>=?
+			AND (COALESCE(t.kind,'')<>'focused_watch' OR t.signature=r.signature)
+		GROUP BY r.signature,s.session_id,r.observer_id)
 		SELECT signature,reward,position,observer_id FROM samples WHERE sample_rank<=32`, recent)
 	if err != nil {
 		return err
@@ -764,11 +809,11 @@ func classifyEvidence(evidence *Evidence, priceSamples int) {
 	span := evidence.LastSeenAt.Sub(evidence.FirstSeenAt)
 	evidence.Tier = "captured"
 	evidence.Reason = "waiting for repeated complete scans"
-	if evidence.CompleteScans >= 3 && span >= 10*time.Minute {
+	if evidence.CompleteScans >= 3 && span >= 10*time.Second {
 		evidence.Tier = "research"
 		evidence.Reason = "waiting for confirmed fills and independent orders"
 	}
-	if evidence.CompleteScans >= 3 && span >= 15*time.Minute && evidence.FillEvents >= 5 && evidence.DistinctOrders >= 3 && evidence.Stable && !evidence.Conflict {
+	if evidence.CompleteScans >= 5 && span >= 30*time.Second && evidence.FillEvents >= 5 && evidence.DistinctOrders >= 3 && evidence.Stable && !evidence.Conflict {
 		evidence.Tier = "actionable"
 		evidence.Reason = ""
 	}
@@ -835,7 +880,7 @@ func (s *Store) scanCoverage(ctx context.Context) (ScanCoverage, error) {
 	if err != nil {
 		return value, err
 	}
-	if err = s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(CASE WHEN confirmation_level>=2 THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN confirmation_level<2 THEN 1 ELSE 0 END),0) FROM fill_events WHERE unit_reward_cents>0`).Scan(&value.ConfirmedFills, &value.QuarantinedFills); err != nil {
+	if err = s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(CASE WHEN confirmation_level>=1 THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN confirmation_level<1 THEN 1 ELSE 0 END),0) FROM fill_events WHERE unit_reward_cents>0`).Scan(&value.ConfirmedFills, &value.QuarantinedFills); err != nil {
 		return value, err
 	}
 	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT signature) FROM order_rows WHERE signature_complete=1 AND unit_reward_cents>0 AND observed_ms>=?`, s.now().Add(-2*time.Minute).UnixMilli()).Scan(&value.CompleteSignatures); err != nil {
@@ -848,7 +893,7 @@ func (s *Store) scanCoverage(ctx context.Context) (ScanCoverage, error) {
 }
 
 func (s *Store) recentFills(ctx context.Context) ([]FillEvidence, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT signature,order_key,observer_id,units,unit_reward_cents,confirmation_level,previous_observed_ms,observed_ms FROM fill_events WHERE unit_reward_cents>0 AND confirmation_level>=2 ORDER BY observed_ms DESC LIMIT 100`)
+	rows, err := s.db.QueryContext(ctx, `SELECT signature,order_key,observer_id,units,unit_reward_cents,confirmation_level,previous_observed_ms,observed_ms FROM fill_events WHERE unit_reward_cents>0 AND confirmation_level>=1 ORDER BY observed_ms DESC LIMIT 100`)
 	if err != nil {
 		return nil, err
 	}
