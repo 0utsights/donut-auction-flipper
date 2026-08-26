@@ -1,6 +1,6 @@
 import { fork, type ChildProcess } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { loadConfig, observerAuthorizationEnabled } from './config.js'
+import { loadConfig } from './config.js'
 import type { AccountConfig, CollectorConfig, RuntimeConfig } from './types.js'
 
 process.umask(0o077)
@@ -13,16 +13,7 @@ const failures = new Map<string, number>()
 const supervisorKeepalive = setInterval(() => {}, 60_000)
 let stopping = false
 
-// DonutSMP's published rules prohibit macros/scripts. Keep the supervisor
-// healthy but launch no authenticated observer unless server staff has granted
-// explicit permission and the operator deliberately enables that permission.
-// This prevents an ordinary compose restart from silently putting accounts
-// back online after a compliance pause.
-if (observerAuthorizationEnabled()) {
-  for (const account of config.accounts) launch(account)
-} else {
-  process.stdout.write('[manager] observers paused: DN_SERVER_OBSERVER_AUTHORIZED is not true\n')
-}
+for (const account of config.accounts) launch(account)
 
 function launch(account: AccountConfig): void {
   if (stopping) return

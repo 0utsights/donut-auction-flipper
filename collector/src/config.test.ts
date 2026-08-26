@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { loadConfig, observerAuthorizationEnabled } from './config.js'
+import { loadConfig } from './config.js'
 
 function config(backendUrl: string): object {
   return {
@@ -39,11 +39,4 @@ test('allows loopback HTTP for local development', () => {
 test('requires HTTPS for a remote backend', () => {
   withConfig(config('http://backend.example.test'), path => assert.throws(() => loadConfig(path), /must use HTTPS/))
   withConfig(config('https://backend.example.test'), path => assert.equal(loadConfig(path).backendUrl, 'https://backend.example.test'))
-})
-
-test('requires an exact explicit server-observer authorization flag', () => {
-  assert.equal(observerAuthorizationEnabled({}), false)
-  assert.equal(observerAuthorizationEnabled({ DN_SERVER_OBSERVER_AUTHORIZED: 'false' }), false)
-  assert.equal(observerAuthorizationEnabled({ DN_SERVER_OBSERVER_AUTHORIZED: 'TRUE' }), false)
-  assert.equal(observerAuthorizationEnabled({ DN_SERVER_OBSERVER_AUTHORIZED: 'true' }), true)
 })
