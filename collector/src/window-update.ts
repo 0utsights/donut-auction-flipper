@@ -22,6 +22,7 @@ export function beginServerWindowUpdate(
 ): { promise: Promise<void>; cancel(): void } {
   let settled = false
   let acknowledged = false
+  let activeWindowID = windowID
   let quietTimer: ReturnType<typeof setTimeout> | undefined
   let resolveUpdate!: () => void
   let rejectUpdate!: (error: Error) => void
@@ -53,10 +54,13 @@ export function beginServerWindowUpdate(
     if (quietTimer) clearTimeout(quietTimer)
     quietTimer = setTimeout(succeed, quietMilliseconds)
   }
-  const matches = (packet: { windowId?: number }): boolean => packet.windowId === windowID
+  const matches = (packet: { windowId?: number }): boolean => packet.windowId === activeWindowID
   const windowItems = (packet: { windowId?: number }): void => { if (matches(packet)) acknowledge() }
   const setSlot = (packet: { windowId?: number }): void => { if (matches(packet)) acknowledge() }
-  const openWindow = (): void => acknowledge()
+  const openWindow = (packet: { windowId?: number }): void => {
+    if (typeof packet.windowId === 'number') activeWindowID = packet.windowId
+    acknowledge()
+  }
   const closeWindow = (packet: { windowId?: number }): void => {
     if (matches(packet)) fail(new WindowClosedError('order window closed during navigation'))
   }
