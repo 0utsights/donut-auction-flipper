@@ -4,6 +4,10 @@ import type { AccountConfig, CollectorConfig } from './types.js'
 
 const idPattern = /^[A-Za-z0-9_-]{1,64}$/
 
+export function observerAuthorizationEnabled(environment: NodeJS.ProcessEnv = process.env): boolean {
+  return environment.DN_SERVER_OBSERVER_AUTHORIZED === 'true'
+}
+
 export function loadConfig(path = process.env.DN_COLLECTOR_CONFIG ?? './accounts.json'): CollectorConfig {
   const absolute = resolve(path)
   assertPrivateFile(absolute)

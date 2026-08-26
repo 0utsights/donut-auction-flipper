@@ -16,7 +16,9 @@ Verified against the live DonutSMP 1.21.11 client on 2026-08-25. The exploration
 
 The review total observed was exactly `amount × unit price`; no additional creation fee was displayed. This must be revalidated with a low-value live order before relying on it because the server can change its economy rules.
 
-## Fabric automation contract
+## Fabric automation contract (design only; live execution paused)
+
+DonutSMP's published terms currently prohibit macros/scripts and unfair-advantage modifications. The state machine below is retained as a testable design, but it must not be enabled on DonutSMP without explicit written staff authorization. Until then, Fabric may show the values and checklist while the player performs every interaction manually.
 
 Model the wizard as a fail-closed state machine rather than coordinate macros:
 
@@ -35,7 +37,7 @@ Before exposing the final confirmation, Fabric must verify:
 - Auction exit valuation is still current and profitable after fees.
 - No equivalent personal order is already active or pending locally.
 
-The first implementation should prepare the wizard and require the player to press the final `Create Order` control. A later Fabric-only executor may press it after a separately visible arming step and a last-moment revalidation. Mineflayer remains observation-only and must never enter `Your Orders`, the creation wizard, or any transactional screen.
+The permitted implementation should prepare the values and require the player to perform every navigation and transaction click. A later Fabric-only executor may exist only after explicit server authorization, a separately visible arming step, and a last-moment revalidation. Mineflayer must never enter `Your Orders`, the creation wizard, or any transactional screen.
 
 ## Data still required before execution automation
 
