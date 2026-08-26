@@ -97,6 +97,7 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS order_rows_signature_time ON order_rows(signature, observed_ms DESC)`,
 		`CREATE INDEX IF NOT EXISTS order_rows_order_time ON order_rows(observer_id, order_key, observed_ms DESC)`,
 		`CREATE INDEX IF NOT EXISTS order_rows_scan_id ON order_rows(scan_id)`,
+		`CREATE INDEX IF NOT EXISTS order_rows_observed_time ON order_rows(observed_ms DESC)`,
 		`CREATE TABLE IF NOT EXISTS order_evidence_summary (
 			signature TEXT PRIMARY KEY,item_id TEXT NOT NULL,display_name TEXT NOT NULL DEFAULT '',
 			complete_scans INTEGER NOT NULL,first_seen_ms INTEGER NOT NULL,last_seen_ms INTEGER NOT NULL,
@@ -113,6 +114,7 @@ func (s *Store) migrate() error {
 			unit_reward_cents INTEGER NOT NULL, observed_ms INTEGER NOT NULL,
 			UNIQUE(observer_id, order_key, observed_ms))`,
 		`CREATE INDEX IF NOT EXISTS fill_signature_time ON fill_events(signature, observed_ms DESC)`,
+		`CREATE INDEX IF NOT EXISTS fill_observed_time ON fill_events(observed_ms DESC)`,
 		`CREATE TABLE IF NOT EXISTS watches (
 			id TEXT PRIMARY KEY, signature TEXT NOT NULL, created_ms INTEGER NOT NULL, expires_ms INTEGER NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS watches_expiry ON watches(expires_ms)`,

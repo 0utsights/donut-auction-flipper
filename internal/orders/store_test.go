@@ -167,6 +167,26 @@ func TestCleanupCascadesExpiredScansAcrossBatches(t *testing.T) {
 	}
 }
 
+func TestStoreIndexesFreshnessWindows(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	for table, name := range map[string]string{
+		"order_rows":  "order_rows_observed_time",
+		"fill_events": "fill_observed_time",
+	} {
+		var count int
+		if err := store.db.QueryRow(`SELECT COUNT(*) FROM pragma_index_list(?) WHERE name=?`, table, name).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("freshness index %s is missing from %s", name, table)
+		}
+	}
+}
+
 func TestEmptyCandidateFeedSerializesAsArray(t *testing.T) {
 	system, err := NewSystem(Config{})
 	if err != nil {
