@@ -5,6 +5,7 @@ data/
 *.test
 *.out
 .second-pc-build/
+.second-pc-cache/
 collector/.second-pc-build/
 coverage.html
 apps/dashboard/node_modules/

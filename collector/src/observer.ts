@@ -9,6 +9,7 @@ import { redactSensitiveText } from './redaction.js'
 import { SafeNavigator, type WindowView } from './safe-navigation.js'
 import { loadSchemas } from './schemas.js'
 import { PARSER_VERSION, SCHEMA_VERSION, type ItemView, type MenuSchema, type ObserverTask, type RuntimeConfig, type ScanBatch } from './types.js'
+import { beginServerWindowUpdate, WindowClosedError, type WindowUpdateSource } from './window-update.js'
 
 process.umask(0o077)
 
@@ -346,48 +347,17 @@ async function waitForWindow(bot: Bot, timeout: number): Promise<NonNullable<Bot
 async function clickControlAndWaitForServer(bot: Bot, navigator: SafeNavigator, kind: 'next_page' | 'refresh' | 'filter'): Promise<void> {
   const windowId = bot.currentWindow?.id
   if (windowId === undefined) throw new MenuSessionEndedError('order window closed before navigation')
-  const update = serverWindowUpdate(bot, windowId, 5_000)
+  const update = beginServerWindowUpdate(bot as unknown as WindowUpdateSource, windowId, 5_000)
   try {
     await navigator.clickControl(kind)
-    await update.promise
-    // window_items is applied by Mineflayer's earlier packet listener before
-    // this promise resolves; a short quiet period lets a multi-packet menu settle.
-    await sleep(150)
+    try {
+      await update.promise
+    } catch (error) {
+      if (error instanceof WindowClosedError) throw new MenuSessionEndedError(error.message)
+      throw error
+    }
   } finally {
     update.cancel()
-  }
-}
-
-function serverWindowUpdate(bot: Bot, windowId: number, timeout: number): { promise: Promise<void>; cancel(): void } {
-  let settled = false
-  let resolveUpdate: () => void
-  let rejectUpdate: (error: Error) => void
-  const client = bot._client
-  const cleanup = (): void => {
-    clearTimeout(timer)
-    client.removeListener('window_items', items)
-    client.removeListener('open_window', opened)
-    bot.removeListener('end', ended)
-  }
-  const succeed = (): void => { if (!settled) { settled = true; cleanup(); resolveUpdate() } }
-  const fail = (error: Error): void => { if (!settled) { settled = true; cleanup(); rejectUpdate(error) } }
-  const items = (packet: { windowId?: number }): void => { if (packet.windowId === windowId) succeed() }
-  const opened = (): void => succeed()
-  const ended = (reason: string): void => fail(new Error(`connection ended during menu navigation: ${safeText(reason, 200)}`))
-  const promise = new Promise<void>((resolvePromise, rejectPromise) => { resolveUpdate = resolvePromise; rejectUpdate = rejectPromise })
-  const timer = setTimeout(() => fail(new Error('server did not acknowledge order-menu navigation')), timeout)
-  client.on('window_items', items)
-  client.on('open_window', opened)
-  bot.once('end', ended)
-  return {
-    promise,
-    cancel: () => {
-      if (!settled) {
-        settled = true
-        cleanup()
-        resolveUpdate()
-      }
-    }
   }
 }
 

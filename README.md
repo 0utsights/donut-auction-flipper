@@ -101,6 +101,8 @@ For the trusted second-PC deployment where Tailscale HTTPS certificates are not 
 docker compose -f compose.yaml -f compose.second-pc.yaml up -d auction-server order-collector
 ```
 
+For a collector-only or backend-only update, pass `collector` or `backend` to the build script. The script keeps dependency caches under the ignored `.second-pc-cache/` directory, so repeated validated deployments do not redownload the complete Go and npm dependency sets.
+
 From the player PC, run `scripts/second-pc-tunnel.ps1`. The existing Fabric and browser URL remains `http://127.0.0.1:8080`; SSH encrypts and authenticates the hop, and the backend is never bound to LAN. Enabling tailnet HTTPS later allows replacing this tunnel with the normal Caddy deployment.
 
 ## Configuration

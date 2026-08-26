@@ -82,6 +82,8 @@ Production uses one Compose topology for the Go backend, Mineflayer manager, per
 
 The initial second-PC move uses host-networked containers bound only to `127.0.0.1` plus an authenticated SSH local-forward from the player PC. Tailscale HTTPS certificates are not enabled on the tailnet, so this provides encrypted remote access without exposing backend HTTP on LAN or changing tailnet-wide settings. The standard Caddy HTTPS topology remains the production/public path once certificates are enabled.
 
+Second-PC builds support independent `backend` and `collector` targets and retain untracked Go/npm dependency caches under `.second-pc-cache/`. Runtime containers, mounted secrets, and production data are unchanged; this only removes redundant compilation and downloads during validated service-specific deployments.
+
 ## 2026-08-22 — Barebones client and debug UI
 
 The in-game screen and backend debug page are intentionally plain, information-first interfaces. The Fabric screen uses an opaque fill and does not call `renderBackground`, fixing the Minecraft 1.21.11 `Can only blur once per frame` crash. Styling remains deferred.
@@ -99,6 +101,8 @@ Donut expires or closes the order GUI while leaving the Minecraft connection app
 Focused watches locate their assigned item only by traversing the same verified pagination control; they never type into a sign, invoke an unverified search, or click a listing. Remote collector-to-backend traffic requires HTTPS, while loopback HTTP remains permitted for development. Backend calls use explicit timeouts, reconnect backoff is based on rapid failures rather than the lifetime reconnect diagnostic, and a configured egress mismatch disables only the affected account.
 
 Mineflayer mutates a window optimistically when `clickWindow` is called, before the server confirms a custom-menu page. The collector therefore requires a matching server `window_items` or `open_window` packet and verifies that `Orders (Page N)` advances before submitting another page. Observers are stationary, so after login transfers settle the pinned Mineflayer 4.37.1 mount-state path suspends its otherwise unavoidable idle movement updates. A live acceptance scan completed 364 consecutively confirmed pages (16,380 rows), rotated cleanly at the server-reported end, and resumed from page 1 without the prior `Invalid sequence` kick. A live focused-watch test paginated to its assigned item, refreshed that page repeatedly, and now rotates before returning to discovery so a later full scan cannot inherit a partial page position.
+
+Live scans later showed that Donut may send `window_items` followed by additional `set_slot` packets for one navigation. Treating the first packet as final produced inconsistent false endings at page 10 while equivalent passes reached more than 50 pages. Navigation now waits for the relevant packet burst to become quiet, ignores packets for other windows, and fails immediately if the active window closes. The collector still verifies the page number after the settled server update; this does not relax the deny-by-default click policy.
 
 Legacy SQLite `unit_reward` values remain quarantined as whole-dollar development data. Exact observations write to a new `unit_reward_cents` column, and only positive values from that column enter evidence or candidate economics. The system does not guess a conversion for mixed historical rows.
 
