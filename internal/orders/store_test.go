@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +30,103 @@ func TestSQLiteBackupProducesStandaloneDatabase(t *testing.T) {
 	}
 	if info, err := os.Stat(backup); err != nil || info.Size() == 0 {
 		t.Fatalf("backup missing: info=%v err=%v", info, err)
+	}
+}
+
+func TestSQLiteBackupCoalescesRestartBackupsPerUTCDay(t *testing.T) {
+	path := t.TempDir() + "/market.db"
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	firstDay := time.Date(2026, 8, 26, 1, 2, 3, 0, time.UTC)
+	store.now = func() time.Time { return firstDay }
+	first, err := store.Backup(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.now = func() time.Time { return firstDay.Add(10 * time.Hour) }
+	second, err := store.Backup(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != first {
+		t.Fatalf("same-day restart created another backup: first=%q second=%q", first, second)
+	}
+	store.now = func() time.Time { return firstDay.Add(24 * time.Hour) }
+	third, err := store.Backup(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third == first {
+		t.Fatal("next UTC day did not create a new backup")
+	}
+	entries, err := os.ReadDir(path + ".backups")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("backup entries=%d, want one per UTC day", len(entries))
+	}
+}
+
+func TestBackupPruningPreservesManualSafetyCopies(t *testing.T) {
+	directory := t.TempDir()
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	for _, name := range []string{
+		"20260825T010000Z.db", "20260825T230000Z.db", "20260826T010000Z.db", "pre-migration.db",
+	} {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pruneAutomaticBackups(directory, entries, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"20260825T230000Z.db", "20260826T010000Z.db", "pre-migration.db"} {
+		if _, err := os.Stat(filepath.Join(directory, name)); err != nil {
+			t.Fatalf("expected retained backup %q: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(directory, "20260825T010000Z.db")); !os.IsNotExist(err) {
+		t.Fatalf("duplicate automatic backup was not pruned: %v", err)
+	}
+}
+
+func TestCleanupRetainsOnlyOneDayOfRawScans(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	for _, value := range []struct {
+		observer string
+		seen     time.Time
+	}{{"expired", now.Add(-25 * time.Hour)}, {"current", now.Add(-23 * time.Hour)}} {
+		if _, err := store.db.Exec(`INSERT INTO scans(observer_id,task_id,session_id,content_hash,screen_title,page,complete,unknown_schema,schema_reason,observed_ms,received_ms)
+			VALUES(?,'',?,?,'Orders (Page 1)',1,1,0,'',?,?)`, value.observer, value.observer, value.observer, value.seen.UnixMilli(), value.seen.UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var expired, current int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM scans WHERE observer_id='expired'`).Scan(&expired); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM scans WHERE observer_id='current'`).Scan(&current); err != nil {
+		t.Fatal(err)
+	}
+	if expired != 0 || current != 1 {
+		t.Fatalf("raw scan retention expired=%d current=%d", expired, current)
 	}
 }
 

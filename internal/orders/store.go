@@ -22,6 +22,13 @@ import (
 var memorySequence atomic.Uint64
 var ErrDiagnosticRateLimit = errors.New("diagnostic rate limit exceeded")
 
+const (
+	rawObservationRetention = 24 * time.Hour
+	fillRetention           = 90 * 24 * time.Hour
+	diagnosticRetention     = 14 * 24 * time.Hour
+	backupRetention         = 7 * 24 * time.Hour
+)
+
 type Store struct {
 	db   *sql.DB
 	now  func() time.Time
@@ -960,13 +967,13 @@ func (s *Store) Cleanup(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `DELETE FROM scans WHERE observed_ms<?`, s.now().Add(-7*24*time.Hour).UnixMilli()); err != nil {
+	if _, err = tx.ExecContext(ctx, `DELETE FROM scans WHERE observed_ms<?`, s.now().Add(-rawObservationRetention).UnixMilli()); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM fill_events WHERE observed_ms<?`, s.now().Add(-90*24*time.Hour).UnixMilli()); err != nil {
+	if _, err = tx.ExecContext(ctx, `DELETE FROM fill_events WHERE observed_ms<?`, s.now().Add(-fillRetention).UnixMilli()); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM diagnostics WHERE created_ms<?`, s.now().Add(-14*24*time.Hour).UnixMilli()); err != nil {
+	if _, err = tx.ExecContext(ctx, `DELETE FROM diagnostics WHERE created_ms<?`, s.now().Add(-diagnosticRetention).UnixMilli()); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM watches WHERE expires_ms<?`, s.now().UnixMilli()); err != nil {
@@ -989,30 +996,87 @@ func (s *Store) Backup(ctx context.Context) (string, error) {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return "", err
 	}
-	target := filepath.Join(directory, s.now().Format("20060102T150405Z")+".db")
-	if _, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, target); err != nil {
-		return "", fmt.Errorf("backup order database: %w", err)
-	}
+	now := s.now()
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		return "", fmt.Errorf("list order backups: %w", err)
 	}
-	cutoff := s.now().Add(-7 * 24 * time.Hour)
+	if current := newestBackupForDay(entries, now); current != "" {
+		if err := pruneAutomaticBackups(directory, entries, now); err != nil {
+			return "", err
+		}
+		return filepath.Join(directory, current), nil
+	}
+	target := filepath.Join(directory, now.Format("20060102T150405Z")+".db")
+	if _, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, target); err != nil {
+		return "", fmt.Errorf("backup order database: %w", err)
+	}
+	entries, err = os.ReadDir(directory)
+	if err != nil {
+		return "", fmt.Errorf("list order backups: %w", err)
+	}
+	if err := pruneAutomaticBackups(directory, entries, now); err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
+func newestBackupForDay(entries []os.DirEntry, now time.Time) string {
+	day := now.UTC().Format("20060102")
+	newest := ""
 	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".db" {
+		stamp, ok := automaticBackupTime(entry.Name())
+		if entry.IsDir() || !ok || stamp.Format("20060102") != day {
 			continue
 		}
-		info, infoErr := entry.Info()
-		if infoErr != nil {
-			return "", fmt.Errorf("inspect order backup: %w", infoErr)
+		info, err := entry.Info()
+		if err != nil || info.Size() == 0 {
+			continue
 		}
-		if info.ModTime().Before(cutoff) {
-			if removeErr := os.Remove(filepath.Join(directory, entry.Name())); removeErr != nil {
-				return "", fmt.Errorf("prune order backup: %w", removeErr)
+		if newest == "" || entry.Name() > newest {
+			newest = entry.Name()
+		}
+	}
+	return newest
+}
+
+func pruneAutomaticBackups(directory string, entries []os.DirEntry, now time.Time) error {
+	cutoff := now.UTC().Add(-backupRetention)
+	newestByDay := map[string]string{}
+	for _, entry := range entries {
+		stamp, ok := automaticBackupTime(entry.Name())
+		if entry.IsDir() || !ok || stamp.Before(cutoff) {
+			continue
+		}
+		day := stamp.Format("20060102")
+		if entry.Name() > newestByDay[day] {
+			newestByDay[day] = entry.Name()
+		}
+	}
+	for _, entry := range entries {
+		stamp, ok := automaticBackupTime(entry.Name())
+		if entry.IsDir() || !ok {
+			continue
+		}
+		if stamp.Before(cutoff) || newestByDay[stamp.Format("20060102")] != entry.Name() {
+			if err := os.Remove(filepath.Join(directory, entry.Name())); err != nil {
+				return fmt.Errorf("prune order backup: %w", err)
 			}
 		}
 	}
-	return target, nil
+	return nil
+}
+
+func automaticBackupTime(name string) (time.Time, bool) {
+	if filepath.Ext(name) != ".db" {
+		return time.Time{}, false
+	}
+	stamp := strings.TrimSuffix(name, ".db")
+	if len(stamp) != len("20060102T150405Z") {
+		return time.Time{}, false
+	}
+	parsed, err := time.Parse("20060102T150405Z", stamp)
+	return parsed, err == nil
 }
 
 func (s *Store) observer(ctx context.Context, id string) (Observer, error) {

@@ -8,6 +8,7 @@ services:
       - ${SECOND_PC_RUNTIME_DNS:-9.9.9.9}
     environment:
       DN_ADDRESS: 127.0.0.1:8080
+      DN_FAST_INTERVAL: ${SECOND_PC_FAST_INTERVAL:-500ms}
       DN_CLIENT_TOKEN: ""
       DN_OBSERVER_TOKEN: ""
       DN_FABRIC_TOKEN: ""

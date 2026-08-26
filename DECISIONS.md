@@ -84,6 +84,8 @@ The initial second-PC move uses host-networked containers bound only to `127.0.0
 
 Second-PC builds support independent `backend` and `collector` targets and retain untracked Go/npm dependency caches under `.second-pc-cache/`. Runtime containers, mounted secrets, and production data are unchanged; this only removes redundant compilation and downloads during validated service-specific deployments.
 
+The constrained second-PC profile runs the official API newest-page lane every 500ms. This remains sub-second at the polling boundary while leaving roughly half of the shared 240-request/minute budget for broad valuation work; the prior 250ms profile could consume that entire budget by itself. Raw scan rows retain 24 hours because current pricing uses two minutes and confirmed fills are stored separately for 90 days. Automatic SQLite backups are coalesced to the newest snapshot per UTC day for seven days, while manually named safety backups are never pruned. This prevents development restarts from multiplying several-hundred-megabyte copies without weakening daily recovery coverage.
+
 ## 2026-08-22 — Barebones client and debug UI
 
 The in-game screen and backend debug page are intentionally plain, information-first interfaces. The Fabric screen uses an opaque fill and does not call `renderBackground`, fixing the Minecraft 1.21.11 `Can only blur once per frame` crash. Styling remains deferred.

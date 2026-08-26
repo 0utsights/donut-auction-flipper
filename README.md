@@ -26,7 +26,7 @@ Open:
 - [http://127.0.0.1:8080/order-auction-flipper](http://127.0.0.1:8080/order-auction-flipper) — observers, evidence, watches, and combined candidates
 - [http://127.0.0.1:8080/healthz](http://127.0.0.1:8080/healthz) — health
 
-Auction transactions remain in `data/history.json.gz`. Orders, fills, observer health, watches, diagnostics, and optimizer evidence use SQLite WAL at `data/market.db`, with daily seven-day backups.
+Auction transactions remain in `data/history.json.gz`. Orders, fills, observer health, watches, diagnostics, and optimizer evidence use SQLite WAL at `data/market.db`. Raw order rows retain 24 hours while durable summaries and confirmed fills remain available for research. Automatic backups retain one compact snapshot per UTC day for seven days; manually named safety copies are never pruned.
 
 ## Mineflayer observers
 
