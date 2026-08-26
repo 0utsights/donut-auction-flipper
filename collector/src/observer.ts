@@ -70,7 +70,12 @@ class ObserverRuntime {
       } catch (error) {
         message = safeMessage(error)
         this.log(error instanceof ReconnectRequiredError ? 'task_complete' : 'task_failed', `reason=${message}`)
-        const rotate = error instanceof ReconnectRequiredError || error instanceof MenuSessionEndedError || (this.connected && !this.bot?.currentWindow)
+        // Donut expires an open /orders menu after roughly 80 seconds. That is
+        // a menu-session boundary, not a broken Minecraft connection. Reusing
+        // the authenticated connection lets the retried lease reopen /orders
+        // immediately instead of paying another login/proxy round trip.
+        const rotate = error instanceof ReconnectRequiredError || !this.connected
+        if (error instanceof MenuSessionEndedError && this.connected) this.log('orders_menu_reopen_scheduled')
         if (rotate && this.connected) {
           this.connected = false
           this.bot?.quit('collector connection rotation')
