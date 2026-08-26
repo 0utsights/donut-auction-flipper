@@ -595,7 +595,7 @@ func TestCurrentPriceAndQueueDoNotUseHistoricalBest(t *testing.T) {
 	historical := order("same", 100)
 	historical.UnitRewardCents = 10_000
 	historical.PricePosition = 1
-	if _, err := system.SaveScan(ctx, scan("one", "", "old", 1, now.Add(-time.Hour), historical)); err != nil {
+	if _, err := system.SaveScan(ctx, scan("one", "", "old", 1, now.Add(-9*time.Minute), historical)); err != nil {
 		t.Fatal(err)
 	}
 	for index, age := range []time.Duration{90 * time.Second, 45 * time.Second, 0} {
@@ -610,7 +610,7 @@ func TestCurrentPriceAndQueueDoNotUseHistoricalBest(t *testing.T) {
 	if err != nil || len(evidence) != 1 {
 		t.Fatalf("evidence=%+v err=%v", evidence, err)
 	}
-	if evidence[0].BestUnitRewardCents != 100 || evidence[0].BestPricePosition != 1 {
+	if evidence[0].BestUnitRewardCents != 100 || evidence[0].BestPricePosition != 1 || !evidence[0].LastSeenAt.Equal(now.Truncate(time.Millisecond)) {
 		t.Fatalf("historical price leaked into current evidence: %+v", evidence[0])
 	}
 }
@@ -884,6 +884,37 @@ func TestCandidateBuilderIsQuantityAndEvidenceSafe(t *testing.T) {
 	for _, value := range buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now) {
 		if value.PriorityRank != 0 || value.PriorityScore != 0 {
 			t.Fatalf("modifier-ambiguous evidence received priority: %+v", value)
+		}
+	}
+}
+
+func TestCandidateOrderObservationTrustWindow(t *testing.T) {
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	evidence := Evidence{Signature: "minecraft:diamond_block", ItemID: "minecraft:diamond_block", DisplayName: "Diamond Block",
+		Tier: "actionable", CompleteScans: 10, FillEvents: 8, DistinctOrders: 3, FilledUnits24h: 640, AvailableUnits: 640,
+		BestUnitRewardCents: 400_000, BestPricePosition: 1, ObservedQuantity: 64, MaxStackSize: 64, Stable: true, SignatureComplete: true}
+	valuation := market.Valuation{Signature: evidence.Signature, QuickSellValue: 5_000, QuantityQuickSell: 5_000,
+		PricingQuantity: 64, Volume24h: 640, PriceSellerCount: 4, ConfidenceBPS: 9_000,
+		ExpectedSellMinutes: 30, ActiveBestAsk: 3_000, ActiveDepth: 20, GeneratedAt: now}
+
+	evidence.LastSeenAt = now.Add(-9 * time.Minute)
+	values := buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now)
+	if len(values) != 2 {
+		t.Fatalf("trusted observation produced no routes: %+v", values)
+	}
+	for _, value := range values {
+		if value.State != "READY" {
+			t.Fatalf("nine-minute order observation was discarded: %+v", value)
+		}
+	}
+	evidence.LastSeenAt = now.Add(-11 * time.Minute)
+	values = buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now)
+	if len(values) != 2 {
+		t.Fatalf("expired observation disappeared instead of becoming stale: %+v", values)
+	}
+	for _, value := range values {
+		if value.State != "STALE" {
+			t.Fatalf("expired order observation remained actionable: %+v", value)
 		}
 	}
 }

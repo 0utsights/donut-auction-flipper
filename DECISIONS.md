@@ -94,7 +94,9 @@ Retention deletes are intentionally committed in small batches and yield between
 
 The two-minute evidence window and 24-hour fill window have timestamp-leading indexes. Candidate refreshes must seek directly into fresh rows; they may not scan the retained multi-million-row observation table on every collector page or API poll.
 
-Historical order identities remain available to the research/debug store, but rows without a price observation in the current two-minute window do not enter auction quantity valuation. They cannot produce a candidate and evaluating them on every refresh only consumes CPU.
+Historical order identities remain available to the research/debug store, but rows without a price observation in the current ten-minute trust window do not enter auction quantity valuation. They cannot produce a candidate and evaluating them on every refresh only consumes CPU.
+
+Order-to-auction opportunities represent persistent market spreads rather than one-off underpriced listings. Ranking therefore trusts the latest usable order observation for ten minutes instead of thirty seconds. Stability still uses repeated observations, the competitive price comes from the newest session rather than the highest price anywhere in that window, and the official auction exit continues refreshing subsecond. Fabric's explicitly armed executor retains its separate six-second order check and requests a focused refresh before committing funds.
 
 ## 2026-08-22 — Barebones client and debug UI
 

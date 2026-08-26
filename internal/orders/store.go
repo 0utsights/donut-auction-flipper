@@ -27,6 +27,7 @@ const (
 	fillRetention           = 90 * 24 * time.Hour
 	diagnosticRetention     = 14 * 24 * time.Hour
 	backupRetention         = 7 * 24 * time.Hour
+	orderObservationWindow  = 10 * time.Minute
 	cleanupBatchSize        = 250
 	cleanupYield            = 5 * time.Millisecond
 )
@@ -697,9 +698,13 @@ func (s *Store) Evidence(ctx context.Context) ([]Evidence, error) {
 }
 
 func (s *Store) enrichEvidence(ctx context.Context, evidence []Evidence) error {
+	type observedPrice struct {
+		reward     int64
+		observedMS int64
+	}
 	indexes := make(map[string]int, len(evidence))
 	prices := make(map[string][]int64, len(evidence))
-	observerPrices := make(map[string]map[string]int64, len(evidence))
+	observerPrices := make(map[string]map[string]observedPrice, len(evidence))
 	for index := range evidence {
 		indexes[evidence[index].Signature] = index
 		// The historical aggregate is useful for identity only. Current market
@@ -731,7 +736,7 @@ func (s *Store) enrichEvidence(ctx context.Context, evidence []Evidence) error {
 		return err
 	}
 
-	recent := s.now().Add(-2 * time.Minute).UnixMilli()
+	recent := s.now().Add(-orderObservationWindow).UnixMilli()
 	completeRows, err := s.db.QueryContext(ctx, `SELECT signature,MIN(signature_complete) FROM order_rows
 		WHERE unit_reward_cents>0 AND observed_ms>=? GROUP BY signature`, recent)
 	if err != nil {
@@ -754,35 +759,40 @@ func (s *Store) enrichEvidence(ctx context.Context, evidence []Evidence) error {
 
 	priceRows, err := s.db.QueryContext(ctx, `WITH samples AS (
 		SELECT r.signature,MAX(r.unit_reward_cents) AS reward,
-		COALESCE(MIN(CASE WHEN r.price_position>0 THEN r.price_position END),0) AS position,r.observer_id,
+		COALESCE(MIN(CASE WHEN r.price_position>0 THEN r.price_position END),0) AS position,r.observer_id,MAX(r.observed_ms) AS observed_ms,
 		ROW_NUMBER() OVER (PARTITION BY r.signature ORDER BY MAX(r.observed_ms) DESC) AS sample_rank
 		FROM order_rows r JOIN scans s ON s.id=r.scan_id LEFT JOIN tasks t ON t.id=s.task_id
 		WHERE r.unit_reward_cents>0 AND r.observed_ms>=?
 			AND (COALESCE(t.kind,'')<>'focused_watch' OR t.signature=r.signature)
 		GROUP BY r.signature,s.session_id,r.observer_id)
-		SELECT signature,reward,position,observer_id FROM samples WHERE sample_rank<=32`, recent)
+		SELECT signature,reward,position,observer_id,observed_ms FROM samples WHERE sample_rank<=32`, recent)
 	if err != nil {
 		return err
 	}
+	latestPrices := make(map[string]observedPrice, len(evidence))
 	for priceRows.Next() {
 		var signature, observer string
-		var price int64
+		var price, observedMS int64
 		var position int
-		if err := priceRows.Scan(&signature, &price, &position, &observer); err != nil {
+		if err := priceRows.Scan(&signature, &price, &position, &observer, &observedMS); err != nil {
 			priceRows.Close()
 			return err
 		}
-		index, ok := indexes[signature]
+		_, ok := indexes[signature]
 		if !ok {
 			continue
 		}
 		prices[signature] = append(prices[signature], price)
-		evidence[index].BestUnitRewardCents = max64(evidence[index].BestUnitRewardCents, price)
-		if _, exists := observerPrices[signature]; !exists {
-			observerPrices[signature] = map[string]int64{}
+		latest := latestPrices[signature]
+		if observedMS > latest.observedMS || (observedMS == latest.observedMS && price > latest.reward) {
+			latestPrices[signature] = observedPrice{reward: price, observedMS: observedMS}
 		}
-		if _, exists := observerPrices[signature][observer]; !exists {
-			observerPrices[signature][observer] = price
+		if _, exists := observerPrices[signature]; !exists {
+			observerPrices[signature] = map[string]observedPrice{}
+		}
+		observerPrice := observerPrices[signature][observer]
+		if observedMS > observerPrice.observedMS || (observedMS == observerPrice.observedMS && price > observerPrice.reward) {
+			observerPrices[signature][observer] = observedPrice{reward: price, observedMS: observedMS}
 		}
 	}
 	if err := closeRows(priceRows); err != nil {
@@ -791,6 +801,11 @@ func (s *Store) enrichEvidence(ctx context.Context, evidence []Evidence) error {
 
 	for index := range evidence {
 		currentPrices := prices[evidence[index].Signature]
+		latest := latestPrices[evidence[index].Signature]
+		evidence[index].BestUnitRewardCents = latest.reward
+		if latest.observedMS > 0 {
+			evidence[index].LastSeenAt = time.UnixMilli(latest.observedMS).UTC()
+		}
 		evidence[index].Stable = stablePrices(currentPrices)
 		if evidence[index].BestUnitRewardCents > 0 {
 			// A new order one tick above the best targets queue position one; this
@@ -799,7 +814,7 @@ func (s *Store) enrichEvidence(ctx context.Context, evidence []Evidence) error {
 		}
 		for _, left := range observerPrices[evidence[index].Signature] {
 			for _, right := range observerPrices[evidence[index].Signature] {
-				if left > 0 && right > 0 && math.Abs(float64(left-right))/float64(max64(left, right)) > 0.10 {
+				if left.reward > 0 && right.reward > 0 && math.Abs(float64(left.reward-right.reward))/float64(max64(left.reward, right.reward)) > 0.10 {
 					evidence[index].Conflict = true
 				}
 			}
@@ -896,7 +911,7 @@ func (s *Store) scanCoverage(ctx context.Context) (ScanCoverage, error) {
 	if err = s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(CASE WHEN confirmation_level>=1 THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN confirmation_level<1 THEN 1 ELSE 0 END),0) FROM fill_events WHERE unit_reward_cents>0`).Scan(&value.ConfirmedFills, &value.QuarantinedFills); err != nil {
 		return value, err
 	}
-	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT signature) FROM order_rows WHERE signature_complete=1 AND unit_reward_cents>0 AND observed_ms>=?`, s.now().Add(-2*time.Minute).UnixMilli()).Scan(&value.CompleteSignatures); err != nil {
+	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT signature) FROM order_rows WHERE signature_complete=1 AND unit_reward_cents>0 AND observed_ms>=?`, s.now().Add(-orderObservationWindow).UnixMilli()).Scan(&value.CompleteSignatures); err != nil {
 		return value, err
 	}
 	if last > 0 {

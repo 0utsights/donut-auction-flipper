@@ -280,7 +280,7 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 			continue
 		}
 		completion := completionBPS(evidence, valuation)
-		fresh := now.Sub(evidence.LastSeenAt) <= 30*time.Second
+		fresh := now.Sub(evidence.LastSeenAt) <= orderObservationWindow
 		marketReason := marketHoldReason(valuation, now)
 		ready := evidence.Tier == "actionable" && fresh && valuation.Volume24h >= 5 && valuation.PriceSellerCount >= 3 && valuation.ConfidenceBPS >= 5_000 && marketReason == ""
 		state, reason := strings.ToUpper(evidence.Tier), evidence.Reason
@@ -291,7 +291,7 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 			state = "HOLD"
 		}
 		if !fresh {
-			state, reason = "STALE", "latest complete order evidence is older than 30 seconds"
+			state, reason = "STALE", "latest usable order observation is older than 10 minutes"
 		}
 		if valuation.Volume24h < 5 || valuation.PriceSellerCount < 3 {
 			if state == "READY" {
