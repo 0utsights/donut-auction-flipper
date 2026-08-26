@@ -8,7 +8,7 @@ The complete pre-redesign repository was committed as `be6a624`, tagged `legacy-
 
 Mineflayer is the permanent order-market observation layer. It parses order menus, accepts only research assignments, and submits observations; it never buys, fulfills, creates, confirms, cancels, claims, collects, lists, or transfers inventory. Auctions remain sourced from the official Donut API. Fabric is the player-facing flipping client: it receives scored candidates, keeps personal state locally, and assists with manual actions. Adapting Fabric code to run in Mineflayer is deferred.
 
-Live player-client exploration established the order-creation flow documented in `docs/order-creation-workflow.md`. Any execution assistance belongs exclusively in Fabric. The initial implementation may prepare item, quantity, and price but must leave the final `Create Order` action to the player. Mineflayer's permanent transaction prohibition is unchanged.
+Live player-client exploration established the order-creation flow documented in `docs/order-creation-workflow.md`. Any execution assistance belongs exclusively in Fabric. The initial executor is limited to one locally reviewed and explicitly armed order, revalidates the backend candidate and every server-driven screen, and may press the final `Create Order` action once. It cannot loop or arm another candidate. Mineflayer's permanent transaction prohibition is unchanged.
 
 Collector coordination uses authenticated HTTP long polling rather than WebSockets. Any number of isolated account processes may register with the Go backend, receive renewable observation leases, and deliberately overlap work for verification. The backend cannot issue transaction instructions.
 

@@ -13,9 +13,10 @@ Last updated: 2026-08-25
 - The Mineflayer collector manager launches an isolated child per account, validates dedicated proxy egress, uses separate Microsoft token caches, registers with the backend, long-polls leased tasks, reconnects independently, and submits order snapshots.
 - Mineflayer's interaction adapter permits only `/orders` and controls explicitly verified by a captured schema. Empty/unknown schemas are capture-only; all economic actions and inventory transfers are denied.
 - The live Fabric/player-client order wizard has been mapped through its final review screen without spending currency. `docs/order-creation-workflow.md` records the exact navigation, inputs, review invariants, fail-closed Fabric state machine, and remaining low-value acceptance test.
-- The distinct `2.0.0-alpha.1` Fabric client polls the combined candidate feed, parses or lets the player override balance, applies a dynamic reserve, allocates within 20 order and 18 auction slots, starts focused watches, displays candidate explanations, and provides validated manual navigation. DonutSMP staff authorization for observer collection and locally armed Fabric order creation was explicitly confirmed by the operator on 2026-08-26; the guarded order executor is now in development.
+- The distinct `2.1.0-alpha.1` Fabric client polls the combined candidate feed, parses or lets the player override balance, applies a dynamic reserve, allocates within 20 order and 18 auction slots, and starts focused watches. Its Fabric-only executor presents a separate one-order arm screen, preserves cent-precise stack economics, verifies each chest/dialog transition, repeats freshness/budget/slot checks immediately before `Create Order`, and stops on any ambiguity. DonutSMP staff authorization for observer collection and locally armed Fabric order creation was explicitly confirmed by the operator on 2026-08-26.
 - Fabric diagnostics are allowlisted, batched, rate-limited, retained for 14 days, enabled with a visible opt-out, and exclude personal/secret market context.
 - Compose runs backend, collector manager, persistent data, and Caddy HTTPS termination. Loopback HTTP remains the development path.
+- The second-PC overlay bounds backend and collector CPU, memory, and process counts, uses read-only container filesystems with explicit writable mounts/tmpfs, prevents privilege escalation, and rotates container logs. This contains observer impact without slowing the measured one-observer cadence.
 
 ## Verified locally
 
@@ -35,8 +36,10 @@ Last updated: 2026-08-25
 5. Hardened collector secret permissions, focused-watch refresh cadence, reconnect backoff reset, exact command/control denial, and assigned the combined Fabric artifact a distinct `2.0.0-alpha.1` identity.
 6. Verified the real 1.21.11 Donut order layout, exact cent parsing, server-acknowledged pagination, proxy/SRV login, credential redaction, and fail-closed schema behavior. A single live pass completed 364 pages / 16,380 rows without a sequence kick.
 7. Fixed optimistic window-state submissions, partial-page connection reuse, watch deletion versus active-lease races, insecure remote HTTP configuration, unbounded backend calls, lifetime-based reconnect delays, and proxy-egress restart loops.
+8. Added the Fabric-only one-order execution boundary: a separate explicit arm, exact cent/stack escrow checks, a DonutSMP hostname allowlist, live feed/order/auction freshness, local reserve/slot/session-budget enforcement, verified chest/dialog transitions, exact registry-item review matching, and a single final action.
+9. Hardened that executor against disconnects, stalled screens, changed candidates, duplicate pending signatures, quantity-prefix and money-suffix parser collisions, raw diagnostic leakage, and active-order rows. Server outcomes remain conservatively pending until real success/failure fixtures are captured.
 
-A final fresh pass found no further code-only improvement that outweighed the risk of inventing behavior without real Donut order-menu and transaction-message fixtures.
+A fresh post-executor pass found no further code-only improvement that outweighed the risk of inventing button or server-outcome behavior without a low-value live acceptance fixture.
 
 ## Shadow-mode limitations
 

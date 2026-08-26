@@ -3,10 +3,11 @@
   "id": "donut-network-client",
   "version": "${version}",
   "name": "Donut Market Flips",
-  "description": "Player-facing DonutSMP auction/order candidate client with local allocation and manual navigation.",
+  "description": "Player-facing DonutSMP auction/order client with local allocation and explicitly armed order creation.",
   "authors": ["Donut Network contributors"],
   "environment": "client",
   "entrypoints": { "client": ["net.donutnetwork.client.DonutNetworkClient"] },
+  "mixins": ["donut-network-client.mixins.json"],
   "depends": {
     "fabricloader": ">=0.19.2",
     "minecraft": "1.21.11",

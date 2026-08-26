@@ -17,7 +17,7 @@ Official Donut auction API -- fast + broad valuation ------+--> Go backend
 
 ## Permanent boundaries
 
-Mineflayer is the only in-game **market parser**. It reads order menus and never buys, fulfills, creates, confirms, cancels, claims, lists, or transfers inventory. The official API is the only auction-data source. Fabric does not upload market prices; it consumes candidates and keeps personal balance, reserve, and slot allocation local. Position inference is also local, but remains disabled until real success/failure message fixtures can be recognized without guessing.
+Mineflayer is the only in-game **market parser**. It reads order menus and never buys, fulfills, creates, confirms, cancels, claims, lists, or transfers inventory. The official API is the only auction-data source. Fabric does not upload market prices; it consumes candidates and keeps personal balance, reserve, slot allocation, session execution budget, and pending submissions local. A Fabric order requires a visible one-order arm and fail-closed validation; claiming and auction relisting are deferred until their live workflows are captured.
 
 The backend and collector run together on the private host. Fabric connects over authenticated HTTPS. There are no WebSockets.
 
@@ -90,6 +90,8 @@ Constraints:
 - 40% per base item.
 
 Profit per inventory slot is a tie-breaker, not a hard capacity constraint. The valuable market valuation stays on the backend; only resource allocation is local.
+
+For a selected `ORDER_TO_AUCTION` candidate, the Fabric executor may create exactly one order after a separate local arm screen. The captured candidate must remain stable on item signature, quantity, cent-precise reward, escrow, and auction target; the feed, order observation, and auction exit must remain fresh. The executor identifies the two chest menus by title and slot label, then uses the 1.21.11 server-dialog model for item search, amount, price, review, and final action. Unknown or ambiguous state closes the workflow without clicking. The final review must contain the expected item, quantity, rounded-or-exact unit reward, and total before `Create Order` is invoked once.
 
 ## Trust boundaries
 

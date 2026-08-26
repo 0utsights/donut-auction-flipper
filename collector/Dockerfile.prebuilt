@@ -7,5 +7,4 @@ COPY --chown=collector:collector .second-pc-build/dist ./dist
 COPY --chmod=755 entrypoint.sh /usr/local/bin/collector-entrypoint
 USER collector
 ENV DN_COLLECTOR_CONFIG=/run/secrets/collector-accounts.json
-VOLUME ["/data/profiles", "/data/captures"]
 ENTRYPOINT ["collector-entrypoint"]

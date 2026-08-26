@@ -22,6 +22,7 @@ public final class DonutNetworkClient implements ClientModInitializer {
     private static final Logger LOGGER = LoggerFactory.getLogger("donut-network-client");
     private FlipFeedClient feed;
 	private CandidateFeedClient candidates;
+    private OrderCreationExecutor orderExecutor;
     private boolean startupHintShown;
 
     @Override public void onInitializeClient() {
@@ -31,6 +32,7 @@ public final class DonutNetworkClient implements ClientModInitializer {
                     FlipNotifier.send(MinecraftClient.getInstance(), flip)));
 			candidates = new CandidateFeedClient(settings, candidate -> MinecraftClient.getInstance().execute(() ->
 					CandidateNotifier.send(MinecraftClient.getInstance(), candidate)));
+            orderExecutor = new OrderCreationExecutor(candidates);
             registerControls();
             feed.start();
 			candidates.start();
@@ -54,6 +56,7 @@ public final class DonutNetworkClient implements ClientModInitializer {
                 "key.donut-network.open", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_N, category));
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             while (open.wasPressed()) openScreen(client);
+            orderExecutor.tick(client);
             showStartupHint(client);
         });
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) ->
@@ -64,7 +67,7 @@ public final class DonutNetworkClient implements ClientModInitializer {
     }
 
     private void openScreen(MinecraftClient client) {
-		client.setScreen(new DonutScreen(client.currentScreen, feed, candidates));
+		client.setScreen(new DonutScreen(client.currentScreen, feed, candidates, orderExecutor));
     }
 
     private void showStartupHint(MinecraftClient client) {

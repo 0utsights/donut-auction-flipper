@@ -13,6 +13,10 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.Properties;
+import java.util.Set;
+import java.util.Arrays;
+import java.util.Locale;
+import java.util.stream.Collectors;
 import java.util.UUID;
 
 final class ClientConfig {
@@ -20,7 +24,8 @@ final class ClientConfig {
     private static final Path PATH = FabricLoader.getInstance().getConfigDir().resolve("donut-network.properties");
 
     record Settings(URI backend, String token, Duration pollInterval, boolean chatAlerts,
-                    long balance, int usedOrderSlots, int usedAuctionSlots, boolean diagnostics, String installId) {}
+                    long balance, int usedOrderSlots, int usedAuctionSlots, boolean diagnostics, String installId,
+                    long orderSessionBudget, Set<String> orderServerHosts) {}
 
     private ClientConfig() {}
 
@@ -56,6 +61,11 @@ final class ClientConfig {
             throw new IllegalArgumentException("client_token must be 16-512 printable ASCII characters without spaces");
         }
         long balance = boundedLong(properties, "balance", 10_000_000L, 0, Long.MAX_VALUE);
+        long orderSessionBudget = boundedLong(properties, "order_session_budget", 10_000_000L, 1, 100_000_000_000L);
+        Set<String> orderServerHosts = Arrays.stream(properties.getProperty("order_server_hosts", "play.donutsmp.net,donutsmp.net").split(","))
+                .map(value -> value.strip().toLowerCase(Locale.ROOT)).filter(value -> value.matches("[a-z0-9.-]{1,253}"))
+                .collect(Collectors.toUnmodifiableSet());
+        if (orderServerHosts.isEmpty()) throw new IllegalArgumentException("order_server_hosts must contain at least one hostname");
         int usedOrderSlots = (int) boundedLong(properties, "used_order_slots", 0, 0, 20);
         int usedAuctionSlots = (int) boundedLong(properties, "used_auction_slots", 0, 0, 18);
         String installId = properties.getProperty("install_id", "").strip();
@@ -66,7 +76,8 @@ final class ClientConfig {
         }
         return new Settings(backend, token, Duration.ofMillis(milliseconds),
                 Boolean.parseBoolean(properties.getProperty("chat_alerts", "true")), balance,
-                usedOrderSlots, usedAuctionSlots, Boolean.parseBoolean(properties.getProperty("diagnostics", "true")), installId);
+                usedOrderSlots, usedAuctionSlots, Boolean.parseBoolean(properties.getProperty("diagnostics", "true")), installId,
+                orderSessionBudget, orderServerHosts);
     }
 
     static void saveChatAlerts(boolean enabled) {
@@ -113,6 +124,8 @@ final class ClientConfig {
 		properties.setProperty("used_auction_slots", "0");
 		properties.setProperty("diagnostics", "true");
 		properties.setProperty("install_id", "");
+		properties.setProperty("order_session_budget", "10000000");
+		properties.setProperty("order_server_hosts", "play.donutsmp.net,donutsmp.net");
         return properties;
     }
 

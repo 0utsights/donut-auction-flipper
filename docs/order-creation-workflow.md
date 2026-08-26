@@ -6,7 +6,7 @@ Verified against the live DonutSMP 1.21.11 client on 2026-08-25. The exploration
 
 1. Run `/orders`.
 2. In `Orders (Page 1)`, click `Your Orders`, the dark block at slot 51. Do not confuse it with the purple shard at slot 48, which opens `Shard Shop`.
-3. In `Orders -> Your Orders`, click the first black placeholder pane at slot 0. With no active personal orders, this is the new-order entry.
+3. In `Orders -> Your Orders`, click the first black placeholder pane labeled for order creation. With no active personal orders, this was slot 0; Fabric searches only the server-menu inventory for the first black-pane control whose label contains both `create` and `order`, so active rows cannot be mistaken for the creation entry.
 4. In `Choose Item`, enter a display-name query in `Search`, submit it, and choose one exact result. A search for `Diamond Block` returned `Block of Diamond`.
 5. In `How many?`, enter the total requested unit count. The default is `1`.
 6. In `Price per item?`, enter the unit reward. The screen displays the amount and a minimum price of `$1`. In the live sample it prefilled `$910K` for one diamond block.
@@ -24,7 +24,7 @@ Model the wizard as a fail-closed state machine rather than coordinate macros:
 
 For every transition, Fabric must identify the expected screen from its title and visible controls, then verify the resulting screen before continuing. Any unknown title, missing control, ambiguous item result, server message, disconnect, or unexpected balance change cancels the workflow.
 
-Before exposing the final confirmation, Fabric must verify:
+Before taking the final action, Fabric must verify:
 
 - The backend candidate is still `READY` and fresh.
 - The canonical item signature and selected result match.
@@ -34,6 +34,8 @@ Before exposing the final confirmation, Fabric must verify:
 - Review total is within the user's remaining session budget, deployable balance, reserve, exposure, and order-slot limits.
 - Auction exit valuation is still current and profitable after fees.
 - No equivalent personal order is already active or pending locally.
+
+Because the exact success/failure chat fixtures are not yet captured, pressing the server action records a conservative local pending position rather than claiming success. The same signature cannot be armed again during that client session, and the player must verify the row in `Your Orders`.
 
 The Fabric executor may press the final `Create Order` control only for one candidate that the player explicitly armed in the local UI. Arming must be disabled by default, visibly identify the item, quantity, maximum escrow, and session budget, and expire if any screen, value, candidate, or freshness check changes. Immediately before the click, Fabric must repeat every review invariant and cancel on uncertainty. One arm authorizes one order attempt; it must never loop or silently arm another candidate. Mineflayer remains observation-only and must never enter `Your Orders`, the creation wizard, or any transactional screen.
 
@@ -48,4 +50,4 @@ The Fabric executor may press the final `Create Order` control only for one cand
 
 ## Acceptance test sequence
 
-Use a deliberately low-cost base item and cap the test escrow independently of the normal flipping budget. Capture each screen transition, verify the debited balance equals the review total, confirm the order appears once in `Your Orders`, then manually cancel it and verify the refund. Keep the normal-budget executor disabled until this acceptance test and the known failure cases pass.
+Use a deliberately low-cost base item and lower `order_session_budget` independently of the normal flipping budget. Capture each screen transition, verify the debited balance equals the review total, confirm the order appears once in `Your Orders`, then manually cancel it and verify the refund. Increase the session budget only after this acceptance test and the known failure cases pass.

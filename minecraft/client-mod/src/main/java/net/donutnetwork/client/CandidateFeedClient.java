@@ -22,6 +22,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -60,6 +62,7 @@ final class CandidateFeedClient implements AutoCloseable {
     private final AtomicReference<List<Candidate>> candidates = new AtomicReference<>(List.of());
     private final AtomicReference<PortfolioAllocator.Allocation> allocation;
     private final AtomicReference<Status> status = new AtomicReference<>(new Status("waiting", Instant.EPOCH, "not started", 0, 0));
+    private final AtomicReference<Instant> generatedAt = new AtomicReference<>(Instant.EPOCH);
     private final AtomicLong balance;
     private final AtomicReference<String> balanceSource = new AtomicReference<>("saved/manual");
     private final AtomicLong usedSlots;
@@ -95,6 +98,17 @@ final class CandidateFeedClient implements AutoCloseable {
     int usedOrderSlots() { return unpackOrder(usedSlots.get()); }
     int usedAuctionSlots() { return unpackAuction(usedSlots.get()); }
     boolean diagnosticsEnabled() { return diagnostics.get(); }
+    Instant generatedAt() { return generatedAt.get(); }
+    long orderSessionBudget() { return config.orderSessionBudget(); }
+    Set<String> orderServerHosts() { return config.orderServerHosts(); }
+
+    Optional<Candidate> candidate(String id) {
+        return candidates.get().stream().filter(value -> value.id().equals(id)).findFirst();
+    }
+
+    boolean isAllocated(String id) {
+        return allocation.get().selections().stream().anyMatch(selection -> selection.candidate().id().equals(id));
+    }
 
     void adjustBalance(long delta) {
         balance.updateAndGet(value -> delta > 0 && value > Long.MAX_VALUE - delta ? Long.MAX_VALUE : Math.max(0, value + delta));
@@ -119,6 +133,19 @@ final class CandidateFeedClient implements AutoCloseable {
 
     void setDiagnostics(boolean enabled) { diagnostics.set(enabled); ClientConfig.saveDiagnostics(enabled); }
 
+    void diagnostic(String event, String code, Map<String, String> fields) {
+        enqueueDiagnostic(event, code, 0, fields);
+    }
+
+    void recordOrderSubmitted(Candidate candidate) {
+        balance.updateAndGet(value -> Math.max(0, value - candidate.acquisitionCost()));
+        usedSlots.updateAndGet(value -> packSlots(Math.min(20, unpackOrder(value) + 1), unpackAuction(value)));
+        balanceSource.set("local pending order");
+        persistAndAllocate();
+        enqueueDiagnostic("order_workflow", "submitted", 0, Map.of("candidate_state", candidate.state(),
+                "route", candidate.route(), "reason_code", "explicit_local_arm"));
+    }
+
     void focus(Candidate candidate) {
         scheduler.execute(() -> {
             try {
@@ -140,7 +167,7 @@ final class CandidateFeedClient implements AutoCloseable {
             byte[] encoded = body.readNBytes(MAX_RESPONSE_BYTES + 1);
             if (encoded.length > MAX_RESPONSE_BYTES) throw new IllegalStateException("candidate feed exceeds 1 MiB");
             if (response.statusCode() != 200) throw new IllegalStateException("backend returned HTTP " + response.statusCode());
-            DecodedFeed feed = decode(encoded); candidates.set(feed.candidates()); etag = response.headers().firstValue("ETag").orElse("");
+            DecodedFeed feed = decode(encoded); candidates.set(feed.candidates()); generatedAt.set(feed.generatedAt()); etag = response.headers().firstValue("ETag").orElse("");
             PortfolioAllocator.Allocation next = allocator.allocate(feed.candidates(), balance(), usedOrderSlots(), usedAuctionSlots());
             allocation.set(next); status.set(new Status("ready", Instant.now(), "connected", feed.version(), feed.candidates().size()));
             emitNew(next);

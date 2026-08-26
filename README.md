@@ -4,7 +4,7 @@ A functionality-first market system with three permanent roles:
 
 - **Mineflayer observers** read DonutSMP order menus and submit evidence. They cannot trade.
 - **Go backend** reads the official auction API, coordinates observers, retains SQLite evidence, and scores order/auction routes.
-- **Fabric client** receives scored candidates, keeps each player's balance and slot usage local, allocates 20 order and 18 auction slots, and provides manual navigation.
+- **Fabric client** receives scored candidates, keeps each player's balance and slot usage local, allocates 20 order and 18 auction slots, and can create one explicitly armed order through verified server screens.
 
 The stable API auction-only release remains at branch `codex/auction-only` and tag `auction-only-v1.0.0`. This branch, `codex/auction-orders`, is the research/production path for combined order and auction evidence. No fake rows are generated.
 
@@ -61,7 +61,7 @@ Requirements: Minecraft 1.21.11, Java 21, Fabric Loader 0.19.2+, and Fabric API.
 gradle -p minecraft/client-mod clean test build
 ```
 
-Copy the remapped JAR from `minecraft/client-mod/build/libs/` to the instance's `mods` directory. A verified shadow build is also checked in at `outputs/donut-market-flips-2.0.0-alpha.1.jar`. Press `N` or run `/dn`.
+Copy the remapped JAR from `minecraft/client-mod/build/libs/` to the instance's `mods` directory. The verified build is checked in at `outputs/donut-market-flips-2.1.0-alpha.1.jar`. Press `N` or run `/dn`.
 
 The generated `config/donut-network.properties` contains:
 
@@ -74,11 +74,13 @@ balance=10000000
 used_order_slots=0
 used_auction_slots=0
 diagnostics=true
+order_session_budget=10000000
+order_server_hosts=play.donutsmp.net,donutsmp.net
 ```
 
 Balance, used slots, reserve, and the final portfolio stay local. Balance messages containing a clear `balance`, `money`, or `cash` label update the local value; the screen also provides a manual adjustment. Position/outcome inference remains disabled in shadow mode until sanitized real transaction-message fixtures exist—the mod does not guess that opening a menu means a trade occurred. The mod applies a dynamic 15–35% reserve and selects the highest risk-adjusted daily-profit batches that fit the player's cash, 20 order slots, 18 auction slots, executable volume, and exposure caps.
 
-Selecting a combined candidate starts a backend focused watch and opens only `/orders` or a validated canonical `/ah <item_id>` search. Every economic action remains manual.
+The main candidate row remains a manual `/orders` or validated `/ah <item_id>` navigation shortcut. `Arm 1` opens a local review showing the exact item, quantity, per-item reward, maximum escrow, expected listing, conservative profit, and remaining session budget. Pressing `ARM ONE ORDER` authorizes one attempt: Fabric waits for a focused refresh, verifies each 1.21.11 server screen and value, and presses `Create Order` once. A changed candidate, stale market, ambiguous item, unexpected screen, exhausted balance/slots, or budget violation stops the workflow. It never loops and does not claim or relist items yet.
 
 Sanitized diagnostics are enabled by default and can be disabled in `/dn`. They contain only documented state, version, latency, route, decision, and error-code fields—never chat, usernames, credentials, server URLs, NBT, or inventories.
 
