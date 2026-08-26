@@ -161,11 +161,13 @@ func (e *Engine) Observe(raw Listing) (Listing, bool) {
 		e.expireLocked(now)
 		e.lastActiveSweep = now
 	}
-	l, duplicate, previousSignature := e.observeLocked(raw, now)
+	l, duplicate, previousSignature, changed := e.observeLocked(raw, now)
 	if previousSignature != "" && previousSignature != l.Signature.Exact {
 		e.refreshActiveValuationLocked(previousSignature)
 	}
-	e.refreshActiveValuationMaybeLocked(l.Signature, l.UnitPrice, now)
+	if changed {
+		e.refreshActiveValuationMaybeLocked(l.Signature, l.UnitPrice, now)
+	}
 	return l, duplicate
 }
 
@@ -182,10 +184,13 @@ func (e *Engine) ObserveBatch(rawListings []Listing) ([]Listing, int) {
 	touchedBases := map[string]struct{}{}
 	duplicates := 0
 	for _, raw := range rawListings {
-		listing, duplicate, previousSignature := e.observeLocked(raw, now)
+		listing, duplicate, previousSignature, changed := e.observeLocked(raw, now)
 		out = append(out, listing)
 		if duplicate {
 			duplicates++
+		}
+		if !changed {
+			continue
 		}
 		touchedSignatures[listing.Signature.Exact] = struct{}{}
 		touchedBases[listing.Signature.Base] = struct{}{}
@@ -202,13 +207,15 @@ func (e *Engine) ObserveBatch(rawListings []Listing) ([]Listing, int) {
 	return out, duplicates
 }
 
-func (e *Engine) observeLocked(raw Listing, now time.Time) (Listing, bool, string) {
+func (e *Engine) observeLocked(raw Listing, now time.Time) (Listing, bool, string, bool) {
 	l := NormalizeListing(raw)
 	if l.FirstSeen.IsZero() {
 		l.FirstSeen = now
 	}
 	l.LastSeen = now
 	if old, ok := e.listings[l.Fingerprint]; ok {
+		changed := old.Signature != l.Signature || old.TotalPrice != l.TotalPrice || old.Item.Quantity != l.Item.Quantity ||
+			old.SellerUUID != l.SellerUUID || old.SellerName != l.SellerName || !old.ExpiresAt.Equal(l.ExpiresAt)
 		l.FirstSeen = old.FirstSeen
 		if l.ExpiresAt.IsZero() {
 			l.ExpiresAt = old.ExpiresAt
@@ -220,12 +227,12 @@ func (e *Engine) observeLocked(raw Listing, now time.Time) (Listing, bool, strin
 		}
 		e.listings[l.Fingerprint] = l
 		e.putActiveLocked(l, old.Signature.Exact != l.Signature.Exact)
-		return l, true, old.Signature.Exact
+		return l, true, old.Signature.Exact, changed
 	}
 	l.ObserverCount = max(1, l.ObserverCount)
 	e.listings[l.Fingerprint] = l
 	e.putActiveLocked(l, true)
-	return l, false, ""
+	return l, false, "", true
 }
 
 func (e *Engine) SweepExpired(now time.Time) int {
@@ -404,6 +411,13 @@ func (e *Engine) Snapshot() Snapshot {
 	}
 	return Snapshot{Version: e.version, GeneratedAt: generatedAt, Valuations: vals}
 }
+
+func (e *Engine) Version() uint64 {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.version
+}
+
 func (e *Engine) Valuation(signature string) (Valuation, bool) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -450,11 +464,24 @@ func (e *Engine) Opportunities(thresholds Thresholds, limit int) []Opportunity {
 func (e *Engine) AnalyzeOpportunities(thresholds Thresholds, limit int) ([]Opportunity, OpportunityReport) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
+	return e.analyzeListingsLocked(listingValues(e.listings), thresholds, limit)
+}
+
+// AnalyzeListings evaluates only the supplied active-book slice against the
+// engine's completed-sale model. The subsecond newest-page lane uses this to
+// avoid rescoring the entire broad auction window on every API poll.
+func (e *Engine) AnalyzeListings(listings []Listing, thresholds Thresholds, limit int) ([]Opportunity, OpportunityReport) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.analyzeListingsLocked(listings, thresholds, limit)
+}
+
+func (e *Engine) analyzeListingsLocked(listings []Listing, thresholds Thresholds, limit int) ([]Opportunity, OpportunityReport) {
 	now := e.now()
 	out := make([]Opportunity, 0)
-	report := OpportunityReport{Listings: len(e.listings)}
+	report := OpportunityReport{Listings: len(listings)}
 	quantityCache := make(map[quantityValuationKey]quantityValuationResult)
-	for _, listing := range e.listings {
+	for _, listing := range listings {
 		if listing.TotalPrice <= 0 {
 			report.InvalidPrice++
 			continue

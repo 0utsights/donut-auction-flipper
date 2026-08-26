@@ -86,6 +86,8 @@ Second-PC builds support independent `backend` and `collector` targets and retai
 
 The constrained second-PC profile runs the official API newest-page lane every 500ms. This remains sub-second at the polling boundary while leaving roughly half of the shared 240-request/minute budget for broad valuation work; the prior 250ms profile could consume that entire budget by itself. Raw scan rows retain 24 hours because current pricing uses two minutes and confirmed fills are stored separately for 90 days. Automatic SQLite backups are coalesced to the newest snapshot per UTC day for seven days, while manually named safety backups are never pruned. This prevents development restarts from multiplying several-hundred-megabyte copies without weakening daily recovery coverage.
 
+The fast lane scores only the newest page it just fetched; the background broad pass remains responsible for the wider active book. Repeated identical listings refresh their liveness without rebuilding valuations, and an unchanged page republishes freshness from the previous immutable result instead of rescoring thousands of older listings.
+
 Retention deletes are intentionally committed in small batches and yield between batches. The child-row foreign key has a supporting `order_rows(scan_id)` index so cascades do not repeatedly scan the complete observation table. Maintenance therefore shares the single SQLite connection with live observer submissions instead of holding it for a database-wide transaction.
 
 ## 2026-08-22 — Barebones client and debug UI

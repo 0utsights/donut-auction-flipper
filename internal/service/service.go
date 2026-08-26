@@ -370,14 +370,23 @@ func (s *Server) CollectFastOnce(ctx context.Context) error {
 	if engine == nil {
 		return nil
 	}
-	engine.ObserveBatch(listings)
-	opportunities, analysis := engine.AnalyzeOpportunities(s.cfg.Thresholds, s.cfg.OpportunityLimit)
-	flips := make([]Flip, 0, len(opportunities))
-	for _, opportunity := range opportunities {
-		flips = append(flips, mapFlip(opportunity))
+	engineVersion := engine.Version()
+	observed, _ := engine.ObserveBatch(listings)
+	previous := s.Snapshot()
+	analysis, valuations, flips := previous.Analysis, previous.Valuations, previous.Flips
+	valuationCount := previous.Status.ValuationCount
+	if engine.Version() != engineVersion {
+		opportunities, newestAnalysis := engine.AnalyzeListings(observed, s.cfg.Thresholds, s.cfg.OpportunityLimit)
+		analysis = newestAnalysis
+		flips = make([]Flip, 0, len(opportunities))
+		for _, opportunity := range opportunities {
+			flips = append(flips, mapFlip(opportunity))
+		}
+		marketSnapshot := engine.Snapshot()
+		valuationCount = len(marketSnapshot.Valuations)
+		valuations = topValuations(marketSnapshot.Valuations, 25)
 	}
 	now := s.now()
-	marketSnapshot := engine.Snapshot()
 	// A completed broad scan may replace the engine while this request is being
 	// evaluated. Never let a result from that retired model replace the new feed.
 	if s.engine.Load() != engine {
@@ -386,9 +395,9 @@ func (s *Server) CollectFastOnce(ctx context.Context) error {
 	if _, err := s.orders.RefreshIfDue(ctx, engine, 750*time.Millisecond); err != nil {
 		s.logger.Warn("fast order candidates refresh failed", "error", err)
 	}
-	status := Status{ValuationCount: len(marketSnapshot.Valuations), FlipCount: len(flips), API: s.upstream.Stats()}
+	status := Status{ValuationCount: valuationCount, FlipCount: len(flips), API: s.upstream.Stats()}
 	version := s.publishFastSnapshot(Snapshot{GeneratedAt: now, Status: status, Thresholds: s.cfg.Thresholds,
-		Analysis: analysis, Valuations: topValuations(marketSnapshot.Valuations, 25), Flips: flips}, started, now, len(listings))
+		Analysis: analysis, Valuations: valuations, Flips: flips}, started, now, len(listings))
 	s.logger.Debug("fast auction refresh complete", "version", version, "listings", len(listings), "flips", len(flips), "duration", now.Sub(started))
 	return nil
 }

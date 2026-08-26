@@ -103,6 +103,58 @@ func TestEngineRanksOnlyQualifiedActiveOpportunities(t *testing.T) {
 	}
 }
 
+func TestAnalyzeListingsRestrictsFastLaneToNewestPage(t *testing.T) {
+	e := NewEngine()
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	e.now = func() time.Time { return now }
+	for index := 0; index < 12; index++ {
+		e.AddTransactions([]Transaction{{
+			SellerName: fmt.Sprintf("seller-%d", index), Item: Item{ID: "diamond", Quantity: 1},
+			TotalPrice: 4_000_000, SoldAt: now.Add(-time.Duration(index) * time.Minute),
+		}})
+	}
+	observed, _ := e.ObserveBatch([]Listing{
+		{AuthoritativeID: "older-cheap", SellerName: "cheap", Item: Item{ID: "diamond", Quantity: 1}, TotalPrice: 2_000_000},
+		{AuthoritativeID: "newest-fair", SellerName: "fair", Item: Item{ID: "diamond", Quantity: 1}, TotalPrice: 4_000_000},
+	})
+	thresholds := Thresholds{MinProfit: 1_000_000, MinMarginBPS: 1_000, MinVolume24h: 1}
+	all, _ := e.AnalyzeOpportunities(thresholds, 10)
+	if len(all) != 1 || all[0].Listing.AuthoritativeID != "older-cheap" {
+		t.Fatalf("broad analysis lost the older opportunity: %+v", all)
+	}
+	newest, report := e.AnalyzeListings(observed[1:], thresholds, 10)
+	if len(newest) != 0 || report.Listings != 1 || report.LowProfit != 1 {
+		t.Fatalf("fast analysis escaped its supplied page: opportunities=%+v report=%+v", newest, report)
+	}
+}
+
+func TestObserveBatchDoesNotRevalueUnchangedListings(t *testing.T) {
+	e := NewEngine()
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	e.now = func() time.Time { return now }
+	for index := 0; index < 12; index++ {
+		e.AddTransactions([]Transaction{{
+			SellerName: fmt.Sprintf("seller-%d", index), Item: Item{ID: "diamond", Quantity: 1},
+			TotalPrice: 4_000_000, SoldAt: now.Add(-time.Duration(index) * time.Minute),
+		}})
+	}
+	listing := Listing{AuthoritativeID: "stable", SellerName: "seller", Item: Item{ID: "diamond", Quantity: 1}, TotalPrice: 3_000_000}
+	e.ObserveBatch([]Listing{listing})
+	version := e.Snapshot().Version
+	now = now.Add(time.Second)
+	if _, duplicates := e.ObserveBatch([]Listing{listing}); duplicates != 1 {
+		t.Fatalf("duplicates=%d want=1", duplicates)
+	}
+	if after := e.Snapshot().Version; after != version {
+		t.Fatalf("unchanged listing triggered revaluation: before=%d after=%d", version, after)
+	}
+	listing.TotalPrice = 2_000_000
+	e.ObserveBatch([]Listing{listing})
+	if after := e.Snapshot().Version; after <= version {
+		t.Fatalf("economic change did not trigger revaluation: before=%d after=%d", version, after)
+	}
+}
+
 func TestStackReferenceIsCappedBySingularUnitValue(t *testing.T) {
 	e := NewEngine()
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
@@ -245,5 +297,25 @@ func BenchmarkAnalyzeQuantityAwareOpportunities(b *testing.B) {
 	b.ReportAllocs()
 	for index := 0; index < b.N; index++ {
 		e.AnalyzeOpportunities(thresholds, 100)
+	}
+}
+
+func BenchmarkAnalyzeNewestPage(b *testing.B) {
+	e := NewEngine()
+	now := time.Now().UTC()
+	e.now = func() time.Time { return now }
+	e.AddTransactions(quantitySales(now, "iron_ingot", 1, 10_000, 24, "single"))
+	e.AddTransactions(quantitySales(now, "iron_ingot", 64, 500_000, 24, "stack"))
+	listings := make([]Listing, 1_000)
+	for index := range listings {
+		listings[index] = Listing{AuthoritativeID: fmt.Sprintf("listing-%d", index), SellerName: fmt.Sprintf("seller-%d", index), Item: Item{ID: "iron_ingot", Quantity: 64}, TotalPrice: 100_000 + int64(index)}
+	}
+	observed, _ := e.ObserveBatch(listings)
+	newestPage := observed[:45]
+	thresholds := Thresholds{MinProfit: 1, MinMarginBPS: 1, MinConfidenceBPS: 1, MinVolume24h: 1}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for index := 0; index < b.N; index++ {
+		e.AnalyzeListings(newestPage, thresholds, 100)
 	}
 }
