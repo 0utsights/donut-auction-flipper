@@ -20,7 +20,7 @@ The review total observed was exactly `amount × unit price`; no additional crea
 
 Model the wizard as a fail-closed state machine rather than coordinate macros:
 
-`ORDER_BOARD -> YOUR_ORDERS -> ITEM_PICKER -> AMOUNT -> UNIT_PRICE -> REVIEW -> PLAYER_CONFIRM`
+`ORDER_BOARD -> YOUR_ORDERS -> ITEM_PICKER -> AMOUNT -> UNIT_PRICE -> REVIEW -> FINAL_REVALIDATION -> CREATE`
 
 For every transition, Fabric must identify the expected screen from its title and visible controls, then verify the resulting screen before continuing. Any unknown title, missing control, ambiguous item result, server message, disconnect, or unexpected balance change cancels the workflow.
 
@@ -35,17 +35,17 @@ Before exposing the final confirmation, Fabric must verify:
 - Auction exit valuation is still current and profitable after fees.
 - No equivalent personal order is already active or pending locally.
 
-The first implementation should prepare the wizard and require the player to press the final `Create Order` control. A later Fabric-only executor may press it after a separately visible arming step and a last-moment revalidation. Mineflayer remains observation-only and must never enter `Your Orders`, the creation wizard, or any transactional screen.
+The Fabric executor may press the final `Create Order` control only for one candidate that the player explicitly armed in the local UI. Arming must be disabled by default, visibly identify the item, quantity, maximum escrow, and session budget, and expire if any screen, value, candidate, or freshness check changes. Immediately before the click, Fabric must repeat every review invariant and cancel on uncertainty. One arm authorizes one order attempt; it must never loop or silently arm another candidate. Mineflayer remains observation-only and must never enter `Your Orders`, the creation wizard, or any transactional screen.
 
-## Data still required before execution automation
+## Data still required for safe live acceptance
 
 - Fabric screen/widget identifiers for all five wizard screens; the live discovery established the visible contract but not stable internal widget IDs.
 - Behavior for invalid, fractional, suffix-formatted, minimum, maximum, and overflow amounts/prices.
 - Whether creation fees exist but are omitted from the review screen.
 - Exact server responses for success, insufficient funds, slot exhaustion, price changes, duplicate orders, disconnects, and timeouts.
 - Personal-order row schema, filled-item collection flow, cancellation/refund behavior, and expiry.
-- A low-value end-to-end acceptance order followed by cancellation/refund verification.
+- A low-value, explicitly armed end-to-end acceptance order followed by manual cancellation/refund verification before enabling normal-budget order creation.
 
 ## Acceptance test sequence
 
-Use a deliberately low-cost base item and cap the test escrow independently of the normal flipping budget. Capture each screen transition, verify the debited balance equals the review total, confirm the order appears once in `Your Orders`, then manually cancel it and verify the refund. Do not enable automated `Create Order` until this test and the failure cases above pass.
+Use a deliberately low-cost base item and cap the test escrow independently of the normal flipping budget. Capture each screen transition, verify the debited balance equals the review total, confirm the order appears once in `Your Orders`, then manually cancel it and verify the refund. Keep the normal-budget executor disabled until this acceptance test and the known failure cases pass.

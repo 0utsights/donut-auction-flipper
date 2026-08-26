@@ -143,7 +143,7 @@ Order discovery continues to scan every verified global page because the server 
 - The official API retains its bearer-authenticated listing and transaction endpoints and 250 requests/minute published limit.
 - Live verification found 44 entries per page and valid results beyond page 2,000. The normal scan deliberately caps at the newest 220 pages (9,680 listings) to keep detection near one minute and below the 250-request/minute key limit. It does not claim full-book coverage.
 - `/ah <item>` remains a supported manual search command; there is no relied-upon direct-auction-ID command.
-- DonutSMP permits passive market observation by authenticated accounts. If server-team rules disallow it, collectors must remain disabled.
+- The project operator explicitly confirmed on 2026-08-26 that DonutSMP staff authorize and lead this work. That authorization covers authenticated Mineflayer observers collecting order-market data and the Fabric client assisting with and executing explicitly armed player-side order creation. Mineflayer remains permanently observation-only and must never create, fulfill, cancel, claim, buy, list, transfer, or confirm an economic action.
 - The live order menu may continue omitting owner/order IDs; bounded same-page focused reductions are therefore the strongest available volume signal unless the server exposes a stable identity later.
-- The first combined-product goal is evidence collection and notify-only, player-confirmed flipping; not automated purchasing.
+- The first combined-product execution goal is a single-candidate, locally armed Fabric order-creation workflow with fail-closed screen verification and a final freshness/budget check. Claiming, auction relisting, and repeated unattended execution remain deferred until their live workflows and failure states are captured and separately implemented.
 - Loopback is the default deployment. Public binding without a downstream client token is rejected at startup.
