@@ -75,11 +75,11 @@ class ObserverRuntime {
       } catch (error) {
         message = safeMessage(error)
         this.log(error instanceof ReconnectRequiredError ? 'task_complete' : 'task_failed', `reason=${message}`)
-        // Donut expires an open /orders menu after roughly 80 seconds. That is
-        // a menu-session boundary, not a broken Minecraft connection. Reusing
-        // the authenticated connection lets the retried lease reopen /orders
-        // immediately instead of paying another login/proxy round trip.
-        const rotate = error instanceof ReconnectRequiredError || !this.connected
+        // A closed or non-opening /orders menu can leave the player connection
+        // alive while Donut silently ignores subsequent market commands. Rotate
+        // only the Minecraft session; prismarine-auth reuses the cached Microsoft
+        // authorization, so recovery does not require another device-code login.
+        const rotate = error instanceof ReconnectRequiredError || error instanceof MenuSessionEndedError || !this.connected
         if (error instanceof MenuSessionEndedError && this.connected) this.log('orders_menu_reopen_scheduled')
         if (rotate && this.connected) {
           this.connected = false
@@ -169,7 +169,11 @@ class ObserverRuntime {
     } else {
       this.log('orders_command_sending')
       navigator.sendCommand('/orders')
-      window = await waitForWindow(bot, 10_000)
+      try {
+        window = await waitForWindow(bot, 10_000)
+      } catch (error) {
+        throw new MenuSessionEndedError(`orders menu did not open: ${safeMessage(error)}`)
+      }
     }
     this.log('orders_window_opened')
     window = await this.ensureMostPerItem(bot, navigator, window, clickDelay, task.id)
@@ -214,11 +218,16 @@ class ObserverRuntime {
         if (parsed.some(order => order.signature === task.signature)) {
           if (![...schema.controls.values()].some(rule => rule.kind === 'refresh')) throw new SchemaHoldError('focused-watch refresh control is unavailable')
           if (Date.now() >= taskDeadline) throw new ReconnectRequiredError(`focused watch completed for ${task.signature ?? 'assigned item'}`)
+          const refreshCycleStartedAt = Date.now()
           await sleep(clickDelay)
           this.ensureConnected(bot)
           await clickControlAndWaitForServer(bot, navigator, 'refresh')
           this.ensureConnected(bot)
-          await sleep(Math.max(100, Math.min(5_000, task.desired_freshness_ms)))
+          // desired_freshness_ms describes the complete refresh cycle. Account
+          // for the safety delay and server acknowledgement already spent so a
+          // one-second watch does not accidentally run at almost two seconds.
+          const desiredCycle = Math.max(100, Math.min(5_000, task.desired_freshness_ms))
+          await sleep(Math.max(0, desiredCycle - (Date.now() - refreshCycleStartedAt)))
           if (!bot.currentWindow) throw new MenuSessionEndedError('order window closed during focused watch')
           window = bot.currentWindow
           sessionId = randomUUID()
