@@ -23,7 +23,7 @@ const FOCUSED_CLICK_DELAY_MS = 500
 const FOCUSED_WATCH_RUNTIME_MS = 4 * 60_000
 // Allow enough time to reach a high-value early page and then collect the
 // 30-second minimum evidence window. This remains bounded and transaction-free.
-const AUTOMATIC_FOCUSED_RUNTIME_MS = 90_000
+const AUTOMATIC_FOCUSED_RUNTIME_MS = 120_000
 // A runaway guard, not a normal scan boundary. The live market has exceeded
 // 200 pages, so discovery must continue until the server removes pagination or
 // refuses to advance it. Connections are rotated after every completed pass.
@@ -60,7 +60,7 @@ class ObserverRuntime {
       if (!task) continue
       if (!this.connected) await this.reconnect()
       this.activeTask = task
-      this.log('task_leased', `kind=${task.kind} priority=${task.priority}`)
+      this.log('task_leased', `kind=${task.kind} priority=${task.priority} target=${task.signature || '-'}`)
       await this.backend.heartbeat('scanning', task.id, task.lease_token, 0, this.bot?.player?.ping ?? 0, this.reconnects)
       let status: 'complete' | 'retry' | 'failed' = 'complete'
       let message = ''

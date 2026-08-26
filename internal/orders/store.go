@@ -875,7 +875,8 @@ func (s *Store) Debug(ctx context.Context) (DebugSnapshot, error) {
 func (s *Store) scanCoverage(ctx context.Context) (ScanCoverage, error) {
 	var value ScanCoverage
 	var last int64
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(complete),0),COALESCE(SUM(CASE WHEN complete=0 THEN 1 ELSE 0 END),0),COALESCE(SUM(unknown_schema),0),COUNT(DISTINCT page),COALESCE(MAX(page),0),COALESCE(MAX(observed_ms),0) FROM scans`).
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(complete),0),COALESCE(SUM(CASE WHEN complete=0 THEN 1 ELSE 0 END),0),COALESCE(SUM(unknown_schema),0),COUNT(DISTINCT page),COALESCE(MAX(page),0),COALESCE(MAX(observed_ms),0)
+		FROM scans WHERE observed_ms>=?`, s.now().Add(-15*time.Minute).UnixMilli()).
 		Scan(&value.Total, &value.Complete, &value.Incomplete, &value.UnknownSchema, &value.DistinctPages, &value.HighestPage, &last)
 	if err != nil {
 		return value, err

@@ -331,8 +331,17 @@ func TestUnknownOrIncompleteScanCannotCreateEconomicEvidence(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = system.Close() })
 	ctx := context.Background()
+	now := time.Now().UTC()
+	system.store.now = func() time.Time { return now }
 	_, _ = system.Register(ctx, ObserverRegistration{ObserverID: "one", ParserVersion: "p1", ProxyLabel: "proxy"})
-	batch := scan("one", "", "capture", 0, time.Now().UTC(), order("unverified", 100))
+	old := scan("one", "", "old-capture", 999, now.Add(-16*time.Minute), order("old-unverified", 100))
+	old.Complete = false
+	old.UnknownSchema = true
+	old.SchemaReason = "old fixture unknown"
+	if inserted, err := system.SaveScan(ctx, old); err != nil || !inserted {
+		t.Fatalf("old capture insert=%v err=%v", inserted, err)
+	}
+	batch := scan("one", "", "capture", 0, now, order("unverified", 100))
 	batch.Complete = false
 	batch.UnknownSchema = true
 	batch.SchemaReason = "fixture unknown"
