@@ -16,7 +16,7 @@ Last updated: 2026-08-25
 - The distinct `2.1.0-alpha.1` Fabric client polls the combined candidate feed, parses or lets the player override balance, applies a dynamic reserve, allocates within 20 order and 18 auction slots, and starts focused watches. Its Fabric-only executor presents a separate one-order arm screen, preserves cent-precise stack economics, verifies each chest/dialog transition, repeats freshness/budget/slot checks immediately before `Create Order`, and stops on any ambiguity. DonutSMP staff authorization for observer collection and locally armed Fabric order creation was explicitly confirmed by the operator on 2026-08-26.
 - Fabric diagnostics are allowlisted, batched, rate-limited, retained for 14 days, enabled with a visible opt-out, and exclude personal/secret market context.
 - Compose runs backend, collector manager, persistent data, and Caddy HTTPS termination. Loopback HTTP remains the development path.
-- The second-PC overlay bounds backend and collector CPU, memory, and process counts, uses read-only container filesystems with explicit writable mounts/tmpfs, prevents privilege escalation, and rotates container logs. This contains observer impact without slowing the measured one-observer cadence.
+- The second-PC overlay bounds backend and collector CPU, memory, and process counts, uses read-only container filesystems with explicit writable mounts/tmpfs, prevents privilege escalation, and rotates container logs. The backend receives a bounded 512 MiB temporary filesystem because SQLite's initial evidence-session backfill can exceed a small default temp area; its total memory ceiling is 1.5 GiB.
 
 ## Verified locally
 
