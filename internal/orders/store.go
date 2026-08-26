@@ -27,6 +27,8 @@ const (
 	fillRetention           = 90 * 24 * time.Hour
 	diagnosticRetention     = 14 * 24 * time.Hour
 	backupRetention         = 7 * 24 * time.Hour
+	cleanupBatchSize        = 250
+	cleanupYield            = 5 * time.Millisecond
 )
 
 type Store struct {
@@ -94,6 +96,7 @@ func (s *Store) migrate() error {
 			identity_verified INTEGER NOT NULL DEFAULT 0, observed_ms INTEGER NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS order_rows_signature_time ON order_rows(signature, observed_ms DESC)`,
 		`CREATE INDEX IF NOT EXISTS order_rows_order_time ON order_rows(observer_id, order_key, observed_ms DESC)`,
+		`CREATE INDEX IF NOT EXISTS order_rows_scan_id ON order_rows(scan_id)`,
 		`CREATE TABLE IF NOT EXISTS order_evidence_summary (
 			signature TEXT PRIMARY KEY,item_id TEXT NOT NULL,display_name TEXT NOT NULL DEFAULT '',
 			complete_scans INTEGER NOT NULL,first_seen_ms INTEGER NOT NULL,last_seen_ms INTEGER NOT NULL,
@@ -962,30 +965,48 @@ func (s *Store) Watches(ctx context.Context) ([]Watch, error) {
 }
 
 func (s *Store) Cleanup(ctx context.Context) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
+	now := s.now()
+	for _, deletion := range []struct {
+		statement string
+		cutoff    int64
+	}{
+		{`DELETE FROM scans WHERE id IN (SELECT id FROM scans WHERE observed_ms<? ORDER BY observed_ms LIMIT ?)`, now.Add(-rawObservationRetention).UnixMilli()},
+		{`DELETE FROM fill_events WHERE id IN (SELECT id FROM fill_events WHERE observed_ms<? ORDER BY observed_ms LIMIT ?)`, now.Add(-fillRetention).UnixMilli()},
+		{`DELETE FROM diagnostics WHERE id IN (SELECT id FROM diagnostics WHERE created_ms<? ORDER BY created_ms LIMIT ?)`, now.Add(-diagnosticRetention).UnixMilli()},
+		{`DELETE FROM watches WHERE id IN (SELECT id FROM watches WHERE expires_ms<? ORDER BY expires_ms LIMIT ?)`, now.UnixMilli()},
+		{`DELETE FROM tasks WHERE id IN (SELECT id FROM tasks WHERE automatic=1 AND state='completed' AND updated_ms<? ORDER BY updated_ms LIMIT ?)`, now.Add(-7 * 24 * time.Hour).UnixMilli()},
+	} {
+		if err := s.deleteInBatches(ctx, deletion.statement, deletion.cutoff); err != nil {
+			return err
+		}
 	}
-	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `DELETE FROM scans WHERE observed_ms<?`, s.now().Add(-rawObservationRetention).UnixMilli()); err != nil {
-		return err
+	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET state='completed',lease_expires_ms=0,lease_token='' WHERE kind='focused_watch' AND automatic=0 AND state='ready' AND signature NOT IN (SELECT signature FROM watches WHERE expires_ms>?)`, now.UnixMilli())
+	return err
+}
+
+// deleteInBatches keeps retention maintenance from monopolizing SQLite's single
+// connection while collectors and clients are actively using the backend.
+func (s *Store) deleteInBatches(ctx context.Context, statement string, cutoff int64) error {
+	for {
+		result, err := s.db.ExecContext(ctx, statement, cutoff, cleanupBatchSize)
+		if err != nil {
+			return err
+		}
+		removed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if removed < cleanupBatchSize {
+			return nil
+		}
+		timer := time.NewTimer(cleanupYield)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM fill_events WHERE observed_ms<?`, s.now().Add(-fillRetention).UnixMilli()); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM diagnostics WHERE created_ms<?`, s.now().Add(-diagnosticRetention).UnixMilli()); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM watches WHERE expires_ms<?`, s.now().UnixMilli()); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, `UPDATE tasks SET state='completed',lease_expires_ms=0,lease_token='' WHERE kind='focused_watch' AND automatic=0 AND state='ready' AND signature NOT IN (SELECT signature FROM watches WHERE expires_ms>?)`, s.now().UnixMilli()); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM tasks WHERE automatic=1 AND state='completed' AND updated_ms<?`, s.now().Add(-7*24*time.Hour).UnixMilli()); err != nil {
-		return err
-	}
-	return tx.Commit()
 }
 
 func (s *Store) Backup(ctx context.Context) (string, error) {

@@ -130,6 +130,43 @@ func TestCleanupRetainsOnlyOneDayOfRawScans(t *testing.T) {
 	}
 }
 
+func TestCleanupCascadesExpiredScansAcrossBatches(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	for index := 0; index < cleanupBatchSize+1; index++ {
+		result, err := store.db.Exec(`INSERT INTO scans(observer_id,task_id,session_id,content_hash,screen_title,page,complete,unknown_schema,schema_reason,observed_ms,received_ms)
+			VALUES('expired','',?,?,'Orders (Page 1)',1,1,0,'',?,?)`, fmt.Sprintf("session-%d", index), fmt.Sprintf("hash-%d", index), now.Add(-25*time.Hour).UnixMilli(), now.Add(-25*time.Hour).UnixMilli())
+		if err != nil {
+			t.Fatal(err)
+		}
+		scanID, err := result.LastInsertId()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.Exec(`INSERT INTO order_rows(scan_id,observer_id,order_key,item_id,signature,display_name,quantity,max_stack_size,unit_reward,unit_reward_cents,requested_quantity,remaining_quantity,owner,expires_ms,price_position,slot,raw_field_hash,signature_complete,identity_verified,observed_ms)
+			VALUES(?,'expired',?,'minecraft:stone','minecraft:stone','Stone',1,64,1,100,1,1,'',0,1,0,?,1,1,?)`, scanID, fmt.Sprintf("order-%d", index), fmt.Sprintf("raw-%d", index), now.Add(-25*time.Hour).UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"scans", "order_rows"} {
+		var count int
+		if err := store.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("expired %s rows remain: %d", table, count)
+		}
+	}
+}
+
 func TestEmptyCandidateFeedSerializesAsArray(t *testing.T) {
 	system, err := NewSystem(Config{})
 	if err != nil {
