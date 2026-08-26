@@ -92,6 +92,8 @@ Retention deletes are intentionally committed in small batches and yield between
 
 The two-minute evidence window and 24-hour fill window have timestamp-leading indexes. Candidate refreshes must seek directly into fresh rows; they may not scan the retained multi-million-row observation table on every collector page or API poll.
 
+Historical order identities remain available to the research/debug store, but rows without a price observation in the current two-minute window do not enter auction quantity valuation. They cannot produce a candidate and evaluating them on every refresh only consumes CPU.
+
 ## 2026-08-22 — Barebones client and debug UI
 
 The in-game screen and backend debug page are intentionally plain, information-first interfaces. The Fabric screen uses an opaque fill and does not call `renderBackground`, fixing the Minecraft 1.21.11 `Can only blur once per frame` crash. Styling remains deferred.

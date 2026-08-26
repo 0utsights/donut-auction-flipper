@@ -167,6 +167,13 @@ func (s *System) refreshLocked(ctx context.Context, engine *market.Engine) error
 	}
 	valuations := make(map[string]market.Valuation, len(evidence))
 	for _, item := range evidence {
+		// enrichEvidence deliberately clears historical prices that are absent
+		// from the current two-minute window. Those rows cannot produce a
+		// candidate, so do not run the comparatively expensive quantity model
+		// for hundreds of stale signatures on every live refresh.
+		if item.BestUnitRewardCents <= 0 {
+			continue
+		}
 		// Prefer a full inventory slot. QuantityValuation still requires both
 		// singular and exact-batch sale evidence, so this cannot inflate a stack
 		// from the singular market. Fall back to one only when the exact stack
