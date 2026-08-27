@@ -20,6 +20,7 @@ mkdirSync(resolve(account.profilesFolder), { recursive: true, mode: 0o700 })
 let finished = false
 let bot: ReturnType<typeof mineflayer.createBot> | undefined
 let loginDeadline: NodeJS.Timeout | undefined
+let disconnectReason = ''
 
 function fail(error: unknown): void {
   if (finished) return
@@ -53,7 +54,8 @@ bot.once('login', () => {
   bot?.quit('authentication complete')
 })
 bot.once('error', fail)
+bot._client.once('disconnect', packet => { disconnectReason = redactSensitiveText(packet).replace(/[\r\n\0]/g, ' ').slice(0, 300) })
 bot.once('end', reason => {
-  if (!finished) fail(new Error(`Minecraft connection ended before login${reason ? `: ${String(reason).slice(0, 300)}` : ''}`))
+  if (!finished) fail(new Error(`Minecraft connection ended before login${disconnectReason ? `: ${disconnectReason}` : (reason ? `: ${String(reason).slice(0, 300)}` : '')}`))
 })
 loginDeadline = setTimeout(() => fail(new Error('Minecraft login timed out after 30 seconds')), 30_000)

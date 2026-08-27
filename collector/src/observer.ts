@@ -127,6 +127,7 @@ class ObserverRuntime {
     bot.once('login', () => this.log('minecraft_login_accepted'))
     bot.once('spawn', () => this.log('minecraft_spawn_received'))
     bot.on('error', error => this.report(new Error(`minecraft transport: ${safeMessage(error)}`)))
+    bot._client.once('disconnect', packet => this.report(new Error(`minecraft disconnect: ${safeText(packet, 300)}`)))
     bot.once('end', reason => {
       if (this.bot === bot) {
         this.connected = false
