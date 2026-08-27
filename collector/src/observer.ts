@@ -55,6 +55,8 @@ class ObserverRuntime {
 
   async run(): Promise<void> {
     await verifyEgress(this.config.account.proxyUrl, this.config.expectedEgressCheckUrl, this.config.account.expectedEgressIp)
+    this.log('proxy_egress_verified', `proxy=${this.config.account.proxyLabel}`)
+    this.log('minecraft_connecting', `version=${this.config.version}`)
     await this.connect()
     this.log('minecraft_ready')
     await this.backend.register(this.config.account.proxyLabel)
@@ -122,7 +124,9 @@ class ObserverRuntime {
       if (this.bot === bot) this.connected = false
       this.report(new Error(`kicked: ${safeText(reason, 200)}`))
     })
-    bot.on('error', this.report)
+    bot.once('login', () => this.log('minecraft_login_accepted'))
+    bot.once('spawn', () => this.log('minecraft_spawn_received'))
+    bot.on('error', error => this.report(new Error(`minecraft transport: ${safeMessage(error)}`)))
     bot.once('end', reason => {
       if (this.bot === bot) {
         this.connected = false
