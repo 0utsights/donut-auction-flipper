@@ -81,6 +81,27 @@ func TestFallingMarketUsesShortTermEstimate(t *testing.T) {
 	}
 }
 
+func TestIndependentRecentClearingPriceIsNotLowerQuartileDiscounted(t *testing.T) {
+	now := time.Date(2026, 8, 27, 22, 0, 0, 0, time.UTC)
+	prices := []int64{1_600_000, 1_699_999, 1_700_000, 1_791_400, 1_800_000, 1_800_000, 1_800_000, 1_800_000,
+		1_800_000, 1_800_000, 1_800_000, 1_800_000, 1_800_000, 1_800_000, 1_800_000, 1_810_000}
+	transactions := make([]Transaction, 0, len(prices))
+	for index, price := range prices {
+		transactions = append(transactions, Transaction{SellerUUID: string(rune('a' + index)), UnitPrice: price,
+			SoldAt: now.Add(-time.Duration(index) * time.Minute)})
+	}
+	valuation, ok := CalculateValuation(ValuationInput{Signature: "minecraft:netherite_scrap", Transactions: transactions, Now: now})
+	if !ok {
+		t.Fatal("expected valuation")
+	}
+	if valuation.ShortTermValue != 1_800_000 || valuation.FairValue != 1_800_000 {
+		t.Fatalf("recent clearing price was understated: %+v", valuation)
+	}
+	if valuation.QuickSellValue >= valuation.FairValue {
+		t.Fatalf("liquidation haircut should remain separate from fair value: %+v", valuation)
+	}
+}
+
 func TestActiveReferenceAskResistsOneBaitListing(t *testing.T) {
 	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
 	transactions := make([]Transaction, 0, 6)

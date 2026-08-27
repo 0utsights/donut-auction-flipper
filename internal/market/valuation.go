@@ -53,10 +53,13 @@ func CalculateValuation(in ValuationInput) (Valuation, bool) {
 	if shortTerm <= 0 {
 		shortTerm = longTerm
 	}
-	if len(shortSamples) >= 12 && shortWindowHours == 24 {
-		shortTerm = percentile(transactionPrices(shortSamples), 25)
-		shortWindowHours = 24
-	}
+	// Seller/day deduplication, MAD filtering, and the weighted median already
+	// protect this reference from repeated sellers and isolated outliers. Taking
+	// the lower quartile here as well systematically undervalues healthy markets
+	// with a minority of genuine quick sales (for example, Netherite Scrap at
+	// $1.6M-$1.7M while the independently supported clearing price is $1.8M).
+	// Keep the median as the observed sale target; QuickSellValue applies the
+	// separate liquidation haircut used by opportunity risk calculations.
 	fair := min64(shortTerm, longTerm)
 	mad := medianAbsoluteDeviation(prices, median(prices))
 	volBPS := 0

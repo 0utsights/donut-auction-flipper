@@ -605,6 +605,7 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 		orderCost := centsForQuantity(competitiveUnitCents, int64(quantity), true)
 		auctionGross := mulMoney(quickUnit, int64(quantity))
 		auctionNet := applyFee(auctionGross, cfg.AuctionFeeBPS)
+		listGross := recommendedListGross(valuation, quantity)
 		cycle := max(1, valuation.ExpectedSellMinutes+estimatedFillMinutes(evidence, quantity))
 		referenceAge := valuation.PriceReferenceAgeSeconds
 		if referenceAge <= 0 {
@@ -613,7 +614,7 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 		result = append(result, candidate(Candidate{
 			ID: candidateID("order_to_auction", evidence.Signature, quantity), Route: "ORDER_TO_AUCTION", State: orderState, Reason: orderReason,
 			Signature: evidence.Signature, ItemID: evidence.ItemID, ItemName: displayName(evidence), Quantity: quantity, MaxStackSize: maxStack,
-			AcquisitionCost: orderCost, ExpectedProceeds: auctionNet, OrderUnitRewardCents: competitiveUnitCents, TargetListPrice: auctionGross,
+			AcquisitionCost: orderCost, ExpectedProceeds: auctionNet, OrderUnitRewardCents: competitiveUnitCents, TargetListPrice: listGross,
 			CompletionBPS: completion, ExpectedCycleMinutes: cycle,
 			ExecutableBatches: executable, ResearchBatches: researchBatches, QueuePosition: 1, OrderSlots: 1, AuctionSlots: 1, InventorySlots: inventorySlots,
 			ConfidenceBPS: valuation.ConfidenceBPS, OrderTier: evidence.Tier, SignatureComplete: evidence.SignatureComplete, ResearchFreshAt: evidence.LastSeenAt, OrderFreshAt: evidence.FocusedSeenAt, FocusedFreshAt: evidence.FocusedSeenAt, AuctionFreshAt: valuation.GeneratedAt,
@@ -674,6 +675,31 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 		}
 	}
 	return result
+}
+
+// recommendedListGross is the player-facing listing price. Candidate profit is
+// deliberately calculated from QuickSellValue instead, so displaying the
+// observed clearing price cannot make the risk model optimistic. When current
+// competition is below that clearing price, undercut the second independent
+// seller by $1,000 for the whole listing; ActiveReferenceAsk intentionally
+// resists one bait listing.
+func recommendedListGross(valuation market.Valuation, quantity int) int64 {
+	quickGross := mulMoney(valuation.QuickSellValue, int64(quantity))
+	unitTarget := valuation.FairValue
+	if unitTarget <= 0 {
+		unitTarget = valuation.QuickSellValue
+	}
+	target := mulMoney(unitTarget, int64(quantity))
+	if valuation.ActiveReferenceAsk > 0 {
+		competitive := mulMoney(valuation.ActiveReferenceAsk, int64(quantity))
+		if competitive > 1_000 {
+			competitive -= 1_000
+		}
+		if competitive > 0 {
+			target = min64(target, competitive)
+		}
+	}
+	return max64(quickGross, target)
 }
 
 func effectiveOrderUnitReward(evidence Evidence, now time.Time) int64 {

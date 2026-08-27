@@ -1447,6 +1447,30 @@ func TestBuildCandidatesUsesAPIProvenExitQuantityBelowStackLimit(t *testing.T) {
 	t.Fatal("missing order-to-auction candidate")
 }
 
+func TestCandidateDisplaysClearingPriceWhileScoringQuickSale(t *testing.T) {
+	now := time.Date(2026, 8, 27, 22, 0, 0, 0, time.UTC)
+	evidence := Evidence{ItemID: "minecraft:netherite_scrap", Signature: "minecraft:netherite_scrap", DisplayName: "Netherite Scrap",
+		Tier: "research", CompleteScans: 4, BestUnitRewardCents: 160_000_000, ObservedQuantity: 1, MaxStackSize: 64,
+		LastSeenAt: now, Stable: true, SignatureComplete: true}
+	valuation := market.Valuation{Signature: evidence.Signature, PricingQuantity: 1, FairValue: 1_800_000,
+		QuickSellValue: 1_746_000, SingularQuickSell: 1_746_000, ActiveReferenceAsk: 2_000_000,
+		Volume24h: 25, PriceSellerCount: 16, ConfidenceBPS: 8_000, ExpectedSellMinutes: 30, GeneratedAt: now}
+	values := buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{AuctionFeeBPS: 250}, now)
+	for _, value := range values {
+		if value.Route != "ORDER_TO_AUCTION" {
+			continue
+		}
+		if value.TargetListPrice != 1_800_000 {
+			t.Fatalf("display target=%d want observed clearing price 1800000", value.TargetListPrice)
+		}
+		if value.ExpectedProceeds != 1_702_350 {
+			t.Fatalf("risk proceeds=%d want quick-sale value after fees 1702350", value.ExpectedProceeds)
+		}
+		return
+	}
+	t.Fatal("missing order-to-auction candidate")
+}
+
 func TestCandidateScoringSaturatesInsteadOfOverflowing(t *testing.T) {
 	value := candidate(Candidate{
 		AcquisitionCost:      1,
