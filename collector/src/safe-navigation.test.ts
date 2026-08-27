@@ -26,7 +26,7 @@ test('only the exact orders command is allowed', () => {
 test('allows only one canonical item argument for read-only order search', () => {
   const { bot, schemas } = fixture(); const navigator = new SafeNavigator(bot, schemas)
   navigator.searchOrders('minecraft:redstone_block')
-  assert.deepEqual(bot.commands, ['/orders redstone_block'])
+  assert.deepEqual(bot.commands, ['/order redstone_block'])
   assert.throws(() => navigator.searchOrders('minecraft:redstone block'), /not allowlisted/)
   assert.throws(() => navigator.searchOrders('minecraft:my'), /not allowlisted/)
   assert.throws(() => navigator.searchOrders('minecraft:reload'), /not allowlisted/)

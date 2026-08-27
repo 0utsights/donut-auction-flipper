@@ -187,6 +187,8 @@ class ObserverRuntime {
       }
       globalWindow = await this.ensureMostPerItem(bot, navigator, globalWindow, clickDelay, task.id)
       bot.closeWindow(globalWindow)
+      await sleep(FOCUSED_CLICK_DELAY_MS)
+      this.ensureConnected(bot)
       this.log('orders_item_search_sending', `signature=${task.signature}`)
       navigator.searchOrders(task.signature)
       try {

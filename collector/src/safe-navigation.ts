@@ -29,7 +29,7 @@ export class SafeNavigator {
   searchOrders(signature: string): void {
     const match = itemSignature.exec(signature)
     if (!match || forbiddenSearch.test(match[1]!)) throw new Error('collector order search is not allowlisted')
-    this.bot.chat(`/orders ${match[1]}`)
+    this.bot.chat(`/order ${match[1]}`)
   }
 
   schemaFor(window: WindowView | null | undefined): MenuSchema | undefined {
