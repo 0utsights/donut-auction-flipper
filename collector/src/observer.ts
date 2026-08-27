@@ -9,6 +9,7 @@ import { EgressMismatchError, minecraftConnect, proxyAgent, verifyEgress } from 
 import { redactSensitiveText } from './redaction.js'
 import { SafeNavigator, type WindowView } from './safe-navigation.js'
 import { loadSchemas } from './schemas.js'
+import { taskResultForFailure, type TaskFailureClass } from './task-policy.js'
 import { PARSER_VERSION, SCHEMA_VERSION, type ItemView, type MenuSchema, type ObserverTask, type RuntimeConfig, type ScanBatch } from './types.js'
 import { beginServerWindowUpdate, WindowClosedError, type WindowUpdateSource } from './window-update.js'
 
@@ -82,7 +83,11 @@ class ObserverRuntime {
         await this.execute(task)
       } catch (error) {
         message = safeMessage(error)
-        this.log(error instanceof ReconnectRequiredError ? 'task_complete' : 'task_failed', `reason=${message}`)
+        const failure: TaskFailureClass = error instanceof SchemaHoldError ? 'schema_hold'
+          : error instanceof ReconnectRequiredError ? 'reconnect_required'
+            : error instanceof MenuSessionEndedError ? 'menu_session_ended' : 'other'
+        status = taskResultForFailure(task.kind, task.priority, failure)
+        this.log(status === 'complete' ? 'task_complete' : 'task_failed', `reason=${message}`)
         // A closed or non-opening /orders menu can leave the player connection
         // alive while Donut silently ignores subsequent market commands. Rotate
         // only the Minecraft session; prismarine-auth reuses the cached Microsoft
@@ -94,7 +99,6 @@ class ObserverRuntime {
           this.bot?.quit('collector connection rotation')
         }
         reconnect = rotate || !this.connected
-        status = error instanceof SchemaHoldError ? 'failed' : (error instanceof ReconnectRequiredError ? 'complete' : 'retry')
       } finally {
         this.activeTask = undefined
         this.activePage = 0

@@ -57,6 +57,7 @@ Last updated: 2026-08-27
 23. Updated the pinned collector runtime to Mineflayer 4.38.0 and minecraft-protocol 1.68.0 after live deployment isolated a post-spawn `Invalid sequence` rejection. The upstream release adds the required 1.21.4+ `player_loaded` acknowledgement; all 28 collector tests and the dependency audit pass before live redeployment.
 24. Replaced the ten-minute all-row signature veto with fail-closed latest-per-observer consensus. A newly verified row now supersedes that observer's stale conservative result immediately, while another observer's current disagreement still blocks actionability.
 25. Corrected live profile scheduling after logs showed priority-75 work interrupting discovery at page 36 and then expiring before profiles near page 100. Automatic profiles now wait for the highest-priced 120 pages and receive a 150-second focused horizon; manual watches still preempt immediately.
+26. Prevented an automatic deep profile from leasing itself indefinitely after Donut closes the order menu mid-traversal. Automatic menu failures now enter the five-minute per-item cooldown and return the observer to discovery; player-requested watches retain bounded retry behavior.
 
 A fresh post-deployment pass found no further code-only improvement that outweighed the risk of weakening conservative evidence gates or inventing button/server-outcome behavior without another real fixture.
 
