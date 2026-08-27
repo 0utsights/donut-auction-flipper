@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -41,6 +42,37 @@ class PortfolioAllocatorTest {
         CandidateFeedClient.Candidate bulk = candidate("bulk", 100_000, 50_000, 1, 1, 5);
         PortfolioAllocator.Allocation allocation = new PortfolioAllocator().allocate(List.of(bulk), 10_000_000, 19, 0);
         assertEquals(5, allocation.selections().getFirst().batches());
+        assertEquals(320, allocation.selections().getFirst().orderQuantity());
+    }
+
+    @Test void neverSelectsTwoOrdersForTheSameItem() {
+        CandidateFeedClient.Candidate strongest = candidate("same", 100_000, 80_000, 1, 1, 1);
+        CandidateFeedClient.Candidate duplicate = new CandidateFeedClient.Candidate("duplicate", strongest.route(), strongest.state(), strongest.reason(),
+                strongest.signature(), strongest.itemId(), strongest.itemName(), strongest.quantity(), strongest.maxStackSize(), 90_000,
+                strongest.expectedProceeds(), strongest.orderUnitRewardCents(), strongest.targetListPrice(), 70_000, strongest.marginBps(),
+                strongest.completionBps(), strongest.expectedCycleMinutes(), 70_000, 1, strongest.queuePosition(), strongest.orderSlots(),
+                strongest.auctionSlots(), strongest.inventorySlots(), strongest.profitInventorySlot(), strongest.confidenceBps(), strongest.orderTier(),
+                strongest.orderFreshAt(), strongest.auctionFreshAt(), strongest.orderCommand(), strongest.auctionCommand());
+        PortfolioAllocator.Allocation allocation = new PortfolioAllocator().allocate(List.of(duplicate, strongest), 10_000_000, 0, 0);
+        assertEquals(1, allocation.selections().size());
+        assertEquals("same", allocation.selections().getFirst().candidate().id());
+    }
+
+    @Test void activePersonalOrderExcludesThatItemFromAllocation() {
+        CandidateFeedClient.Candidate active = candidate("active", 100_000, 80_000, 1, 1, 1);
+        CandidateFeedClient.Candidate available = candidate("available", 100_000, 70_000, 1, 1, 1);
+        PortfolioAllocator.Allocation allocation = new PortfolioAllocator().allocate(List.of(active, available), 10_000_000, 0, 0,
+                Set.of(active.itemId()));
+        assertTrue(allocation.selections().stream().noneMatch(selection -> selection.candidate().itemId().equals(active.itemId())));
+        assertTrue(allocation.selections().stream().anyMatch(selection -> selection.candidate().itemId().equals(available.itemId())));
+    }
+
+    @Test void broadFrontierSpreadsAuctionCapacityAcrossDistinctOrders() {
+        List<CandidateFeedClient.Candidate> candidates = new ArrayList<>();
+        for (int index = 0; index < 18; index++) candidates.add(candidate("bulk_" + index, 10_000, 100_000 - index, 1, 1, 18));
+        PortfolioAllocator.Allocation allocation = new PortfolioAllocator().allocate(candidates, 10_000_000, 0, 0);
+        assertEquals(18, allocation.selections().size());
+        assertTrue(allocation.selections().stream().allMatch(selection -> selection.batches() == 1));
     }
 
     private static CandidateFeedClient.Candidate candidate(String id, long cost, long score, int orderSlots, int auctionSlots, int batches) {

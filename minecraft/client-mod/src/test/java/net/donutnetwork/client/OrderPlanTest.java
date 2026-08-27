@@ -13,11 +13,26 @@ class OrderPlanTest {
         assertEquals("5000.01", plan.priceInput());
         assertEquals(32_000_064, plan.totalCents());
         assertEquals(320_001, plan.escrowDollars());
-        assertEquals("diamond block", plan.itemPathQuery());
+        assertEquals("diamond_block", plan.itemPathQuery());
     }
 
     @Test void rejectsBackendEscrowThatDoesNotMatchQuantityAndUnitPrice() {
         assertThrows(IllegalArgumentException.class, () -> OrderPlan.from(candidate(64, 500_001, 320_000)));
+    }
+
+    @Test void combinesAllocatedStacksIntoOneOrderWithoutMultiplyingRoundup() {
+        CandidateFeedClient.Candidate candidate = candidate(64, 101, 65);
+        candidate = withExecutableBatches(candidate, 3);
+        OrderPlan plan = OrderPlan.from(candidate, 3);
+        assertEquals(64, plan.batchQuantity());
+        assertEquals(3, plan.batches());
+        assertEquals(192, plan.quantity());
+        assertEquals(19_392, plan.totalCents());
+        assertEquals(194, plan.escrowDollars());
+    }
+
+    @Test void rejectsMoreStacksThanConservativeVolume() {
+        assertThrows(IllegalArgumentException.class, () -> OrderPlan.from(candidate(64, 500_001, 320_001), 2));
     }
 
     @Test void detectsChangedEconomicSnapshot() {
@@ -65,5 +80,13 @@ class OrderPlanTest {
                 "minecraft:diamond_block", "Diamond Block", quantity, 64, cost, cost + 100_000, unitCents, cost + 120_000,
                 80_000, 2_000, 8_000, 30, 100_000, 1, 1, 1, 1, 1, 80_000,
                 9_000, "actionable", now, now, "/orders", "/ah diamond_block");
+    }
+
+    private static CandidateFeedClient.Candidate withExecutableBatches(CandidateFeedClient.Candidate value, int batches) {
+        return new CandidateFeedClient.Candidate(value.id(), value.route(), value.state(), value.reason(), value.signature(), value.itemId(),
+                value.itemName(), value.quantity(), value.maxStackSize(), value.acquisitionCost(), value.expectedProceeds(), value.orderUnitRewardCents(),
+                value.targetListPrice(), value.conservativeProfit(), value.marginBps(), value.completionBps(), value.expectedCycleMinutes(),
+                value.riskAdjustedProfitDay(), batches, value.queuePosition(), value.orderSlots(), value.auctionSlots(), value.inventorySlots(),
+                value.profitInventorySlot(), value.confidenceBps(), value.orderTier(), value.orderFreshAt(), value.auctionFreshAt(), value.orderCommand(), value.auctionCommand());
     }
 }

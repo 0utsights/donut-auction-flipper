@@ -19,6 +19,7 @@ const suffixes: Record<string, bigint> = { '': 1n, k: 1_000n, m: 1_000_000n, b: 
 const baseOnlyCommodities = new Set([
   'minecraft:ancient_debris', 'minecraft:amethyst_shard', 'minecraft:apple', 'minecraft:armadillo_scute',
   'minecraft:blaze_powder', 'minecraft:blaze_rod', 'minecraft:bone', 'minecraft:bone_meal',
+  'minecraft:blue_ice', 'minecraft:breeze_rod',
   'minecraft:charcoal', 'minecraft:coal', 'minecraft:coal_block', 'minecraft:cobblestone',
   'minecraft:copper_ingot', 'minecraft:crying_obsidian', 'minecraft:diamond', 'minecraft:diamond_block',
   'minecraft:dirt', 'minecraft:emerald', 'minecraft:emerald_block', 'minecraft:end_crystal',
@@ -27,14 +28,14 @@ const baseOnlyCommodities = new Set([
   'minecraft:glow_ink_sac', 'minecraft:gold_ingot', 'minecraft:gold_nugget', 'minecraft:golden_apple',
   'minecraft:golden_carrot', 'minecraft:gravel', 'minecraft:gunpowder', 'minecraft:heart_of_the_sea',
   'minecraft:honey_block', 'minecraft:honeycomb', 'minecraft:honeycomb_block', 'minecraft:ink_sac',
-  'minecraft:iron_ingot', 'minecraft:iron_nugget', 'minecraft:lapis_block', 'minecraft:lapis_lazuli',
+  'minecraft:gilded_blackstone', 'minecraft:hopper', 'minecraft:iron_block', 'minecraft:iron_ingot', 'minecraft:iron_nugget', 'minecraft:lapis_block', 'minecraft:lapis_lazuli',
   'minecraft:leather', 'minecraft:magma_cream', 'minecraft:nether_quartz_ore', 'minecraft:netherite_block',
   'minecraft:netherite_ingot', 'minecraft:netherite_scrap', 'minecraft:obsidian', 'minecraft:phantom_membrane',
   'minecraft:prismarine_crystals', 'minecraft:prismarine_shard', 'minecraft:quartz', 'minecraft:quartz_block',
   'minecraft:rabbit_foot', 'minecraft:rabbit_hide', 'minecraft:raw_copper', 'minecraft:raw_copper_block',
   'minecraft:raw_gold', 'minecraft:raw_gold_block', 'minecraft:raw_iron', 'minecraft:raw_iron_block',
   'minecraft:red_sand', 'minecraft:redstone', 'minecraft:redstone_block', 'minecraft:rotten_flesh',
-  'minecraft:sand', 'minecraft:scute', 'minecraft:slime_ball', 'minecraft:spider_eye',
+  'minecraft:sand', 'minecraft:scute', 'minecraft:slime_ball', 'minecraft:spider_eye', 'minecraft:sponge',
   'minecraft:stone', 'minecraft:string', 'minecraft:totem_of_undying'
 ])
 const modifierMarkers = /^(attribute_modifiers|bundle_contents|charged_projectiles|container|custom_model_data|damage|dyed_color|enchantments|firework_explosion|fireworks|instrument|map_decorations|map_id|potion_contents|stored_enchantments|trim)$/i

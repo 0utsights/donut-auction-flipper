@@ -167,6 +167,35 @@ func TestCleanupCascadesExpiredScansAcrossBatches(t *testing.T) {
 	}
 }
 
+func TestCleanupPrunesExpiredCompactPriceSamples(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	for _, value := range []struct {
+		session string
+		seen    time.Time
+	}{{"expired", now.Add(-25 * time.Hour)}, {"current", now.Add(-23 * time.Hour)}} {
+		if _, err := store.db.Exec(`INSERT INTO order_price_samples(signature,observer_id,session_id,unit_reward_cents,price_position,observed_ms)
+			VALUES('minecraft:stone','observer',?,100,1,?)`, value.session, value.seen.UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM order_price_samples`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("retained compact price samples=%d, want 1", count)
+	}
+}
+
 func TestStoreIndexesFreshnessWindows(t *testing.T) {
 	store, err := OpenStore("")
 	if err != nil {
@@ -935,17 +964,17 @@ func TestCandidateOrderObservationTrustWindow(t *testing.T) {
 		PricingQuantity: 64, Volume24h: 640, PriceSellerCount: 4, ConfidenceBPS: 9_000,
 		ExpectedSellMinutes: 30, ActiveBestAsk: 3_000, ActiveDepth: 20, GeneratedAt: now}
 
-	evidence.LastSeenAt = now.Add(-9 * time.Minute)
+	evidence.LastSeenAt = now.Add(-59 * time.Minute)
 	values := buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now)
 	if len(values) != 2 {
 		t.Fatalf("trusted observation produced no routes: %+v", values)
 	}
 	for _, value := range values {
 		if value.State != "READY" {
-			t.Fatalf("nine-minute order observation was discarded: %+v", value)
+			t.Fatalf("59-minute order observation was discarded: %+v", value)
 		}
 	}
-	evidence.LastSeenAt = now.Add(-11 * time.Minute)
+	evidence.LastSeenAt = now.Add(-61 * time.Minute)
 	values = buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now)
 	if len(values) != 2 {
 		t.Fatalf("expired observation disappeared instead of becoming stale: %+v", values)
@@ -954,6 +983,16 @@ func TestCandidateOrderObservationTrustWindow(t *testing.T) {
 		if value.State != "STALE" {
 			t.Fatalf("expired order observation remained actionable: %+v", value)
 		}
+	}
+}
+
+func TestStablePricesRejectsBroadMovementButIgnoresOneTransientSpike(t *testing.T) {
+	steadyWithSpike := []int64{100, 100, 101, 99, 100, 102, 100, 101, 99, 250, 100, 101}
+	if !stablePrices(steadyWithSpike) {
+		t.Fatal("one transient top-order spike erased a stable long-lived market")
+	}
+	if stablePrices([]int64{100, 100, 100, 100, 120, 121, 122, 123, 124, 125, 126, 127}) {
+		t.Fatal("sustained order-price movement was classified as stable")
 	}
 }
 

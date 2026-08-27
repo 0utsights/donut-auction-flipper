@@ -6,9 +6,16 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.LinkedHashMap;
+import java.util.Set;
 
 final class PortfolioAllocator {
-    record Selection(CandidateFeedClient.Candidate candidate, int batches) {}
+    record Selection(CandidateFeedClient.Candidate candidate, int batches) {
+        int orderQuantity() { return Math.multiplyExact(candidate.quantity(), batches); }
+        long capital() { return safeMultiply(candidate.acquisitionCost(), batches); }
+        long conservativeProfit() { return safeMultiply(candidate.conservativeProfit(), batches); }
+        long riskAdjustedProfitDay() { return safeMultiply(candidate.riskAdjustedProfitDay(), batches); }
+    }
     record Allocation(long balance, long deployable, int reserveBps, int availableOrderSlots,
                       int availableAuctionSlots, long riskAdjustedProfitDay, List<Selection> selections,
                       boolean timedOut) {}
@@ -17,21 +24,33 @@ final class PortfolioAllocator {
     private static final Duration SOLVER_BUDGET = Duration.ofMillis(100);
 
     Allocation allocate(List<CandidateFeedClient.Candidate> input, long balance, int usedOrderSlots, int usedAuctionSlots) {
-        List<CandidateFeedClient.Candidate> candidates = input.stream()
-                .filter(candidate -> candidate.state().equals("READY") && candidate.acquisitionCost() > 0
+        return allocate(input, balance, usedOrderSlots, usedAuctionSlots, Set.of());
+    }
+
+    Allocation allocate(List<CandidateFeedClient.Candidate> input, long balance, int usedOrderSlots, int usedAuctionSlots,
+                        Set<String> activeOrderItems) {
+        List<CandidateFeedClient.Candidate> ranked = input.stream()
+                .filter(candidate -> candidate.route().equals("ORDER_TO_AUCTION") && candidate.state().equals("READY") && candidate.acquisitionCost() > 0
                         && candidate.conservativeProfit() > 0 && candidate.riskAdjustedProfitDay() > 0
-                        && candidate.executableBatches() > 0)
+                        && candidate.executableBatches() > 0 && !activeOrderItems.contains(candidate.itemId()))
                 .sorted(Comparator.comparingLong(CandidateFeedClient.Candidate::riskAdjustedProfitDay).reversed()
                         .thenComparing(CandidateFeedClient.Candidate::id))
-                .limit(MAX_CANDIDATES).toList();
+                .toList();
+        // A Donut account may have only one acquisition order for an item. Keep
+        // the strongest route if malformed or future feeds contain duplicates.
+        Map<String, CandidateFeedClient.Candidate> unique = new LinkedHashMap<>();
+        for (CandidateFeedClient.Candidate candidate : ranked) unique.putIfAbsent(candidate.itemId(), candidate);
+        List<CandidateFeedClient.Candidate> candidates = unique.values().stream().limit(MAX_CANDIDATES).toList();
         int quality = candidates.isEmpty() ? 0 : (int) candidates.stream()
                 .mapToInt(candidate -> Math.min(candidate.confidenceBps(), candidate.completionBps())).average().orElse(0);
         int reserveBps = Math.max(1_500, Math.min(3_500, 3_500 - quality * 2_000 / 10_000));
         long deployable = safeMultiply(balance, 10_000 - reserveBps) / 10_000;
         int orderSlots = Math.max(0, 20 - usedOrderSlots);
         int auctionSlots = Math.max(0, 18 - usedAuctionSlots);
+        int usefulItems = Math.max(1, Math.min(candidates.size(), Math.min(orderSlots, auctionSlots)));
+        int maxBatchesPerItem = auctionSlots <= 0 ? 0 : Math.max(1, (auctionSlots + usefulItems - 1) / usefulItems);
         Search search = new Search(candidates, deployable, orderSlots, auctionSlots,
-                System.nanoTime() + SOLVER_BUDGET.toNanos());
+                maxBatchesPerItem, System.nanoTime() + SOLVER_BUDGET.toNanos());
         search.run(0, 0, 0, 0, 0, new int[candidates.size()], new HashMap<>(), new HashMap<>());
         List<Selection> selected = new ArrayList<>();
         for (int index = 0; index < search.best.length; index++) {
@@ -46,15 +65,17 @@ final class PortfolioAllocator {
         private final long cashLimit;
         private final int orderLimit;
         private final int auctionLimit;
+        private final int maxBatchesPerItem;
         private final long deadline;
         private final int[] best;
         private long bestScore;
         private boolean timedOut;
 
         private Search(List<CandidateFeedClient.Candidate> candidates, long cashLimit, int orderLimit,
-                       int auctionLimit, long deadline) {
+                       int auctionLimit, int maxBatchesPerItem, long deadline) {
             this.candidates = candidates; this.cashLimit = cashLimit; this.orderLimit = orderLimit;
-            this.auctionLimit = auctionLimit; this.deadline = deadline; this.best = new int[candidates.size()];
+            this.auctionLimit = auctionLimit; this.maxBatchesPerItem = maxBatchesPerItem;
+            this.deadline = deadline; this.best = new int[candidates.size()];
         }
 
         private void run(int index, long cash, int orders, int auctions, long score, int[] counts,
@@ -73,6 +94,7 @@ final class PortfolioAllocator {
             String base = candidate.itemId();
             long baseUsed = baseExposure.getOrDefault(base, 0L);
             int maximum = candidate.executableBatches();
+            maximum = Math.min(maximum, maxBatchesPerItem);
             if (candidate.acquisitionCost() > 0) maximum = Math.min(maximum, (int) Math.min(Integer.MAX_VALUE, (cashLimit - cash) / candidate.acquisitionCost()));
             if (candidate.orderSlots() > 0 && orders + candidate.orderSlots() > orderLimit) maximum = 0;
             if (candidate.auctionSlots() > 0) maximum = Math.min(maximum, (auctionLimit - auctions) / candidate.auctionSlots());

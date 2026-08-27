@@ -28,16 +28,16 @@ Before taking the final action, Fabric must verify:
 
 - The backend candidate is still `READY` and fresh.
 - The canonical item signature and selected result match.
-- Amount equals the backend's exact resale quantity.
+- Amount equals the allocator's checked total across one or more exact resale batches. Each eventual auction listing still uses the backend's exact batch quantity.
 - Unit reward equals the prepared competitive price; suffix-formatted input such as `910K` must be parsed back to an exact integer before acceptance.
 - Review total equals checked integer multiplication of amount and unit price.
 - Review total is within the user's remaining session budget, deployable balance, reserve, exposure, and order-slot limits.
 - Auction exit valuation is still current and profitable after fees.
-- No equivalent personal order is already active or pending locally.
+- No personal order for the same canonical item is already active or pending locally. Fabric persists submitted item IDs across restarts and inspects the verified `Your Orders` inventory for an exact registry-ID match before it opens the creation wizard.
 
-Because the exact success/failure chat fixtures are not yet captured, pressing the server action records a conservative local pending position rather than claiming success. The same signature cannot be armed again during that client session, and the player must verify the row in `Your Orders`.
+Because the exact success/failure chat fixtures are not yet captured, pressing the server action records a conservative local pending position rather than claiming success. The same item cannot be allocated again across client restarts. Duplicate-like server messages fail closed and persist the item lock. The player can clear local locks with `Recheck tracked orders`; this only makes the item eligible for review again, and the exact personal-order menu check still blocks creation if the order remains present.
 
-The Fabric executor may press the final `Create Order` control only for one candidate that the player explicitly armed in the local UI. Arming must be disabled by default, visibly identify the item, quantity, maximum escrow, and session budget, and expire if any screen, value, candidate, or freshness check changes. Immediately before the click, Fabric must repeat every review invariant and cancel on uncertainty. One arm authorizes one order attempt; it must never loop or silently arm another candidate. Mineflayer remains observation-only and must never enter `Your Orders`, the creation wizard, or any transactional screen.
+The Fabric executor may press the final `Create Order` control only for one portfolio selection that the player explicitly armed in the local UI. A selection combines its allocated resale batches into one acquisition order for that item; it never creates duplicate per-stack orders. Arming must be disabled by default, visibly identify the item, total quantity, resale-stack count, maximum escrow, and session budget, and expire if any screen, value, candidate, allocation, or freshness check changes. Immediately before the click, Fabric must repeat every review invariant and cancel on uncertainty. One arm authorizes one order attempt; it must never loop or silently arm another candidate. Mineflayer remains observation-only and must never enter `Your Orders`, the creation wizard, or any transactional screen.
 
 ## Data still required for safe live acceptance
 

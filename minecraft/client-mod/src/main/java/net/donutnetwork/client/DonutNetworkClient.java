@@ -36,7 +36,10 @@ public final class DonutNetworkClient implements ClientModInitializer {
             registerControls();
             feed.start();
 			candidates.start();
-			ClientReceiveMessageEvents.GAME.register((message, overlay) -> candidates.observeBalance(message.getString()));
+			ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
+				candidates.observeBalance(message.getString());
+				orderExecutor.observeServerMessage(MinecraftClient.getInstance(), message.getString());
+			});
             ClientLifecycleEvents.CLIENT_STOPPING.register(client -> { candidates.close(); feed.close(); });
             LOGGER.info("Donut market client started; backend={}", settings.backend());
         } catch (RuntimeException error) {

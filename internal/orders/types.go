@@ -153,6 +153,7 @@ type Candidate struct {
 	ExpectedCycleMinutes  int       `json:"expected_cycle_minutes"`
 	RiskAdjustedProfitDay int64     `json:"risk_adjusted_profit_day"`
 	ExecutableBatches     int       `json:"executable_batches"`
+	MaxOrderQuantity      int       `json:"max_order_quantity"`
 	ResearchBatches       int       `json:"research_batches"`
 	QueuePosition         int       `json:"queue_position"`
 	OrderSlots            int       `json:"order_slots"`
@@ -198,6 +199,7 @@ type ReferenceSelection struct {
 	ItemName              string `json:"item_name"`
 	Route                 string `json:"route"`
 	Batches               int    `json:"batches"`
+	OrderQuantity         int    `json:"order_quantity"`
 	Capital               int64  `json:"capital"`
 	RiskAdjustedProfitDay int64  `json:"risk_adjusted_profit_day"`
 }

@@ -13,21 +13,22 @@ final class OrderArmScreen extends Screen {
     private static final int WIDTH = 420;
     private final Screen parent;
     private final OrderCreationExecutor executor;
+    private final PortfolioAllocator.Selection selection;
     private final CandidateFeedClient.Candidate candidate;
     private String validation = "";
 
-    OrderArmScreen(Screen parent, OrderCreationExecutor executor, CandidateFeedClient.Candidate candidate) {
+    OrderArmScreen(Screen parent, OrderCreationExecutor executor, PortfolioAllocator.Selection selection) {
         super(Text.literal("Arm one Donut order"));
-        this.parent = parent; this.executor = executor; this.candidate = candidate;
+        this.parent = parent; this.executor = executor; this.selection = selection; this.candidate = selection.candidate();
     }
 
     @Override protected void init() {
         int left = (width - WIDTH) / 2;
         int top = Math.max(24, (height - 230) / 2);
-        OrderCreationExecutor.ArmResult check = executor.canArm(candidate, Instant.now());
+        OrderCreationExecutor.ArmResult check = executor.canArm(selection, Instant.now());
         validation = check.message();
         ButtonWidget arm = ButtonWidget.builder(Text.literal("ARM ONE ORDER"), button -> {
-            OrderCreationExecutor.ArmResult result = executor.arm(candidate);
+            OrderCreationExecutor.ArmResult result = executor.arm(selection);
             validation = result.message();
             if (result.armed()) client.setScreen(null); else clearAndInit();
         }).tooltip(Tooltip.of(Text.literal("Authorizes exactly one Create Order click after live revalidation. It does not loop.")))
@@ -42,11 +43,12 @@ final class OrderArmScreen extends Screen {
         int left = (width - WIDTH) / 2;
         int top = Math.max(24, (height - 230) / 2);
         context.drawCenteredTextWithShadow(textRenderer, title, width / 2, top, 0xFFFFFF);
-        context.drawTextWithShadow(textRenderer, Text.literal(candidate.quantity() + "× " + candidate.itemName()), left, top + 30, 0xFFFFFF);
-        context.drawTextWithShadow(textRenderer, Text.literal("Order reward: $" + OrderPlan.from(candidate).priceInput() + " per item"), left, top + 48, 0xDDDDDD);
-        context.drawTextWithShadow(textRenderer, Text.literal("Maximum escrow: $" + FlipNotifier.format(candidate.acquisitionCost())), left, top + 64, 0xDDDDDD);
-        context.drawTextWithShadow(textRenderer, Text.literal("Expected auction listing: $" + FlipNotifier.format(candidate.targetListPrice())), left, top + 80, 0xDDDDDD);
-        context.drawTextWithShadow(textRenderer, Text.literal("Conservative profit: +$" + FlipNotifier.format(candidate.conservativeProfit())), left, top + 96, 0xDDDDDD);
+        OrderPlan plan = OrderPlan.from(selection);
+        context.drawTextWithShadow(textRenderer, Text.literal(plan.quantity() + "× " + candidate.itemName() + " in one order (" + plan.batches() + " stacks)"), left, top + 30, 0xFFFFFF);
+        context.drawTextWithShadow(textRenderer, Text.literal("Order reward: $" + plan.priceInput() + " per item"), left, top + 48, 0xDDDDDD);
+        context.drawTextWithShadow(textRenderer, Text.literal("Maximum escrow: $" + FlipNotifier.format(plan.escrowDollars())), left, top + 64, 0xDDDDDD);
+        context.drawTextWithShadow(textRenderer, Text.literal("Relist: " + plan.batches() + " × " + plan.batchQuantity() + " at $" + FlipNotifier.format(candidate.targetListPrice())), left, top + 80, 0xDDDDDD);
+        context.drawTextWithShadow(textRenderer, Text.literal("Conservative total profit: +$" + FlipNotifier.format(selection.conservativeProfit())), left, top + 96, 0xDDDDDD);
         context.drawTextWithShadow(textRenderer, Text.literal("Session budget remaining: $" + FlipNotifier.format(executor.status().sessionBudget() - executor.status().sessionSpent())), left, top + 118, 0xBBBBBB);
         context.drawTextWithShadow(textRenderer, Text.literal("This arm expires on any changed, stale, or unknown screen/value."), left, top + 138, 0xAAAAAA);
         context.drawTextWithShadow(textRenderer, Text.literal(validation), left, top + 152, validation.startsWith("ready") || validation.startsWith("will") ? 0x66DD88 : 0xFF7777);

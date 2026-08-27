@@ -51,6 +51,7 @@ final class OrderCreationExecutor {
     private static final Duration SCREEN_TIMEOUT = Duration.ofSeconds(8);
     private static final long ACTION_DELAY_NANOS = Duration.ofMillis(350).toNanos();
     private static final Pattern ORDERS_TITLE = Pattern.compile("Orders \\(Page [0-9]+\\)");
+    private static final Pattern DUPLICATE_ORDER = Pattern.compile("(?i)(?:duplicate|already (?:have|has|created)|one order per item|order (?:already )?exists)");
     private static final Set<String> SEARCH_ACTIONS = Set.of("search");
     private static final Set<String> AMOUNT_ACTIONS = Set.of("next", "continue", "set amount");
     private static final Set<String> PRICE_ACTIONS = Set.of("review order");
@@ -64,7 +65,8 @@ final class OrderCreationExecutor {
     private Instant phaseAt = Instant.EPOCH;
     private long nextActionAt;
     private long sessionSpent;
-    private final Set<String> pendingSignatures = new HashSet<>();
+    private final Set<String> pendingItemIds = new HashSet<>();
+    private OrderPlan lastSubmittedPlan;
 
     OrderCreationExecutor(CandidateFeedClient feed) {
         this.feed = feed;
@@ -73,30 +75,49 @@ final class OrderCreationExecutor {
 
     Status status() { return new Status(phase, message, sessionSpent, sessionBudget, plan == null ? "" : plan.candidateId()); }
 
-    ArmResult canArm(CandidateFeedClient.Candidate candidate, Instant now) {
+    ArmResult canArm(PortfolioAllocator.Selection selection, Instant now) {
         if (status().active()) return new ArmResult(false, "another order workflow is active");
         String serverError = serverError(MinecraftClient.getInstance());
         if (!serverError.isEmpty()) return new ArmResult(false, serverError);
         OrderPlan candidatePlan;
-        try { candidatePlan = OrderPlan.from(candidate); }
+        try { candidatePlan = OrderPlan.from(selection); }
         catch (IllegalArgumentException | ArithmeticException error) { return new ArmResult(false, error.getMessage()); }
         String liveError = liveError(candidatePlan, now, true);
         if (!liveError.isEmpty() && !liveError.equals("order observation is not fresh yet")) return new ArmResult(false, liveError);
         if (candidatePlan.escrowDollars() > sessionBudget - sessionSpent) return new ArmResult(false, "order exceeds the remaining local session budget");
-        if (pendingSignatures.contains(candidatePlan.signature())) return new ArmResult(false, "an equivalent order is already pending verification this session");
+        if (feed.hasActiveOrder(candidatePlan.itemId()) || pendingItemIds.contains(candidatePlan.itemId())) {
+            return new ArmResult(false, "an order for this item is already active or pending verification");
+        }
         return new ArmResult(true, liveError.isEmpty() ? "ready to arm" : "will wait for a focused refresh");
     }
 
-    ArmResult arm(CandidateFeedClient.Candidate candidate) {
+    ArmResult arm(PortfolioAllocator.Selection selection) {
         Instant now = Instant.now();
-        ArmResult result = canArm(candidate, now);
+        ArmResult result = canArm(selection, now);
         if (!result.armed()) return result;
-        plan = OrderPlan.from(candidate);
+        plan = OrderPlan.from(selection);
         armedAt = now;
         transition(Phase.WAIT_FRESH, "waiting for a current focused order sample");
-        feed.focus(candidate);
-        feed.diagnostic("order_workflow", "armed", Map.of("candidate_state", candidate.state(), "route", candidate.route(), "reason_code", "explicit_local_arm"));
+        feed.focus(selection.candidate());
+        feed.diagnostic("order_workflow", "armed", Map.of("candidate_state", selection.candidate().state(), "route", selection.candidate().route(), "reason_code", "explicit_local_arm"));
         return new ArmResult(true, "armed one order; waiting for live revalidation");
+    }
+
+    void observeServerMessage(MinecraftClient client, String raw) {
+        if (phase == Phase.IDLE || phase == Phase.ABORTED) return;
+        String text = raw == null ? "" : raw.replace("§", " ").replace('\r', ' ').replace('\n', ' ').strip();
+        if (!text.toLowerCase(Locale.ROOT).contains("order") || !DUPLICATE_ORDER.matcher(text).find()) return;
+        OrderPlan affected = plan != null ? plan : lastSubmittedPlan;
+        if (affected != null) {
+            pendingItemIds.add(affected.itemId());
+            feed.markActiveOrder(affected.itemId());
+        }
+        phase = Phase.ABORTED;
+        message = "server reported a duplicate order; item was locked until Your Orders is reviewed";
+        plan = null;
+        feed.diagnostic("order_workflow", "duplicate_reported", Map.of("candidate_state", "unknown", "route", "ORDER_TO_AUCTION", "reason_code", "server_duplicate_message"));
+        if (client.currentScreen != null) client.setScreen(null);
+        tell(client, "Duplicate-order response detected. This item is blocked locally; open Your Orders before retrying it.");
     }
 
     void cancel(MinecraftClient client, String reason) { abort(client, reason == null || reason.isBlank() ? "cancelled by player" : reason); }
@@ -156,6 +177,12 @@ final class OrderCreationExecutor {
         if (ORDERS_TITLE.matcher(title).matches()) return;
         if (!(screen instanceof GenericContainerScreen) || !title.equals("Orders -> Your Orders")) {
             abort(client, "unexpected personal-orders screen: " + title); return;
+        }
+        if (personalOrdersContain(client, plan.itemId())) {
+            pendingItemIds.add(plan.itemId());
+            feed.markActiveOrder(plan.itemId());
+            abort(client, "an existing personal order for this item was found; duplicate creation was blocked");
+            return;
         }
         int createSlot = findCreateOrderSlot(client);
         if (createSlot < 0) { abort(client, "no verified free order slot is available"); return; }
@@ -234,10 +261,11 @@ final class OrderCreationExecutor {
         if (!liveError.isEmpty()) { abort(client, liveError); return; }
         requireButton(screen, Set.of("create order")).onPress(new MouseInput(0, 0));
         sessionSpent = Math.addExact(sessionSpent, plan.escrowDollars());
-        pendingSignatures.add(plan.signature());
-        feed.recordOrderSubmitted(current);
+        pendingItemIds.add(plan.itemId());
+        lastSubmittedPlan = plan;
+        feed.recordOrderSubmitted(current, plan);
         transition(Phase.PENDING_VERIFICATION, "Create Order sent once; server outcome is pending local verification");
-        tell(client, "Create Order sent once for " + plan.quantity() + "× " + registryName + " at $" + plan.priceInput() + " each. Verify the server outcome in Your Orders.");
+        tell(client, "Create Order sent once for " + plan.quantity() + "× " + registryName + " (" + plan.batches() + " resale stacks) at $" + plan.priceInput() + " each. Verify the server outcome in Your Orders.");
         plan = null;
     }
 
@@ -250,10 +278,12 @@ final class OrderCreationExecutor {
         if (age(current.orderFreshAt(), now).compareTo(ORDER_MAX_AGE) > 0) return "order observation is not fresh yet";
         if (age(current.auctionFreshAt(), now).compareTo(AUCTION_MAX_AGE) > 0) return "auction exit is stale";
         if (requireAllocation && !feed.isAllocated(current.id())) return "candidate no longer belongs to the local portfolio";
+        if (requireAllocation && feed.allocatedBatches(current.id()) < expected.batches()) return "allocated stack count was reduced";
+        if (feed.hasActiveOrder(expected.itemId()) || pendingItemIds.contains(expected.itemId())) return "an order for this item is already active or pending";
         PortfolioAllocator.Allocation allocation = feed.allocation();
-        if (allocation.availableOrderSlots() < 1 || allocation.availableAuctionSlots() < current.auctionSlots()) return "local market slots are exhausted";
-        if (current.acquisitionCost() > allocation.deployable()) return "order exceeds deployable balance after reserve";
-        if (current.acquisitionCost() > sessionBudget - sessionSpent) return "order exceeds the remaining local session budget";
+        if (allocation.availableOrderSlots() < 1 || allocation.availableAuctionSlots() < current.auctionSlots() * expected.batches()) return "local market slots are exhausted";
+        if (expected.escrowDollars() > allocation.deployable()) return "order exceeds deployable balance after reserve";
+        if (expected.escrowDollars() > sessionBudget - sessionSpent) return "order exceeds the remaining local session budget";
         return "";
     }
 
@@ -313,6 +343,18 @@ final class OrderCreationExecutor {
             if (itemId.toString().equals("minecraft:black_stained_glass_pane") && label.contains("create") && label.contains("order")) return index;
         }
         return -1;
+    }
+
+    private static boolean personalOrdersContain(MinecraftClient client, String expectedItemId) {
+        if (!(client.player.currentScreenHandler instanceof GenericContainerScreenHandler handler)) return false;
+        int limit = Math.min(handler.getInventory().size(), handler.slots.size());
+        for (int index = 0; index < limit; index++) {
+            ItemStack stack = handler.getSlot(index).getStack();
+            if (stack.isEmpty()) continue;
+            Identifier id = Registries.ITEM.getId(stack.getItem());
+            if (id != null && id.toString().equals(expectedItemId)) return true;
+        }
+        return false;
     }
 
     private static Dialog requireDialog(Screen screen, String exactTitle) {

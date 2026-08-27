@@ -174,7 +174,7 @@ func (s *System) refreshLocked(ctx context.Context, engine *market.Engine) error
 	valuations := make(map[string]market.Valuation, len(evidence))
 	for _, item := range evidence {
 		// enrichEvidence deliberately clears historical prices that are absent
-		// from the current two-minute window. Those rows cannot produce a
+		// from the current one-hour research window. Those rows cannot produce a
 		// candidate, so do not run the comparatively expensive quantity model
 		// for hundreds of stale signatures on every live refresh.
 		if item.BestUnitRewardCents <= 0 {
@@ -223,9 +223,13 @@ func referencePortfolio(candidates []Candidate, balance int64) []ReferenceSelect
 	var cash int64
 	ordersUsed, auctionsUsed := 0, 0
 	exactExposure, itemExposure := map[string]int64{}, map[string]int64{}
+	selectedItems := map[string]struct{}{}
 	result := []ReferenceSelection{}
 	for _, value := range candidates {
-		if value.State != "READY" || value.AcquisitionCost <= 0 || value.RiskAdjustedProfitDay <= 0 {
+		if value.Route != "ORDER_TO_AUCTION" || value.State != "READY" || value.AcquisitionCost <= 0 || value.RiskAdjustedProfitDay <= 0 {
+			continue
+		}
+		if _, duplicate := selectedItems[value.ItemID]; duplicate {
 			continue
 		}
 		maximum := value.ExecutableBatches
@@ -249,8 +253,9 @@ func referencePortfolio(candidates []Candidate, balance int64) []ReferenceSelect
 		auctionsUsed += value.AuctionSlots * maximum
 		exactExposure[value.Signature] += capital
 		itemExposure[value.ItemID] += capital
+		selectedItems[value.ItemID] = struct{}{}
 		result = append(result, ReferenceSelection{CandidateID: value.ID, ItemName: value.ItemName, Route: value.Route,
-			Batches: maximum, Capital: capital, RiskAdjustedProfitDay: mulMoney(value.RiskAdjustedProfitDay, int64(maximum))})
+			Batches: maximum, OrderQuantity: safeIntProduct(value.Quantity, maximum), Capital: capital, RiskAdjustedProfitDay: mulMoney(value.RiskAdjustedProfitDay, int64(maximum))})
 	}
 	return result
 }
@@ -294,7 +299,7 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 			state = "HOLD"
 		}
 		if !fresh {
-			state, reason = "STALE", "latest usable order observation is older than 10 minutes"
+			state, reason = "STALE", "latest usable order observation is older than one hour"
 		}
 		if valuation.Volume24h < 5 || valuation.PriceSellerCount < 3 {
 			if state == "READY" {
@@ -426,12 +431,23 @@ func candidate(value Candidate) Candidate {
 		capacity = 0
 	}
 	capacity = min(18, max(0, capacity))
+	value.MaxOrderQuantity = safeIntProduct(value.Quantity, min(18, max(0, value.ExecutableBatches)))
 	value.PriorityScore = mulMoney(value.RiskAdjustedProfitDay, int64(capacity))
 	if profit <= 0 {
 		value.State = "REJECTED"
 		value.Reason = "conservative route is not profitable"
 	}
 	return value
+}
+
+func safeIntProduct(left, right int) int {
+	if left <= 0 || right <= 0 {
+		return 0
+	}
+	if left > math.MaxInt/right {
+		return math.MaxInt
+	}
+	return left * right
 }
 
 func completionBPS(evidence Evidence, valuation market.Valuation) int {

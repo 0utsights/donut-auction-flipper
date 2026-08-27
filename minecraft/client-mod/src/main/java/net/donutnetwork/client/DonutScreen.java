@@ -37,15 +37,16 @@ final class DonutScreen extends Screen {
         for (int index = 0; index < Math.min(5, selected.size()); index++) {
             PortfolioAllocator.Selection selection = selected.get(index);
             CandidateFeedClient.Candidate candidate = selection.candidate();
-            String label = selection.batches() + " batch · " + abbreviate(candidate.itemName(), 22) + "  +$"
-                    + FlipNotifier.format(candidate.conservativeProfit()) + "  $" + FlipNotifier.format(candidate.riskAdjustedProfitDay()) + "/day";
+            String label = selection.batches() + " stacks · " + abbreviate(candidate.itemName(), 22) + "  +$"
+                    + FlipNotifier.format(selection.conservativeProfit()) + "  $" + FlipNotifier.format(selection.riskAdjustedProfitDay()) + "/day";
             addDrawableChild(ButtonWidget.builder(Text.literal(label), button -> CandidateNotifier.open(client, candidates, candidate))
                     .tooltip(Tooltip.of(Text.literal(candidate.route() + " · capital $" + FlipNotifier.format(candidate.acquisitionCost())
                             + (candidate.route().equals("ORDER_TO_AUCTION") ? " · list $" + FlipNotifier.format(candidate.targetListPrice()) : "")
-                            + " · slots O/A/I " + candidate.orderSlots() + "/" + candidate.auctionSlots() + "/" + candidate.inventorySlots()
+                            + " · one order for " + selection.orderQuantity() + " units · capital $" + FlipNotifier.format(selection.capital())
+                            + " · slots O/A " + candidate.orderSlots() + "/" + candidate.auctionSlots() * selection.batches()
                             + " · queue #" + candidate.queuePosition() + " · " + candidate.orderTier()))).dimensions(left, top + 92 + index * 22, WIDTH - 94, 20).build());
-            ButtonWidget arm = ButtonWidget.builder(Text.literal("Arm 1"), button -> client.setScreen(new OrderArmScreen(this, orderExecutor, candidate)))
-                    .tooltip(Tooltip.of(Text.literal("Review and explicitly arm one order creation."))).dimensions(left + WIDTH - 90, top + 92 + index * 22, 90, 20).build();
+            ButtonWidget arm = ButtonWidget.builder(Text.literal("Arm order"), button -> client.setScreen(new OrderArmScreen(this, orderExecutor, selection)))
+                    .tooltip(Tooltip.of(Text.literal("Review one bulk acquisition order; duplicate items are blocked."))).dimensions(left + WIDTH - 90, top + 92 + index * 22, 90, 20).build();
             arm.active = candidate.route().equals("ORDER_TO_AUCTION") && !orderExecutor.status().active();
             addDrawableChild(arm);
         }
@@ -67,6 +68,10 @@ final class DonutScreen extends Screen {
             addDrawableChild(ButtonWidget.builder(Text.literal("STOP ORDER"), button -> { orderExecutor.cancel(client, "cancelled by player"); clearAndInit(); })
                     .dimensions(left + 296, top + 300, 144, 20).build());
         } else addDrawableChild(ButtonWidget.builder(Text.literal("Close"), button -> close()).dimensions(left + 296, top + 300, 144, 20).build());
+        addDrawableChild(ButtonWidget.builder(Text.literal("Recheck tracked orders (" + candidates.activeOrderCount() + ")"), button -> {
+                    candidates.recheckTrackedOrders(); clearAndInit();
+                }).tooltip(Tooltip.of(Text.literal("Clears local locks only. Before creating, Fabric still opens Your Orders and blocks any existing item.")))
+                .dimensions(left + 220, top + 324, 220, 20).build());
         renderedKey = feedKey();
     }
 
@@ -81,7 +86,7 @@ final class DonutScreen extends Screen {
                 + FlipNotifier.format(portfolio.deployable()) + " · reserve " + portfolio.reserveBps() / 100.0 + "%"), left, top + 20, 0xDDDDDD);
         context.drawTextWithShadow(textRenderer, Text.literal("Orders: " + candidates.status().state() + " · READY " + stateCount("READY")
                 + " HOLD " + stateCount("HOLD") + " STALE " + stateCount("STALE") + " RESEARCH " + stateCount("RESEARCH")
-                + " · API " + auctions.status().state() + "/" + auctions.status().flipCount()), left, top + 32, 0xAAAAAA);
+                + " · tracked active " + candidates.activeOrderCount() + " · API " + auctions.status().state() + "/" + auctions.status().flipCount()), left, top + 32, 0xAAAAAA);
         if (orderExecutor.status().phase() != OrderCreationExecutor.Phase.IDLE) {
             context.drawTextWithShadow(textRenderer, Text.literal("Executor: " + orderExecutor.status().phase() + " · " + orderExecutor.status().message()), left, top + 66, 0xFFCC66);
         }

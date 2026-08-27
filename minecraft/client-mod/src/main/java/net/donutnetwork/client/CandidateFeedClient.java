@@ -24,6 +24,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -66,6 +67,7 @@ final class CandidateFeedClient implements AutoCloseable {
     private final AtomicLong balance;
     private final AtomicReference<String> balanceSource = new AtomicReference<>("saved/manual");
     private final AtomicLong usedSlots;
+    private final Set<String> activeOrderItems = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean diagnostics;
     private final ConcurrentLinkedQueue<JsonObject> diagnosticQueue = new ConcurrentLinkedQueue<>();
     private final LinkedHashMap<String, Boolean> seen = new LinkedHashMap<>();
@@ -79,8 +81,9 @@ final class CandidateFeedClient implements AutoCloseable {
     CandidateFeedClient(ClientConfig.Settings config, Consumer<Candidate> alertSink, HttpClient http) {
         this.config = Objects.requireNonNull(config); this.alertSink = Objects.requireNonNull(alertSink); this.http = Objects.requireNonNull(http);
         balance = new AtomicLong(config.balance()); usedSlots = new AtomicLong(packSlots(config.usedOrderSlots(), config.usedAuctionSlots()));
+        activeOrderItems.addAll(config.activeOrderItems());
         diagnostics = new AtomicBoolean(config.diagnostics());
-        allocation = new AtomicReference<>(allocator.allocate(List.of(), config.balance(), config.usedOrderSlots(), config.usedAuctionSlots()));
+        allocation = new AtomicReference<>(allocator.allocate(List.of(), config.balance(), config.usedOrderSlots(), config.usedAuctionSlots(), activeOrderItems));
         scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> { Thread thread = new Thread(runnable, "donut-candidate-feed"); thread.setDaemon(true); return thread; });
     }
 
@@ -110,6 +113,26 @@ final class CandidateFeedClient implements AutoCloseable {
         return allocation.get().selections().stream().anyMatch(selection -> selection.candidate().id().equals(id));
     }
 
+    int allocatedBatches(String id) {
+        return allocation.get().selections().stream().filter(selection -> selection.candidate().id().equals(id))
+                .mapToInt(PortfolioAllocator.Selection::batches).findFirst().orElse(0);
+    }
+
+    boolean hasActiveOrder(String itemId) { return activeOrderItems.contains(itemId); }
+    int activeOrderCount() { return activeOrderItems.size(); }
+
+    void markActiveOrder(String itemId) {
+        if (itemId != null && ITEM_ID.matcher(itemId).matches() && activeOrderItems.add(itemId)) persistAndAllocate();
+    }
+
+    void recheckTrackedOrders() {
+        // Clearing only re-admits candidates to the arm screen. Every arm still
+        // opens the verified personal-order menu and blocks an exact item match
+        // before any transactional control is used.
+        activeOrderItems.clear();
+        persistAndAllocate();
+    }
+
     void adjustBalance(long delta) {
         balance.updateAndGet(value -> delta > 0 && value > Long.MAX_VALUE - delta ? Long.MAX_VALUE : Math.max(0, value + delta));
         balanceSource.set("manual");
@@ -137,9 +160,10 @@ final class CandidateFeedClient implements AutoCloseable {
         enqueueDiagnostic(event, code, 0, fields);
     }
 
-    void recordOrderSubmitted(Candidate candidate) {
-        balance.updateAndGet(value -> Math.max(0, value - candidate.acquisitionCost()));
+    void recordOrderSubmitted(Candidate candidate, OrderPlan plan) {
+        balance.updateAndGet(value -> Math.max(0, value - plan.escrowDollars()));
         usedSlots.updateAndGet(value -> packSlots(Math.min(20, unpackOrder(value) + 1), unpackAuction(value)));
+        activeOrderItems.add(candidate.itemId());
         balanceSource.set("local pending order");
         persistAndAllocate();
         enqueueDiagnostic("order_workflow", "submitted", 0, Map.of("candidate_state", candidate.state(),
@@ -168,7 +192,7 @@ final class CandidateFeedClient implements AutoCloseable {
             if (encoded.length > MAX_RESPONSE_BYTES) throw new IllegalStateException("candidate feed exceeds 1 MiB");
             if (response.statusCode() != 200) throw new IllegalStateException("backend returned HTTP " + response.statusCode());
             DecodedFeed feed = decode(encoded); candidates.set(feed.candidates()); generatedAt.set(feed.generatedAt()); etag = response.headers().firstValue("ETag").orElse("");
-            PortfolioAllocator.Allocation next = allocator.allocate(feed.candidates(), balance(), usedOrderSlots(), usedAuctionSlots());
+            PortfolioAllocator.Allocation next = allocator.allocate(feed.candidates(), balance(), usedOrderSlots(), usedAuctionSlots(), activeOrderItems);
             allocation.set(next); status.set(new Status("ready", Instant.now(), "connected", feed.version(), feed.candidates().size()));
             emitNew(next);
         }
@@ -193,8 +217,8 @@ final class CandidateFeedClient implements AutoCloseable {
     }
 
     private void persistAndAllocate() {
-        ClientConfig.saveLocalState(balance(), usedOrderSlots(), usedAuctionSlots());
-        allocation.set(allocator.allocate(candidates(), balance(), usedOrderSlots(), usedAuctionSlots()));
+        ClientConfig.saveLocalState(balance(), usedOrderSlots(), usedAuctionSlots(), Set.copyOf(activeOrderItems));
+        allocation.set(allocator.allocate(candidates(), balance(), usedOrderSlots(), usedAuctionSlots(), activeOrderItems));
     }
 
     private void enqueueDiagnostic(String event, String code, long duration, Map<String, String> fields) {

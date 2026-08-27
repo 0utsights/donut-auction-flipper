@@ -61,7 +61,7 @@ Requirements: Minecraft 1.21.11, Java 21, Fabric Loader 0.19.2+, and Fabric API.
 gradle -p minecraft/client-mod clean test build
 ```
 
-Copy the remapped JAR from `minecraft/client-mod/build/libs/` to the instance's `mods` directory. The verified build is checked in at `outputs/donut-market-flips-2.1.0-alpha.1.jar`. Press `N` or run `/dn`.
+Copy the remapped JAR from `minecraft/client-mod/build/libs/` to the instance's `mods` directory. The verified build is checked in at `outputs/donut-market-flips-2.1.0-alpha.2.jar`. Press `N` or run `/dn`.
 
 The generated `config/donut-network.properties` contains:
 
@@ -80,7 +80,7 @@ order_server_hosts=play.donutsmp.net,donutsmp.net
 
 Balance, used slots, reserve, and the final portfolio stay local. Balance messages containing a clear `balance`, `money`, or `cash` label update the local value; the screen also provides a manual adjustment. Position/outcome inference remains disabled in shadow mode until sanitized real transaction-message fixtures exist—the mod does not guess that opening a menu means a trade occurred. The mod applies a dynamic 15–35% reserve and selects the highest risk-adjusted daily-profit batches that fit the player's cash, 20 order slots, 18 auction slots, executable volume, and exposure caps.
 
-The main candidate row remains a manual `/orders` or validated `/ah <item_id>` navigation shortcut. `Arm 1` opens a local review showing the exact item, quantity, per-item reward, maximum escrow, expected listing, conservative profit, and remaining session budget. Pressing `ARM ONE ORDER` authorizes one attempt: Fabric waits for a focused refresh, verifies each 1.21.11 server screen and value, and presses `Create Order` once. A changed candidate, stale market, ambiguous item, unexpected screen, exhausted balance/slots, or budget violation stops the workflow. It never loops and does not claim or relist items yet.
+The main candidate row remains a manual `/orders` or validated `/ah <item_id>` navigation shortcut. `Arm order` opens a local review showing the exact item, one bulk acquisition quantity, resale-stack count, per-item reward, maximum escrow, expected per-stack listing, conservative total profit, and remaining session budget. Pressing `ARM ONE ORDER` authorizes one attempt: Fabric waits for a focused refresh, verifies each 1.21.11 server screen and value, checks `Your Orders` for the same item, and presses `Create Order` once. A changed candidate or allocation, duplicate item, stale market, ambiguous item, unexpected screen, exhausted balance/slots, or budget violation stops the workflow. Submitted items are persisted as active across restarts and excluded from allocation. It never loops and does not claim or relist items yet.
 
 Sanitized diagnostics are enabled by default and can be disabled in `/dn`. They contain only documented state, version, latency, route, decision, and error-code fields—never chat, usernames, credentials, server URLs, NBT, or inventories.
 

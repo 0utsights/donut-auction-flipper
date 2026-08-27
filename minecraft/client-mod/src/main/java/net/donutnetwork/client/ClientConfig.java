@@ -25,7 +25,7 @@ final class ClientConfig {
 
     record Settings(URI backend, String token, Duration pollInterval, boolean chatAlerts,
                     long balance, int usedOrderSlots, int usedAuctionSlots, boolean diagnostics, String installId,
-                    long orderSessionBudget, Set<String> orderServerHosts) {}
+                    long orderSessionBudget, Set<String> orderServerHosts, Set<String> activeOrderItems) {}
 
     private ClientConfig() {}
 
@@ -66,6 +66,9 @@ final class ClientConfig {
                 .map(value -> value.strip().toLowerCase(Locale.ROOT)).filter(value -> value.matches("[a-z0-9.-]{1,253}"))
                 .collect(Collectors.toUnmodifiableSet());
         if (orderServerHosts.isEmpty()) throw new IllegalArgumentException("order_server_hosts must contain at least one hostname");
+        Set<String> activeOrderItems = Arrays.stream(properties.getProperty("active_order_items", "").split(","))
+                .map(value -> value.strip().toLowerCase(Locale.ROOT)).filter(value -> value.matches("[a-z0-9_.-]+:[a-z0-9_./-]+"))
+                .limit(20).collect(Collectors.toUnmodifiableSet());
         int usedOrderSlots = (int) boundedLong(properties, "used_order_slots", 0, 0, 20);
         int usedAuctionSlots = (int) boundedLong(properties, "used_auction_slots", 0, 0, 18);
         String installId = properties.getProperty("install_id", "").strip();
@@ -77,18 +80,19 @@ final class ClientConfig {
         return new Settings(backend, token, Duration.ofMillis(milliseconds),
                 Boolean.parseBoolean(properties.getProperty("chat_alerts", "true")), balance,
                 usedOrderSlots, usedAuctionSlots, Boolean.parseBoolean(properties.getProperty("diagnostics", "true")), installId,
-                orderSessionBudget, orderServerHosts);
+                orderSessionBudget, orderServerHosts, activeOrderItems);
     }
 
     static void saveChatAlerts(boolean enabled) {
 		update("chat_alerts", Boolean.toString(enabled));
 	}
 
-    static void saveLocalState(long balance, int usedOrderSlots, int usedAuctionSlots) {
+    static void saveLocalState(long balance, int usedOrderSlots, int usedAuctionSlots, Set<String> activeOrderItems) {
 		Properties properties = readProperties();
 		properties.setProperty("balance", Long.toString(Math.max(0, balance)));
 		properties.setProperty("used_order_slots", Integer.toString(Math.max(0, Math.min(20, usedOrderSlots))));
 		properties.setProperty("used_auction_slots", Integer.toString(Math.max(0, Math.min(18, usedAuctionSlots))));
+		properties.setProperty("active_order_items", activeOrderItems.stream().sorted().collect(Collectors.joining(",")));
 		save(properties);
 	}
 
@@ -126,6 +130,7 @@ final class ClientConfig {
 		properties.setProperty("install_id", "");
 		properties.setProperty("order_session_budget", "10000000");
 		properties.setProperty("order_server_hosts", "play.donutsmp.net,donutsmp.net");
+		properties.setProperty("active_order_items", "");
         return properties;
     }
 

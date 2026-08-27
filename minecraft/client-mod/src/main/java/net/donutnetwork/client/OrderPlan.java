@@ -7,32 +7,49 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /** Immutable transaction values captured when a player explicitly arms one order. */
-record OrderPlan(String candidateId, String signature, String itemId, String itemName, int quantity,
-                 long unitRewardCents, long totalCents, long escrowDollars, long targetListPrice) {
+record OrderPlan(String candidateId, String signature, String itemId, String itemName, int batchQuantity, int batches,
+                 int quantity, long unitRewardCents, long totalCents, long escrowDollars, long targetListPrice) {
     private static final Pattern MONEY = Pattern.compile("(?i)\\$?\\s*([0-9][0-9,]*(?:\\.[0-9]+)?)\\s*([KMBT]?)(?![A-Za-z])");
     private static final Pattern LABELED_QUANTITY = Pattern.compile("(?i)\\b(?:amount|quantity)\\s*:?\\s*([0-9][0-9,]*)\\b");
 
     static OrderPlan from(CandidateFeedClient.Candidate candidate) {
+        return from(candidate, 1);
+    }
+
+    static OrderPlan from(PortfolioAllocator.Selection selection) {
+        if (selection == null) throw new IllegalArgumentException("portfolio selection is missing");
+        return from(selection.candidate(), selection.batches());
+    }
+
+    static OrderPlan from(CandidateFeedClient.Candidate candidate, int batches) {
         if (!"ORDER_TO_AUCTION".equals(candidate.route()) || !"READY".equals(candidate.state())) {
             throw new IllegalArgumentException("candidate is not a ready order-to-auction trade");
         }
         if (candidate.quantity() <= 0 || candidate.orderUnitRewardCents() <= 0 || candidate.acquisitionCost() <= 0) {
             throw new IllegalArgumentException("candidate has invalid order economics");
         }
-        long totalCents = Math.multiplyExact(candidate.orderUnitRewardCents(), candidate.quantity());
-        long escrow = Math.addExact(totalCents, 99) / 100;
-        if (escrow != candidate.acquisitionCost()) {
-            throw new IllegalArgumentException("candidate escrow does not match its unit price and quantity");
+        if (batches <= 0 || batches > candidate.executableBatches()) {
+            throw new IllegalArgumentException("selected stack count exceeds conservative executable volume");
         }
+        int quantity = Math.multiplyExact(candidate.quantity(), batches);
+        long batchCents = Math.multiplyExact(candidate.orderUnitRewardCents(), candidate.quantity());
+        long batchEscrow = Math.addExact(batchCents, 99) / 100;
+        if (batchEscrow != candidate.acquisitionCost()) {
+            throw new IllegalArgumentException("candidate escrow does not match its unit price and batch quantity");
+        }
+        long totalCents = Math.multiplyExact(candidate.orderUnitRewardCents(), quantity);
+        long escrow = Math.addExact(totalCents, 99) / 100;
         return new OrderPlan(candidate.id(), candidate.signature(), candidate.itemId(), candidate.itemName(),
-                candidate.quantity(), candidate.orderUnitRewardCents(), totalCents, escrow, candidate.targetListPrice());
+                candidate.quantity(), batches, quantity, candidate.orderUnitRewardCents(), totalCents, escrow, candidate.targetListPrice());
     }
 
     boolean matches(CandidateFeedClient.Candidate candidate) {
         return candidate != null && "READY".equals(candidate.state()) && "ORDER_TO_AUCTION".equals(candidate.route())
                 && candidateId.equals(candidate.id()) && signature.equals(candidate.signature()) && itemId.equals(candidate.itemId())
-                && quantity == candidate.quantity() && unitRewardCents == candidate.orderUnitRewardCents()
-                && escrowDollars == candidate.acquisitionCost() && targetListPrice == candidate.targetListPrice();
+                && batchQuantity == candidate.quantity() && batches <= candidate.executableBatches()
+                && quantity == Math.multiplyExact(candidate.quantity(), batches) && unitRewardCents == candidate.orderUnitRewardCents()
+                && candidate.acquisitionCost() == (Math.addExact(Math.multiplyExact(unitRewardCents, batchQuantity), 99) / 100)
+                && targetListPrice == candidate.targetListPrice();
     }
 
     String priceInput() {
@@ -43,7 +60,10 @@ record OrderPlan(String candidateId, String signature, String itemId, String ite
 
     String itemPathQuery() {
         int separator = itemId.indexOf(':');
-        return (separator < 0 ? itemId : itemId.substring(separator + 1)).replace('_', ' ');
+        // Donut's item search accepts registry-style paths and distinguishes
+        // them more reliably than display-name text (redstone_block, not
+        // "redstone block"). The exact result is still registry-verified.
+        return separator < 0 ? itemId : itemId.substring(separator + 1);
     }
 
     static String normalizeLabel(String value) {
