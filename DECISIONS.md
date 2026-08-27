@@ -204,6 +204,8 @@ Fabric enforces the scarce exit-listing economics because only Fabric knows the 
 
 Stack capacity is an upper bound, not a mandatory listing size. For each order item, the backend compares every 1–64 quantity supported by exact completed-auction evidence and publishes the quantity with the best confidence-adjusted profit per exit listing. This lets expensive stackable materials use affordable 1x or small-batch exits while cheaper commodities can still use profitable 64x exits. Fabric combines repeated exact batches into one bulk acquisition order and never relists a different quantity than the supporting auction valuation.
 
+The second-PC collector is health-gated on the backend's real `/healthz` readiness response. It does not begin a Minecraft login while the API key is missing, startup valuation is incomplete, or the backend is otherwise unavailable. This avoids needless account reconnects during normal deployments.
+
 ## Assumptions made without operator input
 
 - The official API retains its bearer-authenticated listing and transaction endpoints and 250 requests/minute published limit.

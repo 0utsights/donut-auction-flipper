@@ -28,6 +28,12 @@ services:
       options:
         max-size: 10m
         max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
 
   order-collector:
     build:
@@ -36,6 +42,9 @@ services:
     network_mode: host
     dns:
       - ${SECOND_PC_RUNTIME_DNS:-9.9.9.9}
+    depends_on:
+      auction-server:
+        condition: service_healthy
     volumes:
       - ./collector/accounts.json:/run/secrets/collector-accounts.json:ro
       - ./collector/order-schemas.json:/app/order-schemas.json:ro
