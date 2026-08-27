@@ -10,7 +10,7 @@ import (
 const activeListingFallbackTTL = 2 * time.Minute
 const activeValuationRefreshInterval = 5 * time.Second
 const transactionRetention = 31 * 24 * time.Hour
-const QuantityValuationModelVersion = "robust-v5-target-liquidity-quantity"
+const QuantityValuationModelVersion = "robust-v6-clearing-price-quantity"
 
 type Snapshot struct {
 	Version     uint64               `json:"version"`

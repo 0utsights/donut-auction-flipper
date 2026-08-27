@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const ValuationModelVersion = "robust-v5-target-liquidity"
+const ValuationModelVersion = "robust-v6-clearing-price"
 
 type ValuationInput struct {
 	Signature      string
