@@ -12,15 +12,17 @@ import java.util.Locale;
 final class CandidateNotifier {
     private CandidateNotifier() {}
 
-    static void send(MinecraftClient client, CandidateFeedClient.Candidate candidate) {
+    static void send(MinecraftClient client, PortfolioAllocator.Selection selection) {
         if (client.player == null) return;
+        CandidateFeedClient.Candidate candidate = selection.candidate();
         String route = candidate.route().equals("ORDER_TO_AUCTION") ? "order → auction" : "auction → order";
         MutableText message = Text.literal("[DN] ").formatted(Formatting.GOLD, Formatting.BOLD)
-                .append(Text.literal(candidate.itemName() + " x" + candidate.quantity()).formatted(Formatting.WHITE))
+                .append(Text.literal(candidate.itemName() + " x" + selection.orderQuantity()
+                        + " (" + selection.batches() + " exit stacks)").formatted(Formatting.WHITE))
                 .append(Text.literal("  " + route).formatted(Formatting.GRAY))
-                .append(Text.literal("  +$" + FlipNotifier.format(candidate.conservativeProfit()) + " · $"
-                        + FlipNotifier.format(candidate.riskAdjustedProfitDay()) + "/day").formatted(Formatting.GREEN))
-                .append(action("  [OPEN]", primaryCommand(candidate), preparedValues(candidate)));
+                .append(Text.literal("  +$" + FlipNotifier.format(selection.conservativeProfit()) + " · $"
+                        + FlipNotifier.format(selection.riskAdjustedProfitDay()) + "/day").formatted(Formatting.GREEN))
+                .append(action("  [OPEN]", primaryCommand(candidate), preparedValues(selection)));
         client.player.sendMessage(message, false);
     }
 
@@ -37,11 +39,13 @@ final class CandidateNotifier {
         return command;
     }
 
-    private static String preparedValues(CandidateFeedClient.Candidate candidate) {
+    private static String preparedValues(PortfolioAllocator.Selection selection) {
+        CandidateFeedClient.Candidate candidate = selection.candidate();
         if (candidate.route().equals("ORDER_TO_AUCTION")) {
-            return "Create " + candidate.quantity() + " at " + formatCents(candidate.orderUnitRewardCents())
-                    + " each, then list the exact batch for $" + FlipNotifier.format(candidate.targetListPrice())
-                    + ". Recheck all values; every transaction remains manual.";
+            return "Create one order for " + selection.orderQuantity() + " at " + formatCents(candidate.orderUnitRewardCents())
+                    + " each. Exit as " + selection.batches() + " separate listings of " + candidate.quantity()
+                    + " at $" + FlipNotifier.format(candidate.targetListPrice())
+                    + " each; reuse the 18 auction slots as listings sell. Recheck all values.";
         }
         return "Open the relevant market. Recheck item, quantity, and price; every transaction remains manual.";
     }

@@ -16,7 +16,24 @@ class CandidateFeedClientTest {
     }
 
     @Test void decodesBoundedCandidateFeed() {
-        String json = """
+        String json = validFeed();
+        CandidateFeedClient.DecodedFeed feed = CandidateFeedClient.decode(json.getBytes(StandardCharsets.UTF_8));
+        assertEquals(3, feed.version());
+        assertEquals(1, feed.candidates().size());
+        assertEquals("READY", feed.candidates().getFirst().state());
+        assertEquals(15_625_000, feed.candidates().getFirst().orderUnitRewardCents());
+        assertEquals(20_512_820, feed.candidates().getFirst().targetListPrice());
+    }
+
+    @Test void rejectsImpossibleExitQuantityAndSlotSemantics() {
+        assertThrows(IllegalArgumentException.class, () -> CandidateFeedClient.decode(
+                validFeed().replace("\"quantity\":64", "\"quantity\":32").getBytes(StandardCharsets.UTF_8)));
+        assertThrows(IllegalArgumentException.class, () -> CandidateFeedClient.decode(
+                validFeed().replace("\"order_slots\":1", "\"order_slots\":0").getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private static String validFeed() {
+        return """
                 {"version":3,"generated_at":"2026-08-23T20:00:00Z","candidates":[{
                   "id":"candidate_1","route":"ORDER_TO_AUCTION","state":"READY","reason":"",
                   "signature":"minecraft:diamond_block","item_id":"minecraft:diamond_block","item_name":"Diamond Block",
@@ -29,12 +46,6 @@ class CandidateFeedClientTest {
                   "order_command":"/orders","auction_command":"/ah diamond_block"
                 }]}
                 """;
-        CandidateFeedClient.DecodedFeed feed = CandidateFeedClient.decode(json.getBytes(StandardCharsets.UTF_8));
-        assertEquals(3, feed.version());
-        assertEquals(1, feed.candidates().size());
-        assertEquals("READY", feed.candidates().getFirst().state());
-        assertEquals(15_625_000, feed.candidates().getFirst().orderUnitRewardCents());
-        assertEquals(20_512_820, feed.candidates().getFirst().targetListPrice());
     }
 
     @Test void rejectsServerSuppliedTransactionCommand() {

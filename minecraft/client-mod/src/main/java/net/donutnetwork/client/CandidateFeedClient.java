@@ -57,7 +57,7 @@ final class CandidateFeedClient implements AutoCloseable {
     record DecodedFeed(long version, Instant generatedAt, List<Candidate> candidates) {}
 
     private final ClientConfig.Settings config;
-    private final Consumer<Candidate> alertSink;
+    private final Consumer<PortfolioAllocator.Selection> alertSink;
     private final HttpClient http;
     private final ScheduledExecutorService scheduler;
     private final AtomicReference<List<Candidate>> candidates = new AtomicReference<>(List.of());
@@ -74,11 +74,11 @@ final class CandidateFeedClient implements AutoCloseable {
     private final PortfolioAllocator allocator = new PortfolioAllocator();
     private String etag = "";
 
-    CandidateFeedClient(ClientConfig.Settings config, Consumer<Candidate> alertSink) {
+    CandidateFeedClient(ClientConfig.Settings config, Consumer<PortfolioAllocator.Selection> alertSink) {
         this(config, alertSink, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build());
     }
 
-    CandidateFeedClient(ClientConfig.Settings config, Consumer<Candidate> alertSink, HttpClient http) {
+    CandidateFeedClient(ClientConfig.Settings config, Consumer<PortfolioAllocator.Selection> alertSink, HttpClient http) {
         this.config = Objects.requireNonNull(config); this.alertSink = Objects.requireNonNull(alertSink); this.http = Objects.requireNonNull(http);
         balance = new AtomicLong(config.balance());
         activeOrderItems.addAll(config.activeOrderItems());
@@ -136,6 +136,11 @@ final class CandidateFeedClient implements AutoCloseable {
         // before any transactional control is used.
         activeOrderItems.clear();
         persistAndAllocate();
+        // Previously selected items receive an immediate backend focused watch.
+        // The server recognizes proven market profiles and uses its shorter
+        // revalidation lane; the exact Your Orders duplicate check still runs
+        // before any creation action.
+        for (PortfolioAllocator.Selection selection : allocation.get().selections()) focus(selection.candidate());
     }
 
     void adjustBalance(long delta) {
@@ -205,8 +210,11 @@ final class CandidateFeedClient implements AutoCloseable {
 
     private void emitNew(PortfolioAllocator.Allocation value) {
         for (PortfolioAllocator.Selection selection : value.selections()) {
+            // Alert once when an item enters the READY portfolio. Quantity is
+            // shown from this allocation, but later one-stack fluctuations do
+            // not spam chat; the live screen continues updating them.
             Candidate candidate = selection.candidate(); String key = candidate.id() + ":" + candidate.state();
-            if (!seen.containsKey(key)) { seen.put(key, true); focus(candidate); alertSink.accept(candidate); }
+            if (!seen.containsKey(key)) { seen.put(key, true); focus(candidate); alertSink.accept(selection); }
         }
         while (seen.size() > 4096) seen.remove(seen.keySet().iterator().next());
     }
@@ -265,15 +273,23 @@ final class CandidateFeedClient implements AutoCloseable {
             if (!ITEM_ID.matcher(itemId).matches()) throw new IllegalArgumentException("invalid item id");
             String orderCommand = required(value, "order_command", 64); String auctionCommand = required(value, "auction_command", 68);
             if (!orderCommand.equals("/orders") || !AUCTION_COMMAND.matcher(auctionCommand).matches()) throw new IllegalArgumentException("unsafe candidate command");
-            result.add(new Candidate(required(value, "id", 128), oneOf(value, "route", "ORDER_TO_AUCTION", "AUCTION_TO_ORDER"),
+            String route = oneOf(value, "route", "ORDER_TO_AUCTION", "AUCTION_TO_ORDER");
+            int quantity = boundedInt(value, "quantity", 1, 64), maxStackSize = boundedInt(value, "max_stack_size", 1, 64);
+            int orderSlots = boundedInt(value, "order_slots", 0, 20), auctionSlots = boundedInt(value, "auction_slots", 0, 18);
+            if (quantity != maxStackSize) throw new IllegalArgumentException("candidate is not one exact maximum-stack exit");
+            if ((route.equals("ORDER_TO_AUCTION") && (orderSlots != 1 || auctionSlots != 1))
+                    || (route.equals("AUCTION_TO_ORDER") && (orderSlots != 0 || auctionSlots != 0))) {
+                throw new IllegalArgumentException("candidate has invalid route slot semantics");
+            }
+            result.add(new Candidate(required(value, "id", 128), route,
                     oneOf(value, "state", "READY", "RESEARCH", "CAPTURED", "HOLD", "STALE", "REJECTED"), optional(value, "reason", 200),
-                    required(value, "signature", 2048), itemId, required(value, "item_name", 128), boundedInt(value, "quantity", 1, 1728),
-                    boundedInt(value, "max_stack_size", 1, 99), boundedLong(value, "acquisition_cost", 1, Long.MAX_VALUE),
+                    required(value, "signature", 2048), itemId, required(value, "item_name", 128), quantity,
+                    maxStackSize, boundedLong(value, "acquisition_cost", 1, Long.MAX_VALUE),
                     boundedLong(value, "expected_proceeds", 0, Long.MAX_VALUE), boundedLong(value, "order_unit_reward_cents", 0, Long.MAX_VALUE),
                     boundedLong(value, "target_list_price", 0, Long.MAX_VALUE), boundedLong(value, "conservative_profit", Long.MIN_VALUE, Long.MAX_VALUE),
                     boundedInt(value, "margin_bps", 0, Integer.MAX_VALUE), boundedInt(value, "completion_bps", 0, 10_000),
                     boundedInt(value, "expected_cycle_minutes", 1, 1_000_000), boundedLong(value, "risk_adjusted_profit_day", 0, Long.MAX_VALUE),
-                    boundedInt(value, "executable_batches", 0, 1_000_000), boundedInt(value, "queue_position", 0, 1_000_000), boundedInt(value, "order_slots", 0, 20), boundedInt(value, "auction_slots", 0, 18),
+                    boundedInt(value, "executable_batches", 0, 1_000_000), boundedInt(value, "queue_position", 0, 1_000_000), orderSlots, auctionSlots,
                     boundedInt(value, "inventory_slots", 1, 1728), boundedLong(value, "profit_per_inventory_slot", Long.MIN_VALUE, Long.MAX_VALUE),
                     boundedInt(value, "confidence_bps", 0, 10_000), required(value, "order_tier", 32), instant(value, "order_fresh_at"),
                     instant(value, "focused_fresh_at"), instant(value, "auction_fresh_at"), orderCommand, auctionCommand));

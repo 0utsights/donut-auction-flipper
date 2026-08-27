@@ -11,11 +11,14 @@ import java.util.List;
 /** Plain local portfolio/debug UI. It never invokes Minecraft's blur background. */
 final class DonutScreen extends Screen {
     private static final int WIDTH = 440;
+    private static final int HEIGHT = 240;
+    private static final int PAGE_SIZE = 4;
     private final Screen parent;
     private final FlipFeedClient auctions;
     private final CandidateFeedClient candidates;
     private final OrderCreationExecutor orderExecutor;
     private String renderedKey = "";
+    private int portfolioPage;
 
     DonutScreen(Screen parent, FlipFeedClient auctions, CandidateFeedClient candidates, OrderCreationExecutor orderExecutor) {
         super(Text.literal("Donut market flipper")); this.parent = parent; this.auctions = auctions; this.candidates = candidates; this.orderExecutor = orderExecutor;
@@ -23,55 +26,64 @@ final class DonutScreen extends Screen {
 
     @Override protected void init() {
         int left = (width - WIDTH) / 2;
-        int top = Math.max(12, (height - 350) / 2);
+        int top = Math.max(8, (height - HEIGHT) / 2);
         addDrawableChild(ButtonWidget.builder(Text.literal("Balance -$1m"), button -> { candidates.adjustBalance(-1_000_000); clearAndInit(); })
-                .dimensions(left, top + 46, 106, 20).build());
+                .tooltip(Tooltip.of(Text.literal("Reduce the local planning balance by $1 million. This never changes your server balance.")))
+                .dimensions(left, top + 40, 106, 20).build());
         addDrawableChild(ButtonWidget.builder(Text.literal("Balance +$1m"), button -> { candidates.adjustBalance(1_000_000); clearAndInit(); })
-                .dimensions(left + 110, top + 46, 106, 20).build());
+                .tooltip(Tooltip.of(Text.literal("Increase the local planning balance by $1 million. Labeled balance chat can update it automatically.")))
+                .dimensions(left + 110, top + 40, 106, 20).build());
         addDrawableChild(ButtonWidget.builder(Text.literal("Orders " + candidates.usedOrderSlots() + "/20"), button -> { candidates.adjustUsedSlots(candidates.usedOrderSlots() == 20 ? -20 : 1, 0); clearAndInit(); })
-                .tooltip(Tooltip.of(Text.literal("Click to increment used order slots; after 20 it wraps to 0."))).dimensions(left + 220, top + 46, 106, 20).build());
+                .tooltip(Tooltip.of(Text.literal("Orders already active on your account. Click to add one; 20 wraps to 0.\nTracked item locks are also counted automatically."))).dimensions(left + 220, top + 40, 106, 20).build());
         addDrawableChild(ButtonWidget.builder(Text.literal("Auctions " + candidates.usedAuctionSlots() + "/18"), button -> { candidates.adjustUsedSlots(0, candidates.usedAuctionSlots() == 18 ? -18 : 1); clearAndInit(); })
-                .tooltip(Tooltip.of(Text.literal("Click to increment used auction slots; after 18 it wraps to 0."))).dimensions(left + 330, top + 46, 110, 20).build());
+                .tooltip(Tooltip.of(Text.literal("Listings already active on your account. Large orders exit as multiple ≤64-item listings that reuse these slots."))).dimensions(left + 330, top + 40, 110, 20).build());
 
         List<PortfolioAllocator.Selection> selected = candidates.allocation().selections();
-        for (int index = 0; index < Math.min(5, selected.size()); index++) {
-            PortfolioAllocator.Selection selection = selected.get(index);
+        int pageCount = Math.max(1, (selected.size() + PAGE_SIZE - 1) / PAGE_SIZE);
+        portfolioPage = Math.max(0, Math.min(portfolioPage, pageCount - 1));
+        int firstSelection = portfolioPage * PAGE_SIZE;
+        for (int row = 0; row < Math.min(PAGE_SIZE, selected.size() - firstSelection); row++) {
+            PortfolioAllocator.Selection selection = selected.get(firstSelection + row);
             CandidateFeedClient.Candidate candidate = selection.candidate();
-            String label = selection.batches() + " stacks · " + abbreviate(candidate.itemName(), 22) + "  +$"
-                    + FlipNotifier.format(selection.conservativeProfit()) + "  $" + FlipNotifier.format(selection.riskAdjustedProfitDay()) + "/day";
+            String label = abbreviate(candidate.itemName(), 12) + " · " + compact(selection.orderQuantity()) + " units / "
+                    + compact(selection.batches()) + "×" + candidate.quantity() + " exits · +$" + FlipNotifier.format(selection.conservativeProfit());
             addDrawableChild(ButtonWidget.builder(Text.literal(label), button -> CandidateNotifier.open(client, candidates, candidate))
-                    .tooltip(Tooltip.of(Text.literal(candidate.route() + " · capital $" + FlipNotifier.format(candidate.acquisitionCost())
-                            + (candidate.route().equals("ORDER_TO_AUCTION") ? " · list $" + FlipNotifier.format(candidate.targetListPrice()) : "")
-                            + " · one order for " + selection.orderQuantity() + " units · capital $" + FlipNotifier.format(selection.capital())
-                            + " · slots O/A " + candidate.orderSlots() + "/" + candidate.auctionSlots() * selection.batches()
-                            + " · queue #" + candidate.queuePosition() + " · " + candidate.orderTier()))).dimensions(left, top + 92 + index * 22, WIDTH - 94, 20).build());
-            ButtonWidget arm = ButtonWidget.builder(Text.literal("Arm order"), button -> client.setScreen(new OrderArmScreen(this, orderExecutor, selection)))
-                    .tooltip(Tooltip.of(Text.literal("Review one bulk acquisition order; duplicate items are blocked."))).dimensions(left + WIDTH - 90, top + 92 + index * 22, 90, 20).build();
+                    .tooltip(Tooltip.of(Text.literal("ONE BUY ORDER\n" + selection.orderQuantity() + " units at " + formatCents(candidate.orderUnitRewardCents())
+                            + " each · escrow $" + FlipNotifier.format(selection.capital()) + "\nEXIT PLAN\n" + selection.batches()
+                            + " listings of " + candidate.quantity() + " at $" + FlipNotifier.format(candidate.targetListPrice())
+                            + " each · reuse auction slots as they sell\nMODEL\nconservative +$" + FlipNotifier.format(selection.conservativeProfit())
+                            + " · risk-adjusted $" + FlipNotifier.format(selection.riskAdjustedProfitDay()) + "/day · margin "
+                            + candidate.marginBps() / 100.0 + "% · confidence " + candidate.confidenceBps() / 100.0
+                            + "% · completion " + candidate.completionBps() / 100.0 + "% · cycle " + candidate.expectedCycleMinutes() + "m")))
+                    .dimensions(left, top + 92 + row * 22, WIDTH - 98, 20).build());
+            ButtonWidget arm = ButtonWidget.builder(Text.literal("Review order"), button -> client.setScreen(new OrderArmScreen(this, orderExecutor, selection)))
+                    .tooltip(Tooltip.of(Text.literal("Open the final explanation and arm exactly one bulk order. Your Orders is checked for this item first.")))
+                    .dimensions(left + WIDTH - 94, top + 92 + row * 22, 94, 20).build();
             arm.active = candidate.route().equals("ORDER_TO_AUCTION") && !orderExecutor.status().active();
             addDrawableChild(arm);
         }
 
-        List<FlipFeedClient.Flip> flips = auctions.flips();
-        for (int index = 0; index < Math.min(3, flips.size()); index++) {
-            FlipFeedClient.Flip flip = flips.get(index);
-            String label = abbreviate(flip.itemName(), 25) + "  $" + FlipNotifier.format(flip.price()) + "  +$" + FlipNotifier.format(flip.profit());
-            addDrawableChild(ButtonWidget.builder(Text.literal(label), button -> FlipNotifier.open(client, flip))
-                    .tooltip(Tooltip.of(Text.literal("API auction · seller " + flip.seller() + " · confidence " + flip.confidenceBps() / 100.0 + "%")))
-                    .dimensions(left, top + 228 + index * 22, WIDTH, 20).build());
-        }
-
         addDrawableChild(ButtonWidget.builder(Text.literal("Chat alerts: " + (auctions.alertsEnabled() ? "ON" : "OFF")), button -> { auctions.setAlertsEnabled(!auctions.alertsEnabled()); clearAndInit(); })
-                .dimensions(left, top + 300, 144, 20).build());
+                .tooltip(Tooltip.of(Text.literal("Includes immediate API-auction alerts, which remain in chat to keep this order screen concise.")))
+                .dimensions(left, top + 188, 144, 20).build());
         addDrawableChild(ButtonWidget.builder(Text.literal("Diagnostics: " + (candidates.diagnosticsEnabled() ? "ON" : "OFF")), button -> { candidates.setDiagnostics(!candidates.diagnosticsEnabled()); clearAndInit(); })
-                .dimensions(left + 148, top + 300, 144, 20).build());
+                .dimensions(left + 148, top + 188, 144, 20).build());
         if (orderExecutor.status().active()) {
             addDrawableChild(ButtonWidget.builder(Text.literal("STOP ORDER"), button -> { orderExecutor.cancel(client, "cancelled by player"); clearAndInit(); })
-                    .dimensions(left + 296, top + 300, 144, 20).build());
-        } else addDrawableChild(ButtonWidget.builder(Text.literal("Close"), button -> close()).dimensions(left + 296, top + 300, 144, 20).build());
-        addDrawableChild(ButtonWidget.builder(Text.literal("Reset order cache (" + candidates.activeOrderCount() + ")"), button -> {
+                    .dimensions(left + 296, top + 188, 144, 20).build());
+        } else addDrawableChild(ButtonWidget.builder(Text.literal("Close"), button -> close()).dimensions(left + 296, top + 188, 144, 20).build());
+        ButtonWidget previous = ButtonWidget.builder(Text.literal("← Orders"), button -> { portfolioPage--; clearAndInit(); })
+                .tooltip(Tooltip.of(Text.literal("Show the previous four planned acquisition orders."))).dimensions(left, top + 212, 106, 20).build();
+        previous.active = portfolioPage > 0;
+        addDrawableChild(previous);
+        ButtonWidget next = ButtonWidget.builder(Text.literal("Orders →"), button -> { portfolioPage++; clearAndInit(); })
+                .tooltip(Tooltip.of(Text.literal("Show the next four planned acquisition orders."))).dimensions(left + 110, top + 212, 106, 20).build();
+        next.active = portfolioPage + 1 < pageCount;
+        addDrawableChild(next);
+        addDrawableChild(ButtonWidget.builder(Text.literal("Recheck tracked item locks (" + candidates.activeOrderCount() + ")"), button -> {
                     candidates.recheckTrackedOrders(); clearAndInit();
-                }).tooltip(Tooltip.of(Text.literal("Clears local locks only; each next arm opens Your Orders and verifies the exact item before creating.")))
-                .dimensions(left + 220, top + 324, 220, 20).build());
+                }).tooltip(Tooltip.of(Text.literal("Start fast focused rechecks for previously selected markets and clear local locks.\nBefore creating anything, the mod still opens Your Orders and blocks an existing matching item.")))
+                .dimensions(left + 220, top + 212, 220, 20).build());
         renderedKey = feedKey();
     }
 
@@ -79,21 +91,24 @@ final class DonutScreen extends Screen {
 
     @Override public void render(DrawContext context, int mouseX, int mouseY, float delta) {
         context.fill(0, 0, width, height, 0xFF101010);
-        int left = (width - WIDTH) / 2; int top = Math.max(12, (height - 350) / 2);
+        int left = (width - WIDTH) / 2; int top = Math.max(8, (height - HEIGHT) / 2);
         context.drawCenteredTextWithShadow(textRenderer, title, width / 2, top, 0xFFFFFF);
         PortfolioAllocator.Allocation portfolio = candidates.allocation();
         context.drawTextWithShadow(textRenderer, Text.literal("Balance $" + FlipNotifier.format(portfolio.balance()) + " (" + candidates.balanceSource() + ") · deployable $"
-                + FlipNotifier.format(portfolio.deployable()) + " · reserve " + portfolio.reserveBps() / 100.0 + "%"), left, top + 20, 0xDDDDDD);
+                + FlipNotifier.format(portfolio.deployable()) + " · reserve " + portfolio.reserveBps() / 100.0 + "%"), left, top + 14, 0xDDDDDD);
         context.drawTextWithShadow(textRenderer, Text.literal("Orders: " + candidates.status().state() + " · READY " + stateCount("READY")
                 + " HOLD " + stateCount("HOLD") + " STALE " + stateCount("STALE") + " RESEARCH " + stateCount("RESEARCH")
-                + " · tracked active " + candidates.activeOrderCount() + " · API " + auctions.status().state() + "/" + auctions.status().flipCount()), left, top + 32, 0xAAAAAA);
+                + " · tracked " + candidates.activeOrderCount() + " · API " + auctions.status().state() + "/" + auctions.status().flipCount()), left, top + 26, 0xAAAAAA);
         if (orderExecutor.status().phase() != OrderCreationExecutor.Phase.IDLE) {
-            context.drawTextWithShadow(textRenderer, Text.literal("Executor: " + orderExecutor.status().phase() + " · " + orderExecutor.status().message()), left, top + 66, 0xFFCC66);
+            context.drawTextWithShadow(textRenderer, Text.literal("Executor: " + orderExecutor.status().phase() + " · " + orderExecutor.status().message()), left, top + 176, 0xFFCC66);
         }
-        context.drawTextWithShadow(textRenderer, Text.literal("Selected order portfolio"), left, top + 77, 0xFFFFFF);
-        if (portfolio.selections().isEmpty()) context.drawTextWithShadow(textRenderer, Text.literal("No READY order candidates fit the local portfolio."), left, top + 105, 0x888888);
-        context.drawTextWithShadow(textRenderer, Text.literal("API auction opportunities"), left, top + 213, 0xFFFFFF);
-        if (auctions.flips().isEmpty()) context.drawTextWithShadow(textRenderer, Text.literal("No qualified API auction flips right now."), left, top + 242, 0x888888);
+        context.drawTextWithShadow(textRenderer, Text.literal("Order plan · " + portfolio.selections().size() + "/" + portfolio.availableOrderSlots()
+                + " free offer slots · escrow $" + FlipNotifier.format(portfolio.selectedCapital()) + " · "
+                + compact(portfolio.totalExitBatches()) + " future listings · page " + (portfolioPage + 1) + "/"
+                + Math.max(1, (portfolio.selections().size() + PAGE_SIZE - 1) / PAGE_SIZE)), left, top + 66, 0xFFFFFF);
+        context.drawTextWithShadow(textRenderer, Text.literal("One row = one buy order. Exit stacks are ≤64 and reuse your "
+                + portfolio.availableAuctionSlots() + " currently free auction slots."), left, top + 78, 0xAAAAAA);
+        if (portfolio.selections().isEmpty()) context.drawTextWithShadow(textRenderer, Text.literal("No READY market fits the local balance, reserve, and free order slots."), left, top + 104, 0x888888);
         super.render(context, mouseX, mouseY, delta);
     }
 
@@ -109,4 +124,6 @@ final class DonutScreen extends Screen {
     }
     private long stateCount(String state) { return candidates.candidates().stream().filter(candidate -> state.equals(candidate.state())).count(); }
     private static String abbreviate(String value, int limit) { return value.length() <= limit ? value : value.substring(0, limit - 1) + "…"; }
+    private static String compact(long value) { return value >= 1_000_000 ? FlipNotifier.format(value) : String.format(java.util.Locale.ROOT, "%,d", value); }
+    private static String formatCents(long cents) { return String.format(java.util.Locale.ROOT, "$%,d.%02d", cents / 100, cents % 100); }
 }

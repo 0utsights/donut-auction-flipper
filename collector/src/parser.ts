@@ -56,7 +56,7 @@ export function projectItem(item: unknown, slot: number): ItemView | undefined {
   const componentText = [customName, customLore].flatMap(collectComponentText)
   const fallbackText = collectStrings([componentValues, readableNbt, value.components]).map(plainText)
   const text = [...componentText, ...fallbackText, displayName].map(stripFormatting).filter((entry, index, all) => entry.length > 0 && all.indexOf(entry) === index).slice(0, 64)
-  return { slot, itemId, count: clamp(count, 1, 1728), maxStackSize: clamp(maxStackSize, 1, 99), displayName, text, raw: item }
+  return { slot, itemId, count: clamp(count, 1, 64), maxStackSize: clamp(maxStackSize, 1, 64), displayName, text, raw: item }
 }
 
 export function parseOrder(view: ItemView): ParsedOrder | undefined {

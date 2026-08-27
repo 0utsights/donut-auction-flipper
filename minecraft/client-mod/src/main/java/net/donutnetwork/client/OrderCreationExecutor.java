@@ -284,7 +284,7 @@ final class OrderCreationExecutor {
         if (requireAllocation && feed.allocatedBatches(current.id()) < expected.batches()) return "allocated stack count was reduced";
         if (feed.hasActiveOrder(expected.itemId())) return "an order for this item is already active or pending";
         PortfolioAllocator.Allocation allocation = feed.allocation();
-        if (allocation.availableOrderSlots() < 1 || allocation.availableAuctionSlots() < current.auctionSlots() * expected.batches()) return "local market slots are exhausted";
+        if (allocation.availableOrderSlots() < 1) return "local order slots are exhausted";
         if (expected.escrowDollars() > allocation.deployable()) return "order exceeds deployable balance after reserve";
         if (expected.escrowDollars() > sessionBudget - sessionSpent) return "order exceeds the remaining local session budget";
         return "";

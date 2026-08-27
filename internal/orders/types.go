@@ -117,6 +117,10 @@ type Evidence struct {
 	FillEvents             int       `json:"fill_events"`
 	DistinctOrders         int       `json:"distinct_orders"`
 	FilledUnits24h         int64     `json:"filled_units_24h"`
+	ProfileFillEvents      int       `json:"profile_fill_events_90d"`
+	ProfileDistinctOrders  int       `json:"profile_distinct_orders_90d"`
+	Profiled               bool      `json:"profiled"`
+	ProfileLastFillAt      time.Time `json:"profile_last_fill_at,omitempty"`
 	AvailableUnits         int64     `json:"available_units"`
 	BestUnitRewardCents    int64     `json:"best_unit_reward_cents"`
 	BestPricePosition      int       `json:"best_price_position"`
@@ -167,6 +171,9 @@ type Candidate struct {
 	AuctionSellerCount    int       `json:"auction_seller_count"`
 	OrderFilledUnits24h   int64     `json:"order_filled_units_24h"`
 	OrderAvailableUnits   int64     `json:"order_available_units"`
+	Profiled              bool      `json:"profiled"`
+	ProfileFillEvents     int       `json:"profile_fill_events_90d"`
+	ProfileDistinctOrders int       `json:"profile_distinct_orders_90d"`
 	VolatilityBPS         int       `json:"volatility_bps"`
 	ReferenceAgeSeconds   int64     `json:"reference_age_seconds"`
 	RiskFlags             []string  `json:"risk_flags,omitempty"`

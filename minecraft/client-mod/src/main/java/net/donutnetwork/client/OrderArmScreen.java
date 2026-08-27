@@ -44,14 +44,15 @@ final class OrderArmScreen extends Screen {
         int top = Math.max(24, (height - 230) / 2);
         context.drawCenteredTextWithShadow(textRenderer, title, width / 2, top, 0xFFFFFF);
         OrderPlan plan = OrderPlan.from(selection);
-        context.drawTextWithShadow(textRenderer, Text.literal(plan.quantity() + "× " + candidate.itemName() + " in one order (" + plan.batches() + " stacks)"), left, top + 30, 0xFFFFFF);
+        context.drawTextWithShadow(textRenderer, Text.literal("ONE BUY ORDER · " + String.format(java.util.Locale.ROOT, "%,d", plan.quantity()) + "× " + candidate.itemName()), left, top + 30, 0xFFFFFF);
         context.drawTextWithShadow(textRenderer, Text.literal("Order reward: $" + plan.priceInput() + " per item"), left, top + 48, 0xDDDDDD);
         context.drawTextWithShadow(textRenderer, Text.literal("Maximum escrow: $" + FlipNotifier.format(plan.escrowDollars())), left, top + 64, 0xDDDDDD);
-        context.drawTextWithShadow(textRenderer, Text.literal("Relist: " + plan.batches() + " × " + plan.batchQuantity() + " at $" + FlipNotifier.format(candidate.targetListPrice())), left, top + 80, 0xDDDDDD);
+        context.drawTextWithShadow(textRenderer, Text.literal("Exit plan: " + String.format(java.util.Locale.ROOT, "%,d", plan.batches()) + " listings × " + plan.batchQuantity() + " at $" + FlipNotifier.format(candidate.targetListPrice())), left, top + 80, 0xDDDDDD);
         context.drawTextWithShadow(textRenderer, Text.literal("Conservative total profit: +$" + FlipNotifier.format(selection.conservativeProfit())), left, top + 96, 0xDDDDDD);
         context.drawTextWithShadow(textRenderer, Text.literal("Session budget remaining: $" + FlipNotifier.format(executor.status().sessionBudget() - executor.status().sessionSpent())), left, top + 118, 0xBBBBBB);
-        context.drawTextWithShadow(textRenderer, Text.literal("This arm expires on any changed, stale, or unknown screen/value."), left, top + 138, 0xAAAAAA);
-        context.drawTextWithShadow(textRenderer, Text.literal(validation), left, top + 152, validation.startsWith("ready") || validation.startsWith("will") ? 0x66DD88 : 0xFF7777);
+        context.drawTextWithShadow(textRenderer, Text.literal("Listings are ≤64 each and reuse your auction slots as they sell."), left, top + 134, 0xAAAAAA);
+        context.drawTextWithShadow(textRenderer, Text.literal("This arm expires on any changed, stale, duplicate, or unknown value."), left, top + 146, 0xAAAAAA);
+        context.drawTextWithShadow(textRenderer, Text.literal(validation), left, top + 158, validation.startsWith("ready") || validation.startsWith("will") ? 0x66DD88 : 0xFF7777);
         super.render(context, mouseX, mouseY, delta);
     }
 

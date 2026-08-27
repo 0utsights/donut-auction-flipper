@@ -30,8 +30,8 @@ public final class DonutNetworkClient implements ClientModInitializer {
             ClientConfig.Settings settings = ClientConfig.load();
             feed = new FlipFeedClient(settings, flip -> MinecraftClient.getInstance().execute(() ->
                     FlipNotifier.send(MinecraftClient.getInstance(), flip)));
-			candidates = new CandidateFeedClient(settings, candidate -> MinecraftClient.getInstance().execute(() ->
-					CandidateNotifier.send(MinecraftClient.getInstance(), candidate)));
+			candidates = new CandidateFeedClient(settings, selection -> MinecraftClient.getInstance().execute(() ->
+					CandidateNotifier.send(MinecraftClient.getInstance(), selection)));
             orderExecutor = new OrderCreationExecutor(candidates);
             registerControls();
             feed.start();

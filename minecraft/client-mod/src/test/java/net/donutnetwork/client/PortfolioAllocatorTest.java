@@ -4,22 +4,22 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Random;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class PortfolioAllocatorTest {
-    @Test void neverExceedsCashOrMarketSlots() {
+    @Test void neverExceedsCashOrOrderSlots() {
         List<CandidateFeedClient.Candidate> candidates = new ArrayList<>();
         for (int index = 0; index < 30; index++) candidates.add(candidate("item_" + index, 250_000, 100_000 - index, 1, 1, 5));
         PortfolioAllocator.Allocation allocation = new PortfolioAllocator().allocate(candidates, 10_000_000, 3, 2);
         long capital = allocation.selections().stream().mapToLong(selection -> selection.candidate().acquisitionCost() * selection.batches()).sum();
         int orders = allocation.selections().stream().mapToInt(selection -> selection.candidate().orderSlots()).sum();
-        int auctions = allocation.selections().stream().mapToInt(selection -> selection.candidate().auctionSlots() * selection.batches()).sum();
         assertTrue(capital <= allocation.deployable());
         assertTrue(orders <= 17);
-        assertTrue(auctions <= 16);
         assertFalse(allocation.selections().isEmpty());
     }
 
@@ -67,12 +67,12 @@ class PortfolioAllocatorTest {
         assertTrue(allocation.selections().stream().anyMatch(selection -> selection.candidate().itemId().equals(available.itemId())));
     }
 
-    @Test void broadFrontierSpreadsAuctionCapacityAcrossDistinctOrders() {
+    @Test void broadFrontierMaxesDistinctOrderSlotsBeforeIncreasingQuantities() {
         List<CandidateFeedClient.Candidate> candidates = new ArrayList<>();
-        for (int index = 0; index < 18; index++) candidates.add(candidate("bulk_" + index, 10_000, 100_000 - index, 1, 1, 18));
+        for (int index = 0; index < 25; index++) candidates.add(candidate("bulk_" + index, 10_000, 100_000 - index, 1, 1, 18));
         PortfolioAllocator.Allocation allocation = new PortfolioAllocator().allocate(candidates, 10_000_000, 0, 0);
-        assertEquals(18, allocation.selections().size());
-        assertTrue(allocation.selections().stream().allMatch(selection -> selection.batches() == 1));
+        assertEquals(20, allocation.selections().size());
+        assertEquals(20, allocation.selectedOrderSlots());
     }
 
     @Test void broadFrontierCompletesWithinItsDeterministicBudget() {
@@ -81,7 +81,18 @@ class PortfolioAllocatorTest {
             candidates.add(candidate("frontier_" + index, 20_000 + index * 1_000L, 100_000 - index * 317L, 1, 1, 18));
         }
         PortfolioAllocator.Allocation allocation = new PortfolioAllocator().allocate(candidates, 10_000_000, 0, 0);
-        assertEquals(18, allocation.selections().stream().mapToInt(PortfolioAllocator.Selection::batches).sum());
+        assertEquals(20, allocation.selections().size());
+        assertTrue(allocation.selections().stream().mapToInt(PortfolioAllocator.Selection::batches).sum() > 18);
+    }
+
+    @Test void largeOrderUsesSequentialExitListingsInsteadOfAnEighteenStackCap() {
+        CandidateFeedClient.Candidate bulk = candidate("bulk", 1_000, 500, 1, 1, 50_000);
+        PortfolioAllocator.Allocation allocation = new PortfolioAllocator().allocate(List.of(bulk), 10_000_000, 19, 18);
+        PortfolioAllocator.Selection selected = allocation.selections().getFirst();
+        assertTrue(selected.batches() > 18);
+        assertEquals(selected.batches() * 64, selected.orderQuantity());
+        assertEquals(0, allocation.availableAuctionSlots());
+        assertTrue(selected.capital() <= allocation.deployable() / 4);
     }
 
     @Test void optimizerChoosesTheHigherCombinedScoreUnderCashPressure() {
@@ -92,6 +103,32 @@ class PortfolioAllocatorTest {
         assertEquals(450_000, allocation.riskAdjustedProfitDay());
         assertEquals(6, allocation.selections().size());
         assertTrue(allocation.selections().stream().anyMatch(selection -> selection.candidate().id().equals("expensive")));
+    }
+
+    @Test void randomizedPortfoliosRespectEveryLocalAcquisitionBound() {
+        Random random = new Random(0xD0A17L);
+        PortfolioAllocator allocator = new PortfolioAllocator();
+        for (int run = 0; run < 200; run++) {
+            long balance = 1_000_000L + random.nextLong(99_000_001L);
+            int usedOrders = random.nextInt(21), usedAuctions = random.nextInt(19);
+            List<CandidateFeedClient.Candidate> candidates = new ArrayList<>();
+            for (int index = 0; index < 30; index++) {
+                candidates.add(candidate("random_" + run + "_" + index, 1_000 + random.nextLong(2_000_000),
+                        1 + random.nextLong(1_000_000), 1, 1, 1 + random.nextInt(100_000)));
+            }
+            Set<String> active = new HashSet<>();
+            for (int index = 0; index < 3; index++) if (random.nextBoolean()) active.add(candidates.get(index).itemId());
+            PortfolioAllocator.Allocation allocation = allocator.allocate(candidates, balance, usedOrders, usedAuctions, active);
+            assertTrue(allocation.selectedCapital() <= allocation.deployable());
+            assertTrue(allocation.selectedOrderSlots() <= allocation.availableOrderSlots());
+            assertEquals(allocation.selections().size(), allocation.selections().stream().map(value -> value.candidate().itemId()).distinct().count());
+            for (PortfolioAllocator.Selection selection : allocation.selections()) {
+                assertFalse(active.contains(selection.candidate().itemId()));
+                assertTrue(selection.batches() > 0 && selection.batches() <= selection.candidate().executableBatches());
+                assertTrue(selection.capital() <= Math.max(1, allocation.deployable() / 4));
+                assertEquals(selection.candidate().quantity() * selection.batches(), selection.orderQuantity());
+            }
+        }
     }
 
     private static CandidateFeedClient.Candidate candidate(String id, long cost, long score, int orderSlots, int auctionSlots, int batches) {

@@ -86,22 +86,25 @@ func (s *System) CompleteTask(ctx context.Context, value TaskResult) error {
 
 func (s *System) queueAutomaticResearch(ctx context.Context) error {
 	// The auction API establishes the exit value. READY markets take priority,
-	// followed by RESEARCH markets. Within a tier, research the strongest
-	// risk-adjusted opportunity first. Raw item value is only a tie-breaker;
-	// otherwise a few expensive items can monopolize the observer indefinitely.
+	// followed by previously proven markets that only need a short current-price
+	// recheck, then new RESEARCH markets. Within a tier, research the strongest
+	// risk-adjusted opportunity first. Raw item value is only a tie-breaker.
 	feed := s.CandidateFeed()
 	candidates := make([]Candidate, 0, len(feed.Candidates))
 	for _, candidate := range feed.Candidates {
-		needsOrderResearch := candidate.State == "READY" || (candidate.State == "RESEARCH" && candidate.OrderTier != "actionable")
+		needsOrderResearch := candidate.State == "READY" ||
+			(candidate.Profiled && (candidate.State == "STALE" || candidate.State == "RESEARCH")) ||
+			(candidate.State == "RESEARCH" && candidate.OrderTier != "actionable")
 		if candidate.Route == "ORDER_TO_AUCTION" && needsOrderResearch &&
-			candidate.SignatureComplete && candidate.PriorityRank > 0 && candidate.PriorityScore > 0 &&
+			candidate.SignatureComplete && candidate.PriorityScore > 0 &&
 			candidate.TargetListPrice > 0 && candidate.ConservativeProfit > 0 {
 			candidates = append(candidates, candidate)
 		}
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
-		if candidates[i].State != candidates[j].State {
-			return candidates[i].State == "READY"
+		leftTier, rightTier := researchSchedulingTier(candidates[i]), researchSchedulingTier(candidates[j])
+		if leftTier != rightTier {
+			return leftTier < rightTier
 		}
 		if candidates[i].PriorityScore != candidates[j].PriorityScore {
 			return candidates[i].PriorityScore > candidates[j].PriorityScore
@@ -115,6 +118,7 @@ func (s *System) queueAutomaticResearch(ctx context.Context) error {
 		return candidates[i].Signature < candidates[j].Signature
 	})
 	signatures := make([]string, 0, len(candidates))
+	priorities := make(map[string]int, len(candidates))
 	seen := make(map[string]struct{}, len(candidates))
 	for _, candidate := range candidates {
 		if _, exists := seen[candidate.Signature]; exists {
@@ -122,8 +126,38 @@ func (s *System) queueAutomaticResearch(ctx context.Context) error {
 		}
 		seen[candidate.Signature] = struct{}{}
 		signatures = append(signatures, candidate.Signature)
+		if candidate.Profiled {
+			priorities[candidate.Signature] = 75
+		} else {
+			priorities[candidate.Signature] = 50
+		}
 	}
-	return s.store.QueueAutomaticResearch(ctx, signatures, time.Minute, 5*time.Minute)
+	// A profile may have no current candidate at all after its price sample ages
+	// out. Keep rotating those known markets through the expedited read-only lane
+	// so the system rebuilds current validity instead of relearning from scratch.
+	profiled, err := s.store.ProfiledSignatures(ctx, 100)
+	if err != nil {
+		return err
+	}
+	for _, signature := range profiled {
+		if _, exists := seen[signature]; exists {
+			continue
+		}
+		seen[signature] = struct{}{}
+		signatures = append(signatures, signature)
+		priorities[signature] = 75
+	}
+	return s.store.QueueAutomaticResearch(ctx, signatures, priorities, time.Minute, 5*time.Minute)
+}
+
+func researchSchedulingTier(candidate Candidate) int {
+	if candidate.State == "READY" {
+		return 0
+	}
+	if candidate.Profiled {
+		return 1
+	}
+	return 2
 }
 func (s *System) AddWatch(ctx context.Context, signature string) (Watch, error) {
 	return s.store.AddWatch(ctx, signature, 15*time.Minute)
@@ -361,7 +395,8 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 			ExecutableBatches: executable, ResearchBatches: researchBatches, QueuePosition: 1, OrderSlots: 1, AuctionSlots: 1, InventorySlots: inventorySlots,
 			ConfidenceBPS: valuation.ConfidenceBPS, OrderTier: evidence.Tier, SignatureComplete: evidence.SignatureComplete, ResearchFreshAt: evidence.LastSeenAt, OrderFreshAt: evidence.FocusedSeenAt, FocusedFreshAt: evidence.FocusedSeenAt, AuctionFreshAt: valuation.GeneratedAt,
 			AuctionVolume24h: valuation.Volume24h, AuctionSellerCount: valuation.PriceSellerCount, OrderFilledUnits24h: evidence.FilledUnits24h,
-			OrderAvailableUnits: evidence.AvailableUnits, VolatilityBPS: valuation.VolatilityBPS, ReferenceAgeSeconds: referenceAge,
+			OrderAvailableUnits: evidence.AvailableUnits, Profiled: evidence.Profiled, ProfileFillEvents: evidence.ProfileFillEvents,
+			ProfileDistinctOrders: evidence.ProfileDistinctOrders, VolatilityBPS: valuation.VolatilityBPS, ReferenceAgeSeconds: referenceAge,
 			RiskFlags:    append([]string(nil), valuation.RiskFlags...),
 			OrderCommand: "/orders", AuctionCommand: auctionCommand(evidence.ItemID),
 		}))
@@ -389,7 +424,8 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 				ExecutableBatches: immediateExecutable, ResearchBatches: immediateExecutable, QueuePosition: 0, OrderSlots: 0, AuctionSlots: 0, InventorySlots: inventorySlots,
 				ConfidenceBPS: valuation.ConfidenceBPS, OrderTier: evidence.Tier, SignatureComplete: evidence.SignatureComplete, ResearchFreshAt: evidence.LastSeenAt, OrderFreshAt: evidence.FocusedSeenAt, FocusedFreshAt: evidence.FocusedSeenAt, AuctionFreshAt: valuation.GeneratedAt,
 				AuctionVolume24h: valuation.Volume24h, AuctionSellerCount: valuation.PriceSellerCount, OrderFilledUnits24h: evidence.FilledUnits24h,
-				OrderAvailableUnits: evidence.AvailableUnits, VolatilityBPS: valuation.VolatilityBPS, ReferenceAgeSeconds: referenceAge,
+				OrderAvailableUnits: evidence.AvailableUnits, Profiled: evidence.Profiled, ProfileFillEvents: evidence.ProfileFillEvents,
+				ProfileDistinctOrders: evidence.ProfileDistinctOrders, VolatilityBPS: valuation.VolatilityBPS, ReferenceAgeSeconds: referenceAge,
 				RiskFlags:    append([]string(nil), valuation.RiskFlags...),
 				OrderCommand: "/orders", AuctionCommand: auctionCommand(evidence.ItemID),
 			}))
@@ -441,8 +477,12 @@ func candidate(value Candidate) Candidate {
 	if !value.SignatureComplete {
 		capacity = 0
 	}
-	capacity = min(18, max(0, capacity))
-	value.MaxOrderQuantity = safeIntProduct(value.Quantity, min(18, max(0, value.ExecutableBatches)))
+	capacity = max(0, capacity)
+	// The backend publishes market capacity, not a balance-sized recommendation.
+	// Acquisition orders may contain many exact resale batches; Fabric alone
+	// chooses an affordable quantity. Each auction listing is still one exact
+	// batch (normally at most 64), and those listings can reuse slots over time.
+	value.MaxOrderQuantity = safeIntProduct(value.Quantity, max(0, value.ExecutableBatches))
 	value.PriorityScore = mulMoney(value.RiskAdjustedProfitDay, int64(capacity))
 	if profit <= 0 {
 		value.State = "REJECTED"

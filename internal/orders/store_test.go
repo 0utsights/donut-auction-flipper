@@ -327,7 +327,7 @@ func TestAutomaticResearchWaitsForDiscoveryBreadthFloor(t *testing.T) {
 	if err != nil || discovery == nil || discovery.Kind != "discovery" {
 		t.Fatalf("discovery=%+v err=%v", discovery, err)
 	}
-	if err := system.store.QueueAutomaticResearch(ctx, []string{"minecraft:diamond_block"}, time.Minute, 5*time.Minute); err != nil {
+	if err := system.store.QueueAutomaticResearch(ctx, []string{"minecraft:diamond_block"}, nil, time.Minute, 5*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	heartbeat := Heartbeat{ObserverID: "one", State: "scanning", TaskID: discovery.ID, LeaseToken: discovery.LeaseToken, Page: 3}
@@ -342,6 +342,30 @@ func TestAutomaticResearchWaitsForDiscoveryBreadthFloor(t *testing.T) {
 	wrong.LeaseToken = "lease_wrong"
 	if yield, err := system.ShouldYieldDiscovery(ctx, wrong); err != nil || yield {
 		t.Fatalf("wrong lease interrupted discovery: yield=%v err=%v", yield, err)
+	}
+}
+
+func TestProfileRevalidationPreemptsDiscoveryBeforeBreadthFloor(t *testing.T) {
+	system, err := NewSystem(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	ctx := context.Background()
+	if _, err = system.Register(ctx, ObserverRegistration{ObserverID: "one", ParserVersion: "p1", ProxyLabel: "proxy"}); err != nil {
+		t.Fatal(err)
+	}
+	discovery, err := system.LeaseTask(ctx, "one")
+	if err != nil || discovery == nil || discovery.Kind != "discovery" {
+		t.Fatalf("discovery=%+v err=%v", discovery, err)
+	}
+	priorities := map[string]int{"minecraft:diamond_block": 75}
+	if err = system.store.QueueAutomaticResearch(ctx, []string{"minecraft:diamond_block"}, priorities, time.Minute, 5*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	heartbeat := Heartbeat{ObserverID: "one", State: "scanning", TaskID: discovery.ID, LeaseToken: discovery.LeaseToken, Page: 3}
+	if yield, yieldErr := system.ShouldYieldDiscovery(ctx, heartbeat); yieldErr != nil || !yield {
+		t.Fatalf("proven market did not enter fast revalidation: yield=%v err=%v", yield, yieldErr)
 	}
 }
 
@@ -372,6 +396,53 @@ func TestAutomaticResearchDoesNotWatchAuctionOnlyDeficiency(t *testing.T) {
 	}
 	if err := system.store.db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE kind='focused_watch'`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("order-evidence deficiency did not queue focused research: count=%d err=%v", count, err)
+	}
+}
+
+func TestPreviouslyProvenStaleCandidateQueuesExpeditedRevalidation(t *testing.T) {
+	system, err := NewSystem(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	system.candidates.Store(&CandidateFeed{Candidates: []Candidate{{
+		Route: "ORDER_TO_AUCTION", State: "STALE", OrderTier: "actionable", Profiled: true,
+		Signature: "minecraft:diamond_block", SignatureComplete: true, PriorityScore: 100,
+		TargetListPrice: 100_000, ConservativeProfit: 10_000,
+	}}})
+	if err = system.queueAutomaticResearch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var priority int
+	if err = system.store.db.QueryRow(`SELECT priority FROM tasks WHERE kind='focused_watch'`).Scan(&priority); err != nil {
+		t.Fatal(err)
+	}
+	if priority != 75 {
+		t.Fatalf("profile revalidation priority=%d", priority)
+	}
+}
+
+func TestLongLivedProfileCanBeScheduledWithoutACurrentCandidate(t *testing.T) {
+	system, err := NewSystem(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	ctx := context.Background()
+	if _, err = system.store.db.ExecContext(ctx, `INSERT INTO order_market_profiles(signature,fill_events,distinct_orders,last_fill_ms)
+		VALUES('minecraft:diamond_block',?,?,?)`, profileMinFillEvents, profileMinDistinctOrders, time.Now().UTC().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if err = system.queueAutomaticResearch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var signature string
+	var priority int
+	if err = system.store.db.QueryRow(`SELECT signature,priority FROM tasks WHERE kind='focused_watch'`).Scan(&signature, &priority); err != nil {
+		t.Fatal(err)
+	}
+	if signature != "minecraft:diamond_block" || priority != 75 {
+		t.Fatalf("profile task=%s priority=%d", signature, priority)
 	}
 }
 
@@ -503,7 +574,7 @@ func TestManualWatchUpgradesAutomaticResearchTask(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = system.Close() })
 	ctx := context.Background()
-	if err = system.store.QueueAutomaticResearch(ctx, []string{"minecraft:diamond_block"}, time.Minute, 5*time.Minute); err != nil {
+	if err = system.store.QueueAutomaticResearch(ctx, []string{"minecraft:diamond_block"}, nil, time.Minute, 5*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = system.AddWatch(ctx, "minecraft:diamond_block"); err != nil {
@@ -809,7 +880,8 @@ func TestFillInferenceRequiresObservedQuantityDecrease(t *testing.T) {
 	if len(evidence) != 1 {
 		t.Fatalf("evidence=%+v", evidence)
 	}
-	if evidence[0].FillEvents != 6 || evidence[0].DistinctOrders != 3 || evidence[0].Tier != "actionable" {
+	if evidence[0].FillEvents != 6 || evidence[0].DistinctOrders != 3 || evidence[0].Tier != "actionable" ||
+		!evidence[0].Profiled || evidence[0].ProfileFillEvents != 6 || evidence[0].ProfileDistinctOrders != 3 {
 		t.Fatalf("expected actionable fill evidence, got %+v", evidence[0])
 	}
 	if evidence[0].FocusedSeenAt.IsZero() || !evidence[0].FocusedSeenAt.Equal(base.Add(observedAt[5]).Truncate(time.Millisecond)) {
@@ -994,6 +1066,9 @@ func TestCandidateBuilderIsQuantityAndEvidenceSafe(t *testing.T) {
 		}
 		if candidate.Route == "ORDER_TO_AUCTION" && (candidate.OrderUnitRewardCents != 400_001 || candidate.TargetListPrice != 320_000) {
 			t.Fatalf("prepared transaction values are incorrect: %+v", candidate)
+		}
+		if candidate.Route == "ORDER_TO_AUCTION" && candidate.MaxOrderQuantity != 640 {
+			t.Fatalf("market-sized order quantity was capped by auction slots: %+v", candidate)
 		}
 	}
 	valuation.QuantityQuickSell = 0

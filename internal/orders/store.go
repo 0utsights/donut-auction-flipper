@@ -23,14 +23,16 @@ var memorySequence atomic.Uint64
 var ErrDiagnosticRateLimit = errors.New("diagnostic rate limit exceeded")
 
 const (
-	rawObservationRetention = 24 * time.Hour
-	fillRetention           = 90 * 24 * time.Hour
-	diagnosticRetention     = 14 * 24 * time.Hour
-	backupRetention         = 7 * 24 * time.Hour
-	orderObservationWindow  = time.Hour
-	signatureEvidenceWindow = 10 * time.Minute
-	cleanupBatchSize        = 250
-	cleanupYield            = 5 * time.Millisecond
+	rawObservationRetention  = 24 * time.Hour
+	fillRetention            = 90 * 24 * time.Hour
+	diagnosticRetention      = 14 * 24 * time.Hour
+	backupRetention          = 7 * 24 * time.Hour
+	orderObservationWindow   = time.Hour
+	signatureEvidenceWindow  = 10 * time.Minute
+	cleanupBatchSize         = 250
+	cleanupYield             = 5 * time.Millisecond
+	profileMinFillEvents     = 5
+	profileMinDistinctOrders = 3
 )
 
 type Store struct {
@@ -123,6 +125,12 @@ func (s *Store) migrate() error {
 			UNIQUE(observer_id, order_key, observed_ms))`,
 		`CREATE INDEX IF NOT EXISTS fill_signature_time ON fill_events(signature, observed_ms DESC)`,
 		`CREATE INDEX IF NOT EXISTS fill_observed_time ON fill_events(observed_ms DESC)`,
+		`CREATE TABLE IF NOT EXISTS order_market_profiles (
+			signature TEXT PRIMARY KEY,fill_events INTEGER NOT NULL,distinct_orders INTEGER NOT NULL,last_fill_ms INTEGER NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS order_market_profiles_recent ON order_market_profiles(last_fill_ms DESC)`,
+		`CREATE TABLE IF NOT EXISTS order_market_profile_orders (
+			signature TEXT NOT NULL,order_key TEXT NOT NULL,last_fill_ms INTEGER NOT NULL,
+			PRIMARY KEY(signature,order_key))`,
 		`CREATE TABLE IF NOT EXISTS watches (
 			id TEXT PRIMARY KEY, signature TEXT NOT NULL, created_ms INTEGER NOT NULL, expires_ms INTEGER NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS watches_expiry ON watches(expires_ms)`,
@@ -185,6 +193,26 @@ func (s *Store) migrate() error {
 			AND newer_scan.page=older_scan.page AND newer_scan.task_id=older_scan.task_id
 			AND newer.identity_verified=1 AND older.identity_verified=1)`); err != nil {
 		return fmt.Errorf("quarantine cross-page fill evidence: %w", err)
+	}
+	// Compact, permanent market profiles let previously proven items re-enter a
+	// short validation lane without regrouping the 90-day fill table on every
+	// live candidate refresh. Existing confirmed evidence is backfilled once.
+	if _, err := s.db.Exec(`INSERT INTO order_market_profiles(signature,fill_events,distinct_orders,last_fill_ms)
+		SELECT signature,COUNT(*),COUNT(DISTINCT order_key),MAX(observed_ms) FROM fill_events
+		WHERE unit_reward_cents>0 AND confirmation_level>=1 GROUP BY signature
+		ON CONFLICT(signature) DO UPDATE SET fill_events=MAX(order_market_profiles.fill_events,excluded.fill_events),
+		distinct_orders=MAX(order_market_profiles.distinct_orders,excluded.distinct_orders),
+		last_fill_ms=MAX(order_market_profiles.last_fill_ms,excluded.last_fill_ms)`); err != nil {
+		return fmt.Errorf("backfill order market profiles: %w", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO order_market_profile_orders(signature,order_key,last_fill_ms)
+		SELECT signature,order_key,last_fill_ms FROM (
+			SELECT signature,order_key,MAX(observed_ms) AS last_fill_ms,
+			ROW_NUMBER() OVER (PARTITION BY signature ORDER BY MAX(observed_ms) DESC) AS identity_rank
+			FROM fill_events WHERE unit_reward_cents>0 AND confirmation_level>=1 GROUP BY signature,order_key)
+		WHERE identity_rank<=3 ON CONFLICT(signature,order_key) DO UPDATE SET
+		last_fill_ms=MAX(order_market_profile_orders.last_fill_ms,excluded.last_fill_ms)`); err != nil {
+		return fmt.Errorf("backfill order market profile orders: %w", err)
 	}
 	// Count independent menu sessions, not pagination pages. Discovery keeps one
 	// session across the full book, while focused refreshes intentionally rotate
@@ -334,7 +362,7 @@ func (s *Store) ShouldYieldDiscovery(ctx context.Context, heartbeat Heartbeat) (
 		WHERE active.id=? AND active.kind='discovery' AND active.state='leased'
 			AND active.assigned_observer=? AND active.lease_token=? AND active.lease_expires_ms>?
 			AND EXISTS(SELECT 1 FROM tasks focused WHERE focused.kind='focused_watch' AND focused.state='ready'
-				AND (focused.automatic=0 OR ?>=?))
+				AND (focused.automatic=0 OR focused.priority>=75 OR ?>=?))
 	)`, heartbeat.TaskID, heartbeat.ObserverID, heartbeat.LeaseToken, s.now().UnixMilli(), heartbeat.Page, automaticFocusDiscoveryPage).Scan(&ready)
 	return ready == 1, err
 }
@@ -496,10 +524,31 @@ func (s *Store) SaveScan(ctx context.Context, batch ScanBatch) (bool, error) {
 						confirmation = 2
 					}
 				}
-				_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO fill_events(signature,order_key,observer_id,units,unit_reward,unit_reward_cents,confirmation_level,previous_observed_ms,observed_ms) VALUES(?,?,?,?,?,?,?,?,?)`,
+				fillResult, fillErr := tx.ExecContext(ctx, `INSERT OR IGNORE INTO fill_events(signature,order_key,observer_id,units,unit_reward,unit_reward_cents,confirmation_level,previous_observed_ms,observed_ms) VALUES(?,?,?,?,?,?,?,?,?)`,
 					order.Signature, order.OrderKey, batch.ObserverID, previous-order.RemainingQuantity, 0, order.UnitRewardCents, confirmation, previousObserved, batch.ObservedAt.UnixMilli())
-				if err != nil {
-					return false, err
+				if fillErr != nil {
+					return false, fillErr
+				}
+				insertedFill, _ := fillResult.RowsAffected()
+				if insertedFill == 1 && confirmation >= 1 {
+					profileOrderResult, profileErr := tx.ExecContext(ctx, `INSERT OR IGNORE INTO order_market_profile_orders(signature,order_key,last_fill_ms)
+						SELECT ?,?,? WHERE COALESCE((SELECT distinct_orders FROM order_market_profiles WHERE signature=?),0)<?`,
+						order.Signature, order.OrderKey, batch.ObservedAt.UnixMilli(), order.Signature, profileMinDistinctOrders)
+					if profileErr != nil {
+						return false, profileErr
+					}
+					newProfileOrder, _ := profileOrderResult.RowsAffected()
+					if _, profileErr = tx.ExecContext(ctx, `UPDATE order_market_profile_orders SET last_fill_ms=MAX(last_fill_ms,?) WHERE signature=? AND order_key=?`,
+						batch.ObservedAt.UnixMilli(), order.Signature, order.OrderKey); profileErr != nil {
+						return false, profileErr
+					}
+					if _, profileErr = tx.ExecContext(ctx, `INSERT INTO order_market_profiles(signature,fill_events,distinct_orders,last_fill_ms)
+						VALUES(?,1,?,?) ON CONFLICT(signature) DO UPDATE SET fill_events=order_market_profiles.fill_events+1,
+						distinct_orders=order_market_profiles.distinct_orders+excluded.distinct_orders,
+						last_fill_ms=MAX(order_market_profiles.last_fill_ms,excluded.last_fill_ms)`, order.Signature, newProfileOrder,
+						batch.ObservedAt.UnixMilli()); profileErr != nil {
+						return false, profileErr
+					}
 				}
 			} else if previousErr != nil && !errors.Is(previousErr, sql.ErrNoRows) {
 				return false, previousErr
@@ -590,7 +639,7 @@ func (s *Store) LeasedTaskKind(ctx context.Context, result TaskResult) (string, 
 // QueueAutomaticResearch creates at most one short focused task. Callers pass
 // signatures in preferred order; recent automatic samples are skipped so the
 // collector rotates through valuable markets instead of fixating on one item.
-func (s *Store) QueueAutomaticResearch(ctx context.Context, signatures []string, minimumInterval, cooldown time.Duration) error {
+func (s *Store) QueueAutomaticResearch(ctx context.Context, signatures []string, priorities map[string]int, minimumInterval, cooldown time.Duration) error {
 	if len(signatures) == 0 {
 		return nil
 	}
@@ -628,8 +677,12 @@ func (s *Store) QueueAutomaticResearch(ctx context.Context, signatures []string,
 		if sampled > 0 {
 			continue
 		}
+		priority := priorities[signature]
+		if priority < 50 || priority > 75 {
+			priority = 50
+		}
 		if _, err = tx.ExecContext(ctx, `INSERT INTO tasks(id,kind,signature,priority,desired_freshness_ms,parser_schema,state,automatic,created_ms,updated_ms)
-			VALUES(?,'focused_watch',?,50,1000,?,'ready',1,?,?)`, newID("task"), signature, SchemaVersion, now.UnixMilli(), now.Add(-time.Second).UnixMilli()); err != nil {
+			VALUES(?,'focused_watch',?,?,1000,?,'ready',1,?,?)`, newID("task"), signature, priority, SchemaVersion, now.UnixMilli(), now.Add(-time.Second).UnixMilli()); err != nil {
 			return err
 		}
 		break
@@ -771,7 +824,8 @@ func (s *Store) enrichEvidence(ctx context.Context, evidence []Evidence) error {
 	}
 
 	fillRows, err := s.db.QueryContext(ctx, `SELECT signature,COUNT(*),COALESCE(SUM(units),0),COUNT(DISTINCT order_key)
-		FROM fill_events WHERE unit_reward_cents>0 AND confirmation_level>=1 AND observed_ms>=? GROUP BY signature`, s.now().Add(-24*time.Hour).UnixMilli())
+		FROM fill_events WHERE unit_reward_cents>0 AND confirmation_level>=1 AND observed_ms>=? GROUP BY signature`,
+		s.now().Add(-24*time.Hour).UnixMilli())
 	if err != nil {
 		return err
 	}
@@ -789,6 +843,29 @@ func (s *Store) enrichEvidence(ctx context.Context, evidence []Evidence) error {
 		}
 	}
 	if err := closeRows(fillRows); err != nil {
+		return err
+	}
+	profileRows, err := s.db.QueryContext(ctx, `SELECT signature,fill_events,distinct_orders,last_fill_ms FROM order_market_profiles`)
+	if err != nil {
+		return err
+	}
+	for profileRows.Next() {
+		var signature string
+		var events, distinctOrders int
+		var lastFillMS int64
+		if err := profileRows.Scan(&signature, &events, &distinctOrders, &lastFillMS); err != nil {
+			profileRows.Close()
+			return err
+		}
+		if index, ok := indexes[signature]; ok {
+			evidence[index].ProfileFillEvents, evidence[index].ProfileDistinctOrders = events, distinctOrders
+			evidence[index].Profiled = events >= profileMinFillEvents && distinctOrders >= profileMinDistinctOrders
+			if lastFillMS > 0 {
+				evidence[index].ProfileLastFillAt = time.UnixMilli(lastFillMS).UTC()
+			}
+		}
+	}
+	if err := closeRows(profileRows); err != nil {
 		return err
 	}
 
@@ -885,6 +962,30 @@ func (s *Store) enrichEvidence(ctx context.Context, evidence []Evidence) error {
 		classifyEvidence(&evidence[index], len(currentPrices))
 	}
 	return nil
+}
+
+// ProfiledSignatures returns markets with independently confirmed long-lived
+// fill evidence. It is intentionally independent of current candidate state so
+// a known item can be located and refreshed even after its one-hour price sample
+// has aged out. This only schedules read-only Mineflayer observation.
+func (s *Store) ProfiledSignatures(ctx context.Context, limit int) ([]string, error) {
+	limit = min(100, max(1, limit))
+	rows, err := s.db.QueryContext(ctx, `SELECT signature FROM order_market_profiles
+		WHERE fill_events>=? AND distinct_orders>=? ORDER BY last_fill_ms DESC LIMIT ?`,
+		profileMinFillEvents, profileMinDistinctOrders, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]string, 0, limit)
+	for rows.Next() {
+		var signature string
+		if err := rows.Scan(&signature); err != nil {
+			return nil, err
+		}
+		result = append(result, signature)
+	}
+	return result, rows.Err()
 }
 
 func closeRows(rows *sql.Rows) error {

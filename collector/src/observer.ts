@@ -26,6 +26,10 @@ const FOCUSED_WATCH_RUNTIME_MS = 4 * 60_000
 // Allow enough time to reach a high-value early page and then collect the
 // 30-second minimum evidence window. This remains bounded and transaction-free.
 const AUTOMATIC_FOCUSED_RUNTIME_MS = 120_000
+// Priority 75 is reserved for an item whose long-lived fill profile is already
+// proven. It still receives fresh menu samples, but does not repeat the full
+// two-minute discovery process needed by a new market.
+const PROFILE_REVALIDATION_RUNTIME_MS = 20_000
 // A runaway guard, not a normal scan boundary. The live market has exceeded
 // 200 pages, so discovery must continue until the server removes pagination or
 // refuses to advance it. Connections are rotated after every completed pass.
@@ -197,7 +201,8 @@ class ObserverRuntime {
     const seen = new Set<string>()
     const limit = DISCOVERY_PAGE_LIMIT
     const taskDeadline = task.kind === 'focused_watch'
-      ? Date.now() + (task.priority >= 100 ? FOCUSED_WATCH_RUNTIME_MS : AUTOMATIC_FOCUSED_RUNTIME_MS)
+      ? Date.now() + (task.priority >= 100 ? FOCUSED_WATCH_RUNTIME_MS
+        : task.priority >= 75 ? PROFILE_REVALIDATION_RUNTIME_MS : AUTOMATIC_FOCUSED_RUNTIME_MS)
       : Date.parse(task.lease_expires_at) - 2_000
     for (let pageIndex = 0; pageIndex < limit; pageIndex++) {
       this.ensureConnected(bot)
