@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { isMostPerItemOrder, parseOrder, projectItem } from './parser.js'
+import { isFilteredMostPerItemOrder, isMostPerItemOrder, parseOrder, projectItem } from './parser.js'
 
 test('parses a conservative order fixture', () => {
   const view = projectItem({ name: 'diamond_block', count: 64, stackSize: 64, displayName: 'Diamond Block', nbt: { lore: ['Unit Reward: $5,000', 'Remaining: 640', 'Requested: 1000', 'Queue: #2', 'Buyer: Test_User', 'Order ID: ord_123'] } }, 10)
@@ -108,4 +108,15 @@ test('proves most-per-item order only from a complete descending page', () => {
   const wrong = [...orders]
   wrong[6] = { ...wrong[6]!, unit_reward_cents: 20_000 }
   assert.equal(isMostPerItemOrder(wrong, 10), false)
+})
+
+test('accepts a small canonical search result only when unit rewards descend', () => {
+  const orders = [300, 200, 200].map((unit_reward_cents, slot) => ({
+    order_key: `order-${slot}`, item_id: 'minecraft:diamond_block', signature: 'minecraft:diamond_block', quantity: 64,
+    max_stack_size: 64, unit_reward_cents, requested_quantity: 64, remaining_quantity: 64, slot,
+    raw_field_hash: `hash-${slot}`, signature_complete: true, identity_verified: false
+  }))
+  assert.equal(isFilteredMostPerItemOrder(orders, 3), true)
+  assert.equal(isFilteredMostPerItemOrder([orders[1]!, orders[0]!], 2), false)
+  assert.equal(isFilteredMostPerItemOrder([], 0), false)
 })

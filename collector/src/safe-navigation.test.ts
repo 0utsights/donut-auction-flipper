@@ -23,6 +23,17 @@ test('only the exact orders command is allowed', () => {
   assert.throws(() => navigator.sendCommand('/ah'), /not allowlisted/)
 })
 
+test('allows only one canonical item argument for read-only order search', () => {
+  const { bot, schemas } = fixture(); const navigator = new SafeNavigator(bot, schemas)
+  navigator.searchOrders('minecraft:redstone_block')
+  assert.deepEqual(bot.commands, ['/orders redstone_block'])
+  assert.throws(() => navigator.searchOrders('minecraft:redstone block'), /not allowlisted/)
+  assert.throws(() => navigator.searchOrders('minecraft:my'), /not allowlisted/)
+  assert.throws(() => navigator.searchOrders('minecraft:reload'), /not allowlisted/)
+  assert.throws(() => navigator.searchOrders('diamond_block'), /not allowlisted/)
+  assert.throws(() => navigator.searchOrders('minecraft:diamond_block extra'), /not allowlisted/)
+})
+
 test('validates controls using custom component labels', () => {
   const { bot, schemas, slots } = fixture()
   slots[50] = { name: 'minecraft:arrow', displayName: 'Arrow', customName: { type: 'string', value: 'Next Page' } }

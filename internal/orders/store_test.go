@@ -356,7 +356,7 @@ func TestFocusedWatchRequestsCurrentDiscoveryLeaseToYield(t *testing.T) {
 	}
 }
 
-func TestAutomaticResearchWaitsForDiscoveryBreadthFloor(t *testing.T) {
+func TestAutomaticResearchYieldsAfterTopPage(t *testing.T) {
 	system, err := NewSystem(Config{})
 	if err != nil {
 		t.Fatal(err)
@@ -373,11 +373,7 @@ func TestAutomaticResearchWaitsForDiscoveryBreadthFloor(t *testing.T) {
 	if err := system.store.QueueAutomaticResearch(ctx, []string{"minecraft:diamond_block"}, nil, time.Minute, 5*time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	heartbeat := Heartbeat{ObserverID: "one", State: "scanning", TaskID: discovery.ID, LeaseToken: discovery.LeaseToken, Page: 3}
-	if yield, err := system.ShouldYieldDiscovery(ctx, heartbeat); err != nil || yield {
-		t.Fatalf("automatic research starved early discovery: yield=%v err=%v", yield, err)
-	}
-	heartbeat.Page = automaticFocusDiscoveryPage
+	heartbeat := Heartbeat{ObserverID: "one", State: "scanning", TaskID: discovery.ID, LeaseToken: discovery.LeaseToken, Page: automaticFocusDiscoveryPage}
 	if yield, err := system.ShouldYieldDiscovery(ctx, heartbeat); err != nil || !yield {
 		t.Fatalf("automatic research did not yield at breadth floor: yield=%v err=%v", yield, err)
 	}
@@ -388,7 +384,7 @@ func TestAutomaticResearchWaitsForDiscoveryBreadthFloor(t *testing.T) {
 	}
 }
 
-func TestProfileRevalidationWaitsForEconomicallySortedBreadthFloor(t *testing.T) {
+func TestProfileRevalidationYieldsAfterTopPage(t *testing.T) {
 	system, err := NewSystem(Config{})
 	if err != nil {
 		t.Fatal(err)
@@ -406,11 +402,7 @@ func TestProfileRevalidationWaitsForEconomicallySortedBreadthFloor(t *testing.T)
 	if err = system.store.QueueAutomaticResearch(ctx, []string{"minecraft:diamond_block"}, priorities, time.Minute, 5*time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	heartbeat := Heartbeat{ObserverID: "one", State: "scanning", TaskID: discovery.ID, LeaseToken: discovery.LeaseToken, Page: 3}
-	if yield, yieldErr := system.ShouldYieldDiscovery(ctx, heartbeat); yieldErr != nil || yield {
-		t.Fatalf("profile revalidation starved the price-sorted discovery lane: yield=%v err=%v", yield, yieldErr)
-	}
-	heartbeat.Page = automaticFocusDiscoveryPage
+	heartbeat := Heartbeat{ObserverID: "one", State: "scanning", TaskID: discovery.ID, LeaseToken: discovery.LeaseToken, Page: automaticFocusDiscoveryPage}
 	if yield, yieldErr := system.ShouldYieldDiscovery(ctx, heartbeat); yieldErr != nil || !yield {
 		t.Fatalf("profile revalidation did not run after the breadth floor: yield=%v err=%v", yield, yieldErr)
 	}
@@ -788,6 +780,32 @@ func TestDeletingWatchLetsLeasedTaskFinish(t *testing.T) {
 	}
 	if err = system.store.db.QueryRow(`SELECT state FROM tasks WHERE id=?`, task.ID).Scan(&state); err != nil || state != "completed" {
 		t.Fatalf("finished watch state=%q err=%v", state, err)
+	}
+}
+
+func TestNoActiveOrdersDoesNotMonopolizeObserver(t *testing.T) {
+	system, err := NewSystem(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	ctx := context.Background()
+	if _, err = system.Register(ctx, ObserverRegistration{ObserverID: "observer", ParserVersion: "p1", ProxyLabel: "proxy"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = system.AddWatch(ctx, "minecraft:diamond_block"); err != nil {
+		t.Fatal(err)
+	}
+	task, err := system.LeaseTask(ctx, "observer")
+	if err != nil || task == nil || task.Kind != "focused_watch" {
+		t.Fatalf("focused lease=%+v err=%v", task, err)
+	}
+	if err = system.CompleteTask(ctx, TaskResult{ObserverID: "observer", TaskID: task.ID, LeaseToken: task.LeaseToken, Status: "complete", Message: "no_active_orders"}); err != nil {
+		t.Fatal(err)
+	}
+	var state string
+	if err = system.store.db.QueryRow(`SELECT state FROM tasks WHERE id=?`, task.ID).Scan(&state); err != nil || state != "completed" {
+		t.Fatalf("off-page watch remained active: state=%q err=%v", state, err)
 	}
 }
 
@@ -1262,6 +1280,44 @@ func TestStablePricesRejectsBroadMovementButIgnoresOneTransientSpike(t *testing.
 	}
 	if stablePrices([]int64{100, 100, 100, 100, 120, 121, 122, 123, 124, 125, 126, 127}) {
 		t.Fatal("sustained order-price movement was classified as stable")
+	}
+}
+
+func TestAuctionResearchTargetsPreferValuableLiquidCanonicalItems(t *testing.T) {
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	values := map[string]market.Valuation{
+		"diamond": {Signature: "minecraft:diamond", BaseSignature: "minecraft:diamond", QuickSellValue: 5_000, Volume24h: 20, PriceSellerCount: 3, ConfidenceBPS: 8_000, GeneratedAt: now},
+		"iron":    {Signature: "minecraft:iron_ingot", BaseSignature: "minecraft:iron_ingot", QuickSellValue: 1_000, Volume24h: 20, PriceSellerCount: 3, ConfidenceBPS: 8_000, GeneratedAt: now},
+		"unsafe":  {Signature: "minecraft:diamond|enchanted", BaseSignature: "minecraft:diamond|enchanted", QuickSellValue: 100_000, Volume24h: 20, PriceSellerCount: 3, ConfidenceBPS: 8_000, GeneratedAt: now},
+		"thin":    {Signature: "minecraft:netherite_ingot", BaseSignature: "minecraft:netherite_ingot", QuickSellValue: 50_000, Volume24h: 1, PriceSellerCount: 1, ConfidenceBPS: 8_000, GeneratedAt: now},
+	}
+	targets := auctionResearchTargets(values, now, 10)
+	if len(targets) != 2 || targets[0] != "minecraft:diamond" || targets[1] != "minecraft:iron_ingot" {
+		t.Fatalf("auction shortlist=%v", targets)
+	}
+	if !canonicalBaseItem("minecraft:redstone_block") || canonicalBaseItem("minecraft:redstone block") || canonicalBaseItem("minecraft:my") {
+		t.Fatal("canonical search safety policy is inconsistent")
+	}
+}
+
+func TestAuctionShortlistCanScheduleItemBeforeOrderEvidence(t *testing.T) {
+	system, err := NewSystem(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	ctx := context.Background()
+	if _, err = system.Register(ctx, ObserverRegistration{ObserverID: "observer", ParserVersion: "p1", ProxyLabel: "proxy"}); err != nil {
+		t.Fatal(err)
+	}
+	targets := []string{"minecraft:diamond_block"}
+	system.research.Store(&targets)
+	if err = system.queueAutomaticResearch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	task, err := system.LeaseTask(ctx, "observer")
+	if err != nil || task == nil || task.Kind != "focused_watch" || task.Signature != "minecraft:diamond_block" {
+		t.Fatalf("auction-prior task=%+v err=%v", task, err)
 	}
 }
 

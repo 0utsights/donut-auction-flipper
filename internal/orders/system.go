@@ -36,6 +36,7 @@ type System struct {
 	version     atomic.Uint64
 	lastRefresh atomic.Int64
 	candidates  atomic.Pointer[CandidateFeed]
+	research    atomic.Pointer[[]string]
 	refreshMu   sync.Mutex
 }
 
@@ -137,6 +138,20 @@ func (s *System) queueAutomaticResearch(ctx context.Context) error {
 			priorities[candidate.Signature] = 50
 		}
 	}
+	// Completed-auction history supplies a broad, safe shortlist even before an
+	// item has current order evidence. Query these canonical items directly in
+	// descending auction-value/volume order; once observed, normal candidate
+	// economics replace this prior with the measured order spread.
+	if targets := s.research.Load(); targets != nil {
+		for _, signature := range *targets {
+			if _, exists := seen[signature]; exists {
+				continue
+			}
+			seen[signature] = struct{}{}
+			signatures = append(signatures, signature)
+			priorities[signature] = 50
+		}
+	}
 	// A profile may have no current candidate at all after its price sample ages
 	// out. Keep rotating those known markets through the expedited read-only lane
 	// so the system rebuilds current validity instead of relearning from scratch.
@@ -152,7 +167,7 @@ func (s *System) queueAutomaticResearch(ctx context.Context) error {
 		signatures = append(signatures, signature)
 		priorities[signature] = 75
 	}
-	return s.store.QueueAutomaticResearch(ctx, signatures, priorities, time.Minute, 5*time.Minute)
+	return s.store.QueueAutomaticResearch(ctx, signatures, priorities, 2*time.Second, 5*time.Minute)
 }
 
 func researchSchedulingTier(candidate Candidate) int {
@@ -213,12 +228,12 @@ func (s *System) refreshLocked(ctx context.Context, engine *market.Engine) error
 	if err != nil {
 		return err
 	}
+	now := s.now()
+	marketSnapshot := engine.Snapshot()
+	targets := auctionResearchTargets(marketSnapshot.Valuations, now, 100)
+	s.research.Store(&targets)
 	valuations := make(map[string]market.Valuation, len(evidence))
 	for _, item := range evidence {
-		// enrichEvidence deliberately clears historical prices that are absent
-		// from the current one-hour research window. Those rows cannot produce a
-		// candidate, so do not run the comparatively expensive quantity model
-		// for hundreds of stale signatures on every live refresh.
 		if item.BestUnitRewardCents <= 0 {
 			continue
 		}
@@ -235,7 +250,6 @@ func (s *System) refreshLocked(ctx context.Context, engine *market.Engine) error
 			valuations[item.Signature] = valuation
 		}
 	}
-	now := s.now()
 	candidates := buildCandidates(evidence, valuations, s.cfg, now)
 	if len(candidates) > s.cfg.CandidateLimit {
 		candidates = candidates[:s.cfg.CandidateLimit]
@@ -248,6 +262,68 @@ func (s *System) refreshLocked(ctx context.Context, engine *market.Engine) error
 	// Queue here as well so a valuable API-backed market can preempt the next
 	// discovery page instead of waiting for another complete traversal.
 	return s.queueAutomaticResearch(ctx)
+}
+
+type rankedAuctionTarget struct {
+	signature string
+	score     int64
+}
+
+func auctionResearchTargets(values map[string]market.Valuation, now time.Time, limit int) []string {
+	best := make(map[string]int64)
+	for _, value := range values {
+		signature := value.BaseSignature
+		if signature == "" {
+			signature = value.Signature
+		}
+		if !canonicalBaseItem(signature) || value.QuickSellValue <= 0 || value.Volume24h < minimumFillerAuctionVolume ||
+			value.PriceSellerCount < minimumFillerAuctionSellers || value.ConfidenceBPS < minimumFillerExitConfidenceBPS || marketHoldReason(value, now, true) != "" {
+			continue
+		}
+		liquidity := int64(min(value.Volume24h, 20))
+		score := mulMoney(value.QuickSellValue, liquidity)
+		score = mulDivNonNegative(score, int64(value.ConfidenceBPS), 10_000)
+		if score > best[signature] {
+			best[signature] = score
+		}
+	}
+	ranked := make([]rankedAuctionTarget, 0, len(best))
+	for signature, score := range best {
+		ranked = append(ranked, rankedAuctionTarget{signature: signature, score: score})
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].score != ranked[j].score {
+			return ranked[i].score > ranked[j].score
+		}
+		return ranked[i].signature < ranked[j].signature
+	})
+	limit = min(max(0, limit), len(ranked))
+	result := make([]string, limit)
+	for index := range result {
+		result[index] = ranked[index].signature
+	}
+	return result
+}
+
+func canonicalBaseItem(signature string) bool {
+	const prefix = "minecraft:"
+	if !strings.HasPrefix(signature, prefix) {
+		return false
+	}
+	path := strings.TrimPrefix(signature, prefix)
+	if path == "" || len(path) > 64 {
+		return false
+	}
+	for _, character := range path {
+		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '_' {
+			return false
+		}
+	}
+	switch path {
+	case "buy", "cancel", "claim", "collect", "confirm", "create", "fulfill", "help", "list", "my", "purchase", "reload", "search", "sell":
+		return false
+	}
+	return true
 }
 
 func (s *System) Debug(ctx context.Context) (DebugSnapshot, error) {

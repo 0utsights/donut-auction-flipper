@@ -4,7 +4,7 @@ import { resolve } from 'node:path'
 import mineflayer, { type Bot } from 'mineflayer'
 import { BackendClient } from './backend.js'
 import { installAuthenticationProxy } from './auth-proxy.js'
-import { fingerprintWindow, isMostPerItemOrder, parseOrder, plainText, projectItem } from './parser.js'
+import { fingerprintWindow, isFilteredMostPerItemOrder, isMostPerItemOrder, parseOrder, plainText, projectItem } from './parser.js'
 import { EgressMismatchError, minecraftConnect, proxyAgent, verifyEgress } from './proxy.js'
 import { redactSensitiveText } from './redaction.js'
 import { SafeNavigator, type WindowView } from './safe-navigation.js'
@@ -20,21 +20,11 @@ process.umask(0o077)
 // lane and expose whatever cadence the real menu actually sustains.
 const DISCOVERY_CLICK_DELAY_MS = 750
 const FOCUSED_CLICK_DELAY_MS = 500
-// The backend renews the short failure-detection lease on every successful
-// heartbeat. A focused scan therefore needs its own bounded work horizon so it
-// can traverse a large order book instead of stopping after the initial lease.
-const FOCUSED_WATCH_RUNTIME_MS = 45_000
-// Allow enough time to reach a high-value early page and then collect the
-// 30-second minimum evidence window. This remains bounded and transaction-free.
-const AUTOMATIC_FOCUSED_RUNTIME_MS = 120_000
-// Priority 75 is reserved for an item whose long-lived fill profile is already
-// proven. It still receives fresh menu samples, but does not repeat the full
-// two-minute discovery process needed by a new market.
-const PROFILE_REVALIDATION_RUNTIME_MS = 150_000
-// A runaway guard, not a normal scan boundary. The live market has exceeded
-// 200 pages, so discovery must continue until the server removes pagination or
-// refuses to advance it. Connections are rotated after every completed pass.
-const DISCOVERY_PAGE_LIMIT = 1_000
+// Auction history carries the slow safety evidence. Focused order observation
+// only confirms the current leading reward and short-term consistency.
+const FOCUSED_WATCH_RUNTIME_MS = 8_000
+const AUTOMATIC_FOCUSED_RUNTIME_MS = 15_000
+const PROFILE_REVALIDATION_RUNTIME_MS = 8_000
 // Device-code authorization requires a human browser round trip and regularly
 // takes longer than the normal network-login budget. Keep one code stable long
 // enough to complete it instead of killing the process and rotating the code.
@@ -80,7 +70,7 @@ class ObserverRuntime {
       let message = ''
       let reconnect = false
       try {
-        await this.execute(task)
+        message = await this.execute(task) ?? ''
       } catch (error) {
         message = safeMessage(error)
         const failure: TaskFailureClass = error instanceof SchemaHoldError ? 'schema_hold'
@@ -175,14 +165,36 @@ class ObserverRuntime {
     if (!this.stopping) await this.connect()
   }
 
-  private async execute(task: ObserverTask): Promise<void> {
+  private async execute(task: ObserverTask): Promise<string | undefined> {
     const bot = this.bot
     if (!this.connected || !bot?.player) throw new Error('observer is not connected')
     if (task.parser_schema !== SCHEMA_VERSION) throw new Error('backend requested an unsupported parser schema')
     const navigator = new SafeNavigator(botAdapter(bot), this.schemas)
     const clickDelay = task.kind === 'focused_watch' ? FOCUSED_CLICK_DELAY_MS : DISCOVERY_CLICK_DELAY_MS
     let window: NonNullable<Bot['currentWindow']>
-    if (bot.currentWindow && navigator.schemaFor(bot.currentWindow as unknown as WindowView) && navigator.controlAvailable('refresh')) {
+    if (task.kind === 'focused_watch' && task.signature) {
+      let globalWindow: NonNullable<Bot['currentWindow']>
+      if (bot.currentWindow && navigator.schemaFor(bot.currentWindow as unknown as WindowView) && navigator.controlAvailable('refresh')) {
+        globalWindow = bot.currentWindow
+      } else {
+        this.log('orders_command_sending')
+        navigator.sendCommand('/orders')
+        try {
+          globalWindow = await waitForWindow(bot, 10_000)
+        } catch (error) {
+          throw new MenuSessionEndedError(`orders menu did not open: ${safeMessage(error)}`)
+        }
+      }
+      globalWindow = await this.ensureMostPerItem(bot, navigator, globalWindow, clickDelay, task.id)
+      bot.closeWindow(globalWindow)
+      this.log('orders_item_search_sending', `signature=${task.signature}`)
+      navigator.searchOrders(task.signature)
+      try {
+        window = await waitForWindow(bot, 10_000)
+      } catch (error) {
+        throw new MenuSessionEndedError(`filtered orders menu did not open: ${safeMessage(error)}`)
+      }
+    } else if (bot.currentWindow && navigator.schemaFor(bot.currentWindow as unknown as WindowView) && navigator.controlAvailable('refresh')) {
       const current = this.capture(bot.currentWindow as unknown as WindowView)
       this.log('orders_refresh_clicking')
       await sleep(clickDelay)
@@ -200,31 +212,32 @@ class ObserverRuntime {
       }
     }
     this.log('orders_window_opened')
-    window = await this.ensureMostPerItem(bot, navigator, window, clickDelay, task.id)
+    if (task.kind !== 'focused_watch') window = await this.ensureMostPerItem(bot, navigator, window, clickDelay, task.id)
     let sessionId = randomUUID()
-    const seen = new Set<string>()
-    const limit = DISCOVERY_PAGE_LIMIT
     const taskDeadline = task.kind === 'focused_watch'
       ? Date.now() + (task.priority >= 100 ? FOCUSED_WATCH_RUNTIME_MS
         : task.priority >= 75 ? PROFILE_REVALIDATION_RUNTIME_MS : AUTOMATIC_FOCUSED_RUNTIME_MS)
       : Date.parse(task.lease_expires_at) - 2_000
-    for (let pageIndex = 0; pageIndex < limit; pageIndex++) {
+    for (let pageIndex = 0; ; pageIndex++) {
       this.ensureConnected(bot)
       const captured = this.capture(window as unknown as WindowView)
-      if (task.kind !== 'focused_watch' && seen.has(captured.hash)) {
-        throw new ReconnectRequiredError(`discovery scan stopped at repeated content on page ${parsePage(captured.title, pageIndex + 1)}`)
-      }
-      seen.add(captured.hash)
       const schema = navigator.schemaFor(captured.window)
       const listingViews = schema ? captured.views.filter(view => schema.listingSlots.has(view.slot)) : captured.views.filter(view => view.slot < Math.max(0, window.slots.length - 36))
       const parsed = listingViews.map(parseOrder).filter(value => value !== undefined)
       const complete = schema !== undefined && listingViews.every(view => parseOrder(view) !== undefined)
+      const observedPage = parsePage(captured.title, pageIndex + 1)
+      const filteredMismatch = task.kind === 'focused_watch' && task.signature !== undefined && parsed.some(order => order.signature !== task.signature)
+      const filteredSortInvalid = task.kind === 'focused_watch' && listingViews.length > 0 && !isFilteredMostPerItemOrder(parsed, listingViews.length)
+      const filteredPageInvalid = task.kind === 'focused_watch' && observedPage !== 1
       const scan: ScanBatch = {
         schema_version: SCHEMA_VERSION, observer_id: this.config.account.id, task_id: task.id, lease_token: task.lease_token, session_id: sessionId,
-        content_hash: captured.hash, screen_title: captured.title, page: parsePage(captured.title, pageIndex + 1), complete,
+        content_hash: captured.hash, screen_title: captured.title, page: observedPage, complete,
         observed_at: new Date().toISOString(), orders: parsed,
         ...(!schema ? { unknown_schema: true, schema_reason: 'no verified menu schema; capture only and no clicks performed' } : {}),
-        ...(schema && !complete ? { unknown_schema: true, schema_reason: 'verified layout contained an unparseable listing slot; navigation stopped' } : {})
+        ...(schema && !complete ? { unknown_schema: true, schema_reason: 'verified layout contained an unparseable listing slot; navigation stopped' } : {}),
+        ...(filteredMismatch ? { unknown_schema: true, schema_reason: 'item-filtered result contained a different canonical item; observation rejected' } : {}),
+        ...(filteredSortInvalid ? { unknown_schema: true, schema_reason: 'item-filtered result did not prove a descending unit-reward order; observation rejected' } : {}),
+        ...(filteredPageInvalid ? { unknown_schema: true, schema_reason: 'item-filtered result did not open on its highest-reward page; observation rejected' } : {})
       }
       this.activePage = scan.page
       await this.backend.submitScan(scan)
@@ -232,17 +245,22 @@ class ObserverRuntime {
       this.log('page_submitted', `page=${scan.page} orders=${parsed.length} complete=${scan.complete}`)
       const yieldToFocus = await this.backend.heartbeat(schema && complete ? 'scanning' : 'schema_hold', task.id, task.lease_token, scan.page, bot.player?.ping ?? 0, this.reconnects)
       if (yieldToFocus && task.kind === 'discovery') {
-        throw new ReconnectRequiredError('discovery yielded to a focused watch')
+        this.log('discovery_yielding_to_focus', `page=${scan.page}`)
+        return
       }
-      if (!schema || !complete) {
+      if (!schema || !complete || filteredMismatch || filteredSortInvalid || filteredPageInvalid) {
         this.writeCapture(task.id, captured.hash, captured.title, captured.views)
         this.log('schema_hold', `content=${captured.hash.slice(0, 12)}`)
+        if (task.kind === 'focused_watch' && bot.currentWindow) bot.closeWindow(bot.currentWindow)
         throw new SchemaHoldError(scan.schema_reason ?? 'order menu schema requires review')
       }
       if (task.kind === 'focused_watch') {
         if (parsed.some(order => order.signature === task.signature)) {
           if (![...schema.controls.values()].some(rule => rule.kind === 'refresh')) throw new SchemaHoldError('focused-watch refresh control is unavailable')
-          if (Date.now() >= taskDeadline) throw new ReconnectRequiredError(`focused watch completed for ${task.signature ?? 'assigned item'}`)
+          if (Date.now() >= taskDeadline) {
+            if (bot.currentWindow) bot.closeWindow(bot.currentWindow)
+            return
+          }
           const refreshCycleStartedAt = Date.now()
           await sleep(clickDelay)
           this.ensureConnected(bot)
@@ -258,45 +276,24 @@ class ObserverRuntime {
           sessionId = randomUUID()
           continue
         }
-        // Search only by traversing the already verified next-page control.
-        // Sign input and server-side search remain deliberately unsupported.
-        // A target disappearing or not being reached within the bounded sample
-        // is a valid market result, not an infrastructure failure. Complete the
-        // one-shot automatic task so it cannot retry forever and starve discovery;
-        // an active player watch is requeued by the backend independently.
-        if (Date.now() >= taskDeadline) throw new ReconnectRequiredError('focused item was not located before the task deadline')
-        if (!navigator.controlAvailable('next_page')) throw new ReconnectRequiredError('focused item was not present in the current order market')
-        const previousPage = scan.page
-        this.log('focused_next_page_clicking')
-        await sleep(clickDelay)
-        this.ensureConnected(bot)
-        await clickControlAndWaitForServer(bot, navigator, 'next_page')
-        this.ensureConnected(bot)
-        window = bot.currentWindow ?? await waitForWindow(bot, 3_000)
-        const nextTitle = plainText(window.title).slice(0, 128)
-        if (parsePage(nextTitle, 0) <= previousPage) throw new ReconnectRequiredError('focused item was not present before pagination ended')
-        continue
+        // The canonical item search returned no active orders. This is a valid
+        // market observation, not a reason to paginate or retry for a minute.
+        this.log('focused_item_not_found', `signature=${task.signature ?? ''}`)
+        if (bot.currentWindow) bot.closeWindow(bot.currentWindow)
+        return 'no_active_orders'
       }
-      if (pageIndex+1 >= limit) {
-        this.log('scan_rotation', `pages=${limit}`)
-        throw new ReconnectRequiredError(`bounded ${limit}-page discovery scan completed`)
-      }
-      if (!navigator.controlAvailable('next_page')) {
-        const control = bot.currentWindow?.slots[53] as { name?: string; customName?: unknown; displayName?: string } | null | undefined
-        this.log('pagination_finished', `name=${safeText(control?.name, 40)} label=${safeText(plainText(control?.customName) || control?.displayName, 80)}`)
-        throw new ReconnectRequiredError(`discovery scan completed at page ${scan.page}`)
-      }
-      this.log('next_page_clicking')
+
+      // Continuously refresh the highest unit-reward page. Each refresh is an
+      // independent observation and can immediately yield to API-ranked work.
+      if (scan.page !== 1) throw new ReconnectRequiredError(`top-page discovery opened unexpectedly at page ${scan.page}`)
+      if (!navigator.controlAvailable('refresh')) throw new SchemaHoldError('top-page refresh control is unavailable')
+      this.log('top_page_refresh_clicking')
       await sleep(clickDelay)
       this.ensureConnected(bot)
-      const previousPage = scan.page
-      await clickControlAndWaitForServer(bot, navigator, 'next_page')
+      await clickControlAndWaitForServer(bot, navigator, 'refresh')
       this.ensureConnected(bot)
       window = bot.currentWindow ?? await waitForWindow(bot, 3_000)
-      const nextTitle = plainText(window.title).slice(0, 128)
-      if (parsePage(nextTitle, 0) <= previousPage) {
-        throw new ReconnectRequiredError(`discovery scan completed at page ${previousPage}; server did not advance pagination`)
-      }
+      sessionId = randomUUID()
     }
   }
 

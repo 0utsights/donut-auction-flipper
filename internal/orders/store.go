@@ -342,15 +342,15 @@ func (s *Store) Heartbeat(ctx context.Context, heartbeat Heartbeat) error {
 	return nil
 }
 
-// automaticFocusDiscoveryPage guarantees that the sole observer samples a
-// useful breadth of the highest-per-item price-sorted market before recurring
-// research can take over. At the observed cadence this is roughly two to three
-// minutes and reaches the retained commodity profiles seen in production.
-const automaticFocusDiscoveryPage = 120
+// The verified Most Per Item view is globally sorted by unit reward. Page one
+// is therefore the only discovery page used by the fast opportunity lane. The
+// auction API supplies resale value, volume, confidence, and stability; order
+// discovery only needs the current leading rewards that we would have to beat.
+const automaticFocusDiscoveryPage = 1
 
 // ShouldYieldDiscovery lets a discovery pass hand its observer to focused
-// work. Player-requested watches preempt immediately; automatic research waits
-// until discovery has reached the breadth floor. It only returns true for the
+// work. Player-requested watches preempt immediately; automatic research can
+// run after the current top page has been submitted. It only returns true for the
 // exact live discovery lease presented by that observer; a stale or forged task
 // ID can never interrupt another collector.
 func (s *Store) ShouldYieldDiscovery(ctx context.Context, heartbeat Heartbeat) (bool, error) {
@@ -618,7 +618,7 @@ func (s *Store) CompleteTask(ctx context.Context, result TaskResult) error {
 	if kind == "focused_watch" {
 		var active int
 		_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM watches WHERE signature=? AND expires_ms>?`, signature, now.UnixMilli()).Scan(&active)
-		if active > 0 {
+		if active > 0 && result.Message != "no_active_orders" {
 			state = "ready"
 			assigned = ""
 		}

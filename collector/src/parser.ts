@@ -104,6 +104,18 @@ export function parseOrder(view: ItemView): ParsedOrder | undefined {
 // the actual server behavior even when menu-color metadata is unavailable.
 export function isMostPerItemOrder(orders: readonly ParsedOrder[], expectedListings: number): boolean {
   if (expectedListings < 10 || orders.length !== expectedListings) return false
+	return hasDescendingUnitRewards(orders)
+}
+
+// A canonical item search can legitimately contain only a handful of orders.
+// The global page proves the active sort mode first; this second check proves
+// the filtered result did not violate that descending unit-reward ordering.
+export function isFilteredMostPerItemOrder(orders: readonly ParsedOrder[], expectedListings: number): boolean {
+  if (expectedListings < 1 || orders.length !== expectedListings) return false
+	return hasDescendingUnitRewards(orders)
+}
+
+function hasDescendingUnitRewards(orders: readonly ParsedOrder[]): boolean {
   for (let index = 1; index < orders.length; index++) {
     if (orders[index]!.unit_reward_cents > orders[index - 1]!.unit_reward_cents) return false
   }

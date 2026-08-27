@@ -15,6 +15,8 @@ export interface NavigationBot {
 const allowedCommands = new Set(['/orders'])
 const allowedControls = new Set<SafeControl>(['next_page', 'previous_page', 'refresh', 'filter', 'search'])
 const forbiddenLabel = /\b(?:buy|purchase|fulfill|create|confirm|cancel|claim|collect|list|sell)\b/i
+const itemSignature = /^minecraft:([a-z0-9_]{1,64})$/
+const forbiddenSearch = /^(?:buy|cancel|claim|collect|confirm|create|fulfill|help|list|my|purchase|reload|search|sell)$/
 
 export class SafeNavigator {
   constructor(private readonly bot: NavigationBot, private readonly schemas: readonly MenuSchema[]) {}
@@ -22,6 +24,12 @@ export class SafeNavigator {
   sendCommand(command: string): void {
     if (!allowedCommands.has(command)) throw new Error('collector command is not allowlisted')
     this.bot.chat(command)
+  }
+
+  searchOrders(signature: string): void {
+    const match = itemSignature.exec(signature)
+    if (!match || forbiddenSearch.test(match[1]!)) throw new Error('collector order search is not allowlisted')
+    this.bot.chat(`/orders ${match[1]}`)
   }
 
   schemaFor(window: WindowView | null | undefined): MenuSchema | undefined {
