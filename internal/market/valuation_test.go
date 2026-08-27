@@ -170,6 +170,10 @@ func TestTargetPriceVolumeUsesTenPercentBandAndSellerCap(t *testing.T) {
 	if volume != 4 || sellers != 2 {
 		t.Fatalf("expected four price-local sales from two sellers after cap, got volume=%d sellers=%d", volume, sellers)
 	}
+	_, _, age := robustPriceLiquidity24h(transactions, now, 90, 110)
+	if age != 0 {
+		t.Fatalf("target-price reference age=%d want=0", age)
+	}
 }
 
 func TestOneSellerCannotQualifyTargetPriceLiquidity(t *testing.T) {

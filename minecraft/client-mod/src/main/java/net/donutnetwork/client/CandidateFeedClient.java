@@ -80,10 +80,12 @@ final class CandidateFeedClient implements AutoCloseable {
 
     CandidateFeedClient(ClientConfig.Settings config, Consumer<Candidate> alertSink, HttpClient http) {
         this.config = Objects.requireNonNull(config); this.alertSink = Objects.requireNonNull(alertSink); this.http = Objects.requireNonNull(http);
-        balance = new AtomicLong(config.balance()); usedSlots = new AtomicLong(packSlots(config.usedOrderSlots(), config.usedAuctionSlots()));
+        balance = new AtomicLong(config.balance());
         activeOrderItems.addAll(config.activeOrderItems());
+        usedSlots = new AtomicLong(packSlots(Math.max(config.usedOrderSlots(), activeOrderItems.size()), config.usedAuctionSlots()));
         diagnostics = new AtomicBoolean(config.diagnostics());
-        allocation = new AtomicReference<>(allocator.allocate(List.of(), config.balance(), config.usedOrderSlots(), config.usedAuctionSlots(), activeOrderItems));
+        allocation = new AtomicReference<>(allocator.allocate(List.of(), config.balance(),
+                Math.max(config.usedOrderSlots(), activeOrderItems.size()), config.usedAuctionSlots(), activeOrderItems));
         scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> { Thread thread = new Thread(runnable, "donut-candidate-feed"); thread.setDaemon(true); return thread; });
     }
 
@@ -122,7 +124,10 @@ final class CandidateFeedClient implements AutoCloseable {
     int activeOrderCount() { return activeOrderItems.size(); }
 
     void markActiveOrder(String itemId) {
-        if (itemId != null && ITEM_ID.matcher(itemId).matches() && activeOrderItems.add(itemId)) persistAndAllocate();
+        if (itemId != null && ITEM_ID.matcher(itemId).matches() && activeOrderItems.add(itemId)) {
+            usedSlots.updateAndGet(value -> packSlots(Math.max(unpackOrder(value), activeOrderItems.size()), unpackAuction(value)));
+            persistAndAllocate();
+        }
     }
 
     void recheckTrackedOrders() {

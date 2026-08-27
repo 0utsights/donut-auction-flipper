@@ -1058,6 +1058,32 @@ func TestCandidateOrderObservationTrustWindow(t *testing.T) {
 	}
 }
 
+func TestCandidateUsesCalibratedExactExitConfidenceAndVolumeFreshness(t *testing.T) {
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	evidence := Evidence{Signature: "minecraft:diamond_block", ItemID: "minecraft:diamond_block", DisplayName: "Diamond Block",
+		Tier: "actionable", CompleteScans: 10, FillEvents: 8, DistinctOrders: 3, FilledUnits24h: 640, AvailableUnits: 640,
+		BestUnitRewardCents: 400_000, ObservedQuantity: 64, MaxStackSize: 64, LastSeenAt: now, Stable: true, SignatureComplete: true}
+	valuation := market.Valuation{Signature: evidence.Signature, QuickSellValue: 5_000, QuantityQuickSell: 5_000,
+		PricingQuantity: 64, Volume24h: 5, PriceSellerCount: 3, ConfidenceBPS: minimumExactExitConfidenceBPS,
+		ExpectedSellMinutes: 30, ActiveBestAsk: 3_000, ActiveDepth: 20, GeneratedAt: now,
+		PriceReferenceAgeSeconds: int64((9 * time.Hour).Seconds())}
+	values := buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now)
+	if len(values) != 2 || values[0].State != "READY" || values[1].State != "READY" {
+		t.Fatalf("volume-adjusted five-sale market should remain ready for 9h: %+v", values)
+	}
+	valuation.ConfidenceBPS--
+	values = buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now)
+	if len(values) != 2 || values[0].State != "RESEARCH" {
+		t.Fatalf("below-floor exact exit confidence became ready: %+v", values)
+	}
+	valuation.ConfidenceBPS = minimumExactExitConfidenceBPS
+	valuation.PriceReferenceAgeSeconds = int64((10 * time.Hour).Seconds())
+	values = buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now)
+	if len(values) != 2 || values[0].State != "HOLD" {
+		t.Fatalf("stale five-sale market exceeded its adaptive freshness limit: %+v", values)
+	}
+}
+
 func TestCandidateUsesCurrentFocusedRewardForExecutionEconomics(t *testing.T) {
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 	evidence := Evidence{Signature: "minecraft:diamond_block", ItemID: "minecraft:diamond_block", DisplayName: "Diamond Block",

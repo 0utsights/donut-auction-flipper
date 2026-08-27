@@ -10,7 +10,7 @@ import (
 const activeListingFallbackTTL = 2 * time.Minute
 const activeValuationRefreshInterval = 5 * time.Second
 const transactionRetention = 31 * 24 * time.Hour
-const QuantityValuationModelVersion = "robust-v4-price-volume-quantity"
+const QuantityValuationModelVersion = "robust-v5-target-liquidity-quantity"
 
 type Snapshot struct {
 	Version     uint64               `json:"version"`
@@ -616,7 +616,23 @@ func (e *Engine) quantityPairValuationLocked(signature, base string, quantity in
 	if !ok {
 		return Valuation{}, false
 	}
-	return combineQuantityValuations(singular, stacked, quantity), true
+	combined := combineQuantityValuations(singular, stacked, quantity)
+	transactions := e.transactions[signature]
+	if baseFallback {
+		transactions = e.baseTransactions[signature]
+	}
+	// We always relist the exact acquired batch. Recompute executable demand at
+	// the final conservative target using only sales of that same quantity.
+	// Singular sales remain a price ceiling; their volume is not executable
+	// evidence for a stack that will not be split before resale.
+	quantityTransactions := transactionsAtQuantity(transactions, quantity)
+	volume, sellers, priceAge := robustPriceLiquidity24h(quantityTransactions, e.now(), combined.PriceBandLow, combined.PriceBandHigh)
+	combined.Volume24h = volume
+	combined.PriceSellerCount = sellers
+	combined.QuantityVolume24h = volume
+	combined.PriceReferenceAgeSeconds = priceAge
+	combined.RiskFlags = withLiquidityRiskFlags(combined.RiskFlags, volume, sellers)
+	return combined, true
 }
 
 func (e *Engine) quantityCohortValuationLocked(signature, base string, quantity int, baseFallback bool, cache map[quantityValuationKey]quantityValuationResult) (Valuation, bool) {
@@ -675,19 +691,17 @@ func combineQuantityValuations(singular, stacked Valuation, quantity int) Valuat
 	combined.QuickSellValue = min64(singular.QuickSellValue, stacked.QuickSellValue)
 	combined.ShortTermValue = min64(singular.ShortTermValue, stacked.ShortTermValue)
 	combined.LongTermValue = min64(singular.LongTermValue, stacked.LongTermValue)
-	combined.ConfidenceBPS = min(singular.ConfidenceBPS, stacked.ConfidenceBPS)
-	combined.Volume24h = min(singular.Volume24h, stacked.Volume24h)
-	combined.MarketVolume24h = min(singular.MarketVolume24h, stacked.MarketVolume24h)
-	combined.PriceSellerCount = min(singular.PriceSellerCount, stacked.PriceSellerCount)
 	combined.PriceBandLow, combined.PriceBandHigh = targetPriceBand(combined.QuickSellValue)
-	combined.SampleCount = min(singular.SampleCount, stacked.SampleCount)
-	combined.RawSampleCount = min(singular.RawSampleCount, stacked.RawSampleCount)
-	combined.SellerCount = min(singular.SellerCount, stacked.SellerCount)
-	combined.FreshSampleCount = min(singular.FreshSampleCount, stacked.FreshSampleCount)
-	combined.VolatilityBPS = max(singular.VolatilityBPS, stacked.VolatilityBPS)
-	combined.ExpectedSellMinutes = max(singular.ExpectedSellMinutes, stacked.ExpectedSellMinutes)
-	combined.ReferenceAgeSeconds = max64(singular.ReferenceAgeSeconds, stacked.ReferenceAgeSeconds)
-	combined.RiskFlags = mergeRiskFlags(singular.RiskFlags, stacked.RiskFlags)
+	// When the exact-stack model sets the lower target, its evidence also owns
+	// confidence, volatility, sell time, and risk. Sparse singular evidence is
+	// still enough to impose a lower ceiling, but cannot dilute executable stack
+	// liquidity when that ceiling is not the selected price.
+	if singular.QuickSellValue < stacked.QuickSellValue {
+		combined.ConfidenceBPS = min(singular.ConfidenceBPS, stacked.ConfidenceBPS)
+		combined.VolatilityBPS = max(singular.VolatilityBPS, stacked.VolatilityBPS)
+		combined.ReferenceAgeSeconds = max64(singular.ReferenceAgeSeconds, stacked.ReferenceAgeSeconds)
+		combined.RiskFlags = mergeRiskFlags(singular.RiskFlags, stacked.RiskFlags)
+	}
 	combined.ModelVersion = QuantityValuationModelVersion
 	combined.SingularQuickSell = singular.QuickSellValue
 	combined.QuantityQuickSell = stacked.QuickSellValue
@@ -695,6 +709,23 @@ func combineQuantityValuations(singular, stacked Valuation, quantity int) Valuat
 	combined.SingularVolume24h = singular.Volume24h
 	combined.QuantityVolume24h = stacked.Volume24h
 	return combined
+}
+
+func withLiquidityRiskFlags(flags []string, volume, sellers int) []string {
+	out := make([]string, 0, len(flags)+2)
+	for _, flag := range flags {
+		if flag != "low_price_liquidity" && flag != "target_price_seller_concentration" {
+			out = append(out, flag)
+		}
+	}
+	if volume < 3 {
+		out = append(out, "low_price_liquidity")
+	}
+	if volume >= 2 && sellers < 2 {
+		out = append(out, "target_price_seller_concentration")
+	}
+	sort.Strings(out)
+	return out
 }
 
 func mergeRiskFlags(groups ...[]string) []string {

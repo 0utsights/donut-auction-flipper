@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const ValuationModelVersion = "robust-v4-price-volume"
+const ValuationModelVersion = "robust-v5-target-liquidity"
 
 type ValuationInput struct {
 	Signature      string
@@ -25,7 +25,7 @@ func CalculateValuation(in ValuationInput) (Valuation, bool) {
 	}
 	raw := make([]Transaction, 0, len(in.Transactions))
 	for _, t := range in.Transactions {
-		if t.UnitPrice > 0 && !t.SoldAt.Before(in.Now.Add(-30*24*time.Hour)) {
+		if t.UnitPrice > 0 && !t.SoldAt.After(in.Now) && !t.SoldAt.Before(in.Now.Add(-30*24*time.Hour)) {
 			raw = append(raw, t)
 		}
 	}
@@ -95,7 +95,7 @@ func CalculateValuation(in ValuationInput) (Valuation, bool) {
 	}
 	quick := quickSellValue(fair, volBPS, referenceAsk)
 	priceBandLow, priceBandHigh := targetPriceBand(quick)
-	volume, priceSellerCount := robustPriceVolume24h(raw, in.Now, priceBandLow, priceBandHigh)
+	volume, priceSellerCount, priceReferenceAge := robustPriceLiquidity24h(raw, in.Now, priceBandLow, priceBandHigh)
 	if volume < 3 {
 		riskFlags = append(riskFlags, "low_price_liquidity")
 	}
@@ -129,7 +129,7 @@ func CalculateValuation(in ValuationInput) (Valuation, bool) {
 		PriceBandLow: priceBandLow, PriceBandHigh: priceBandHigh,
 		SampleCount: len(filtered), RawSampleCount: len(raw), SellerCount: sellerCount,
 		FreshSampleCount: len(shortSamples), VolatilityBPS: volBPS, SpreadBPS: spread,
-		ExpectedSellMinutes: expectedSellMinutes, ReferenceAgeSeconds: referenceAge,
+		ExpectedSellMinutes: expectedSellMinutes, ReferenceAgeSeconds: referenceAge, PriceReferenceAgeSeconds: priceReferenceAge,
 		ShortWindowHours: shortWindowHours, Regime: regime, RiskFlags: riskFlags,
 		ModelVersion: ValuationModelVersion, FallbackLevel: "exact", GeneratedAt: in.Now,
 	}, true
@@ -305,14 +305,26 @@ func targetPriceBand(target int64) (int64, int64) {
 // Broad item volume remains useful context, but trades in another price regime
 // do not establish that a proposed resale price is liquid.
 func robustPriceVolume24h(values []Transaction, now time.Time, low, high int64) (int, int) {
+	volume, sellers, _ := robustPriceLiquidity24h(values, now, low, high)
+	return volume, sellers
+}
+
+func robustPriceLiquidity24h(values []Transaction, now time.Time, low, high int64) (int, int, int64) {
 	if low <= 0 || high < low {
-		return 0, 0
+		return 0, 0, int64((31 * 24 * time.Hour).Seconds())
 	}
 	perSeller := map[string]int{}
 	volume := 0
 	cutoff := now.Add(-24 * time.Hour)
+	var newest time.Time
 	for _, value := range values {
-		if value.SoldAt.Before(cutoff) || value.UnitPrice < low || value.UnitPrice > high {
+		if value.SoldAt.After(now) || value.UnitPrice < low || value.UnitPrice > high {
+			continue
+		}
+		if value.SoldAt.After(newest) {
+			newest = value.SoldAt
+		}
+		if value.SoldAt.Before(cutoff) {
 			continue
 		}
 		identity := sellerIdentity(value.SellerUUID, value.SellerName, value.Fingerprint)
@@ -322,7 +334,11 @@ func robustPriceVolume24h(values []Transaction, now time.Time, low, high int64) 
 		perSeller[identity]++
 		volume++
 	}
-	return volume, len(perSeller)
+	age := int64((31 * 24 * time.Hour).Seconds())
+	if !newest.IsZero() {
+		age = max64(0, int64(now.Sub(newest).Seconds()))
+	}
+	return volume, len(perSeller), age
 }
 
 func hasAPIModifierBlindspot(values []Transaction) bool {

@@ -191,7 +191,7 @@ func TestStackReferenceIsCappedBySingularUnitValue(t *testing.T) {
 	e.Observe(Listing{AuthoritativeID: "overpriced-stack", SellerName: "candidate", Item: Item{ID: "iron_ingot", Quantity: 64}, TotalPrice: 9_000})
 
 	opportunities, report := e.AnalyzeOpportunities(Thresholds{MinProfit: 1, MinMarginBPS: 1, MinConfidenceBPS: 1, MinVolume24h: 1}, 10)
-	if len(opportunities) != 0 || report.LowProfit != 1 {
+	if len(opportunities) != 0 || report.LowVolume != 1 {
 		t.Fatalf("stack escaped singular-price cap: opportunities=%+v report=%+v", opportunities, report)
 	}
 }
@@ -256,6 +256,28 @@ func TestPublicQuantityValuationUsesExactBatchEvidence(t *testing.T) {
 	valuation, ok := e.QuantityValuation("minecraft:iron_ingot", 64)
 	if !ok || valuation.PricingQuantity != 64 || valuation.QuickSellValue > 50 {
 		t.Fatalf("quantity valuation is not conservatively batch-safe: %+v", valuation)
+	}
+}
+
+func TestQuantityValuationMeasuresExecutableVolumeAtFinalStackPrice(t *testing.T) {
+	e := NewEngine()
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	e.now = func() time.Time { return now }
+	// Singular evidence is only the conservative price ceiling. Its sparse
+	// volume must not cap the executable volume of a batch we will resell whole.
+	e.AddTransactions(quantitySales(now, "iron_ingot", 1, 100, 3, "single"))
+	stacks := quantitySales(now.Add(-3*time.Hour), "iron_ingot", 64, 3_200, 8, "stack")
+	e.AddTransactions(stacks)
+
+	valuation, ok := e.QuantityValuation("minecraft:iron_ingot", 64)
+	if !ok {
+		t.Fatal("expected exact quantity valuation")
+	}
+	if valuation.SingularVolume24h != 3 || valuation.QuantityVolume24h != 8 || valuation.Volume24h != 8 || valuation.PriceSellerCount != 8 {
+		t.Fatalf("final-target stack liquidity was not preserved: %+v", valuation)
+	}
+	if valuation.PriceReferenceAgeSeconds < int64((3 * time.Hour).Seconds()) {
+		t.Fatalf("target freshness came from singular sales instead of stack exits: %+v", valuation)
 	}
 }
 

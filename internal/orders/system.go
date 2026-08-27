@@ -15,6 +15,8 @@ import (
 	"donut-network/internal/market"
 )
 
+const minimumExactExitConfidenceBPS = 3_500
+
 type Config struct {
 	DatabasePath   string
 	AuctionFeeBPS  int
@@ -295,7 +297,7 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 		completion := completionBPS(evidence, valuation)
 		fresh := now.Sub(evidence.LastSeenAt) <= orderObservationWindow
 		marketReason := marketHoldReason(valuation, now)
-		ready := evidence.Tier == "actionable" && fresh && valuation.Volume24h >= 5 && valuation.PriceSellerCount >= 3 && valuation.ConfidenceBPS >= 5_000 && marketReason == ""
+		ready := evidence.Tier == "actionable" && fresh && valuation.Volume24h >= 5 && valuation.PriceSellerCount >= 3 && valuation.ConfidenceBPS >= minimumExactExitConfidenceBPS && marketReason == ""
 		state, reason := strings.ToUpper(evidence.Tier), evidence.Reason
 		if ready {
 			state, reason = "READY", ""
@@ -314,8 +316,8 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 				reason = "auction exit lacks five near-target sales from three sellers"
 			}
 		}
-		if valuation.ConfidenceBPS < 5_000 && reason == "" {
-			state, reason = "RESEARCH", "exact-quantity auction confidence is below 50%"
+		if valuation.ConfidenceBPS < minimumExactExitConfidenceBPS && reason == "" {
+			state, reason = "RESEARCH", "exact-quantity auction confidence is below 35%"
 		}
 		if marketReason != "" {
 			state, reason = "HOLD", marketReason
@@ -347,6 +349,10 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 		auctionGross := mulMoney(quickUnit, int64(quantity))
 		auctionNet := applyFee(auctionGross, cfg.AuctionFeeBPS)
 		cycle := max(1, valuation.ExpectedSellMinutes+estimatedFillMinutes(evidence, quantity))
+		referenceAge := valuation.PriceReferenceAgeSeconds
+		if referenceAge <= 0 {
+			referenceAge = valuation.ReferenceAgeSeconds
+		}
 		result = append(result, candidate(Candidate{
 			ID: candidateID("order_to_auction", evidence.Signature, quantity), Route: "ORDER_TO_AUCTION", State: orderState, Reason: orderReason,
 			Signature: evidence.Signature, ItemID: evidence.ItemID, ItemName: displayName(evidence), Quantity: quantity, MaxStackSize: maxStack,
@@ -355,7 +361,7 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 			ExecutableBatches: executable, ResearchBatches: researchBatches, QueuePosition: 1, OrderSlots: 1, AuctionSlots: 1, InventorySlots: inventorySlots,
 			ConfidenceBPS: valuation.ConfidenceBPS, OrderTier: evidence.Tier, SignatureComplete: evidence.SignatureComplete, ResearchFreshAt: evidence.LastSeenAt, OrderFreshAt: evidence.FocusedSeenAt, FocusedFreshAt: evidence.FocusedSeenAt, AuctionFreshAt: valuation.GeneratedAt,
 			AuctionVolume24h: valuation.Volume24h, AuctionSellerCount: valuation.PriceSellerCount, OrderFilledUnits24h: evidence.FilledUnits24h,
-			OrderAvailableUnits: evidence.AvailableUnits, VolatilityBPS: valuation.VolatilityBPS, ReferenceAgeSeconds: valuation.ReferenceAgeSeconds,
+			OrderAvailableUnits: evidence.AvailableUnits, VolatilityBPS: valuation.VolatilityBPS, ReferenceAgeSeconds: referenceAge,
 			RiskFlags:    append([]string(nil), valuation.RiskFlags...),
 			OrderCommand: "/orders", AuctionCommand: auctionCommand(evidence.ItemID),
 		}))
@@ -383,7 +389,7 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 				ExecutableBatches: immediateExecutable, ResearchBatches: immediateExecutable, QueuePosition: 0, OrderSlots: 0, AuctionSlots: 0, InventorySlots: inventorySlots,
 				ConfidenceBPS: valuation.ConfidenceBPS, OrderTier: evidence.Tier, SignatureComplete: evidence.SignatureComplete, ResearchFreshAt: evidence.LastSeenAt, OrderFreshAt: evidence.FocusedSeenAt, FocusedFreshAt: evidence.FocusedSeenAt, AuctionFreshAt: valuation.GeneratedAt,
 				AuctionVolume24h: valuation.Volume24h, AuctionSellerCount: valuation.PriceSellerCount, OrderFilledUnits24h: evidence.FilledUnits24h,
-				OrderAvailableUnits: evidence.AvailableUnits, VolatilityBPS: valuation.VolatilityBPS, ReferenceAgeSeconds: valuation.ReferenceAgeSeconds,
+				OrderAvailableUnits: evidence.AvailableUnits, VolatilityBPS: valuation.VolatilityBPS, ReferenceAgeSeconds: referenceAge,
 				RiskFlags:    append([]string(nil), valuation.RiskFlags...),
 				OrderCommand: "/orders", AuctionCommand: auctionCommand(evidence.ItemID),
 			}))
@@ -473,8 +479,18 @@ func marketHoldReason(valuation market.Valuation, now time.Time) string {
 	if valuation.GeneratedAt.IsZero() || now.Sub(valuation.GeneratedAt) > 2*time.Minute {
 		return "auction valuation is older than two minutes"
 	}
-	if valuation.ReferenceAgeSeconds > int64((2 * time.Hour).Seconds()) {
-		return "latest target-price auction sale is older than two hours"
+	priceAge := valuation.PriceReferenceAgeSeconds
+	if priceAge <= 0 {
+		priceAge = valuation.ReferenceAgeSeconds
+	}
+	// A fixed two-hour cutoff rejects most otherwise healthy five-sale/day
+	// markets simply because their natural inter-sale interval is longer. Allow
+	// two expected intervals, bounded tightly enough to reject genuinely stale
+	// exits while keeping persistent commodity spreads visible.
+	allowedAge := 48 * time.Hour / time.Duration(max(1, valuation.Volume24h))
+	allowedAge = max(2*time.Hour, min(12*time.Hour, allowedAge))
+	if priceAge > int64(allowedAge.Seconds()) {
+		return "latest target-price auction sale is older than its volume-adjusted limit"
 	}
 	blocking := map[string]string{
 		"api_modifier_blindspot":            "auction API evidence is modifier-blind",
