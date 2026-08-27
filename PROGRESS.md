@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-08-26
+Last updated: 2026-08-27
 
 ## Implemented on `codex/auction-orders`
 
@@ -27,7 +27,7 @@ Last updated: 2026-08-26
 - Node TypeScript build and 27 parser, packet-settlement, navigation, authentication-proxy, configuration, and redaction tests pass; `npm audit --omit=dev` reports zero vulnerabilities.
 - Fabric JUnit/build passes on Minecraft 1.21.11, Java 21, Loader 0.19.2, Fabric API 0.141.6, Loom 1.17.19, and Gradle 9.6.1.
 - Candidate-frontier benchmark is approximately 142µs/op for 100 evidence rows on the local i5-11600K. Quantity-aware opportunity analysis is approximately 1.46ms/op after caching the completed quantity pair; the other checked-in market benchmarks are approximately 0.17–2.56ms/op in the final pass.
-- The Go race suite passes in a fresh Go 1.26 Linux container on the second PC. Compose is deployed there at commit `fa54a6c`; backend and collector containers are healthy, and live focused pages submit roughly once per second.
+- The Go race suite passes in a fresh Go 1.26 Linux container on the second PC. The production backend is healthy on the second PC at commit `f458e85`. The collector manager is running and retrying safely, but its current observer is offline: both tested direct Webshare exits pass egress verification and Microsoft authentication, after which Donut closes the raw Minecraft socket before login/spawn without sending a protocol disconnect reason. Existing order evidence therefore ages normally to `STALE`; it is never presented as fresh.
 
 ## Senior review passes
 
@@ -44,6 +44,9 @@ Last updated: 2026-08-26
 11. Settled complete `window_items`/`set_slot` packet bursts, tracked replacement window IDs, rejected unrelated/closed windows, and rotated stale menu sessions. Live discovery reached page 35 and focused watches traversed to pages 23–24 without the former false page-10 ending.
 12. Added indexed, yielding SQLite retention; coalesced automatic backups; bounded raw/fill/diagnostic history; and moved the second-PC fast lane to 500ms. Startup maintenance no longer monopolizes observer requests.
 13. Restricted subsecond scoring to the fetched newest page, reused unchanged immutable results, indexed freshness windows, skipped stale order valuations, and coalesced non-moving active asks while keeping low asks immediate. Live backend CPU samples fell from the original sustained 60–80% range to roughly 20–42%, with the lower readings outside broad-pass spikes.
+14. Replaced the greedy reference portfolio with a deterministic Pareto allocator, combined exact resale batches into one acquisition order per canonical item, persisted and reconciled duplicate locks against local slot state, and required a fresh focused order price immediately before execution.
+15. Recomputed auction liquidity at the final exact-stack resale target, prevented singular observations from inflating stack volume, calibrated target freshness to observed sale velocity, rejected future transactions, and cached completed quantity pairs to improve the quantity-aware benchmark from roughly 11.6ms to 1.46ms/op.
+16. Routed the complete Microsoft/Xbox/Minecraft authentication chain through each account's configured proxy, restored direct backend traffic after session acquisition, and added sanitized connection-stage diagnostics. This isolated the remaining live outage to Donut's pre-login edge rather than authentication, API health, proxy egress, or parsing.
 
 A fresh post-deployment pass found no further code-only improvement that outweighed the risk of weakening conservative evidence gates or inventing button/server-outcome behavior without another real fixture.
 
@@ -51,7 +54,7 @@ A fresh post-deployment pass found no further code-only improvement that outweig
 
 - The verified schema enables only `/orders`, the exact refresh book, and the exact next-page arrow. Changed layouts remain capture-only.
 - A conservative base-commodity allowlist may be signature-complete. Modifier-bearing and variant-sensitive rows remain research-only until stable order identity and component equivalence can be proven.
-- Only the configured HTTP CONNECT proxy has completed the live acceptance path; every additional proxy type/account still requires its own egress and login check.
+- HTTP CONNECT egress, Microsoft token reuse, and a proxied Donut status handshake are verified. The current account is still closed by Donut between authenticated session acquisition and the Minecraft login packet on two direct Webshare exits; another account or a Donut-approved/residential exit must complete the remaining live acceptance path.
 - Local position inference is fail-closed until real success/failure message fixtures exist; used slots remain manually adjustable and no transaction or complete inventory data is uploaded.
 
 ## Next rollout gates
