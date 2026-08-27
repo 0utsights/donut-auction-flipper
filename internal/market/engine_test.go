@@ -259,6 +259,19 @@ func TestPublicQuantityValuationUsesExactBatchEvidence(t *testing.T) {
 	}
 }
 
+func TestQuantityValuationsReturnsOnlyObservedExactBatches(t *testing.T) {
+	e := NewEngine()
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	e.now = func() time.Time { return now }
+	e.AddTransactions(quantitySales(now, "iron_ingot", 1, 100, 8, "single"))
+	e.AddTransactions(quantitySales(now, "iron_ingot", 16, 1_440, 8, "sixteen"))
+	e.AddTransactions(quantitySales(now, "iron_ingot", 64, 3_200, 8, "stack"))
+	values := e.QuantityValuations("minecraft:iron_ingot", 32)
+	if len(values) != 2 || values[0].PricingQuantity != 1 || values[1].PricingQuantity != 16 {
+		t.Fatalf("quantity frontier=%+v", values)
+	}
+}
+
 func TestQuantityValuationMeasuresExecutableVolumeAtFinalStackPrice(t *testing.T) {
 	e := NewEngine()
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)

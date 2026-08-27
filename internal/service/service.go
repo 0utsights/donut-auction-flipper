@@ -552,13 +552,24 @@ func (s *Server) orderAuctionPage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) simpleOrderPageData() simpleOrderPageData {
 	feed := s.orders.CandidateFeed()
-	data := simpleOrderPageData{Version: feed.Version, GeneratedAt: feed.GeneratedAt, Ready: make([]orders.Candidate, 0, 20), Research: make([]orders.Candidate, 0, 10)}
+	minimumProfit := orders.ReferenceMinimumProfitPerExit(feed.Candidates, 10_000_000, 18)
+	data := simpleOrderPageData{Version: feed.Version, GeneratedAt: feed.GeneratedAt, Ready: make([]orders.Candidate, 0, 20), Research: make([]orders.Candidate, 0, 10), MinimumProfit: minimumProfit}
 	for _, candidate := range feed.Candidates {
 		if candidate.PriorityRank <= 0 || candidate.Route != "ORDER_TO_AUCTION" {
 			continue
 		}
 		switch candidate.State {
 		case "READY":
+			if candidate.ConservativeProfit < minimumProfit {
+				data.ResearchCount++
+				if len(data.Research) < cap(data.Research) {
+					candidate.State = "RESEARCH"
+					candidate.Reason = "below the current $10M reference profit-per-exit floor"
+					candidate.PriorityRank = len(data.Research) + 1
+					data.Research = append(data.Research, candidate)
+				}
+				continue
+			}
 			data.ReadyCount++
 			if candidate.OrderTier == "actionable" {
 				data.CoreCount++

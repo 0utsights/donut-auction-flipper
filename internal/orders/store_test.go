@@ -1142,8 +1142,8 @@ func TestCandidateBuilderIsQuantityAndEvidenceSafe(t *testing.T) {
 	}
 	valuation.QuantityQuickSell = 5_000
 	valuation.PricingQuantity = 1
-	if got := buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now); len(got) != 0 {
-		t.Fatalf("singular valuation became a stackable 1x recommendation: %+v", got)
+	if got := buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now); len(got) != 2 || got[0].Quantity != 1 || got[0].MaxStackSize != 64 {
+		t.Fatalf("exact singular exit was not preserved below the stack cap: %+v", got)
 	}
 	valuation.PricingQuantity = 64
 	evidence.AvailableUnits = 0
@@ -1195,6 +1195,16 @@ func TestCandidateOrderObservationTrustWindow(t *testing.T) {
 		if value.State != "STALE" {
 			t.Fatalf("expired order observation remained actionable: %+v", value)
 		}
+	}
+}
+
+func TestReferenceExitFloorScalesWithBalanceAndSlotScarcity(t *testing.T) {
+	candidates := []Candidate{{Route: "ORDER_TO_AUCTION", State: "READY", ConservativeProfit: 10_000, ConfidenceBPS: 8_000, CompletionBPS: 8_000}}
+	starter := ReferenceMinimumProfitPerExit(candidates, 10_000_000, 18)
+	progressed := ReferenceMinimumProfitPerExit(candidates, 100_000_000, 18)
+	scarce := ReferenceMinimumProfitPerExit(candidates, 10_000_000, 1)
+	if starter <= 0 || progressed <= starter || scarce <= starter {
+		t.Fatalf("dynamic floors starter=%d progressed=%d scarce=%d", starter, progressed, scarce)
 	}
 }
 
@@ -1286,17 +1296,18 @@ func TestStablePricesRejectsBroadMovementButIgnoresOneTransientSpike(t *testing.
 func TestAuctionResearchTargetsPreferValuableLiquidCanonicalItems(t *testing.T) {
 	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
 	values := map[string]market.Valuation{
-		"diamond": {Signature: "minecraft:diamond", BaseSignature: "minecraft:diamond", QuickSellValue: 5_000, Volume24h: 20, PriceSellerCount: 3, ConfidenceBPS: 8_000, GeneratedAt: now},
-		"iron":    {Signature: "minecraft:iron_ingot", BaseSignature: "minecraft:iron_ingot", QuickSellValue: 1_000, Volume24h: 20, PriceSellerCount: 3, ConfidenceBPS: 8_000, GeneratedAt: now},
-		"unsafe":  {Signature: "minecraft:diamond|enchanted", BaseSignature: "minecraft:diamond|enchanted", QuickSellValue: 100_000, Volume24h: 20, PriceSellerCount: 3, ConfidenceBPS: 8_000, GeneratedAt: now},
-		"thin":    {Signature: "minecraft:netherite_ingot", BaseSignature: "minecraft:netherite_ingot", QuickSellValue: 50_000, Volume24h: 1, PriceSellerCount: 1, ConfidenceBPS: 8_000, GeneratedAt: now},
+		"diamond":   {Signature: "minecraft:diamond", BaseSignature: "minecraft:diamond", QuickSellValue: 5_000, Volume24h: 20, PriceSellerCount: 3, ConfidenceBPS: 8_000, GeneratedAt: now},
+		"iron":      {Signature: "minecraft:iron_ingot", BaseSignature: "minecraft:iron_ingot", QuickSellValue: 1_000, Volume24h: 20, PriceSellerCount: 3, ConfidenceBPS: 8_000, GeneratedAt: now},
+		"netherite": {Signature: "minecraft:netherite_ingot", BaseSignature: "minecraft:netherite_ingot", QuickSellValue: 6_000_000, Volume24h: 2, PriceSellerCount: 2, ConfidenceBPS: 3_000, GeneratedAt: now},
+		"unsafe":    {Signature: "minecraft:diamond|enchanted", BaseSignature: "minecraft:diamond|enchanted", QuickSellValue: 100_000, Volume24h: 20, PriceSellerCount: 3, ConfidenceBPS: 8_000, GeneratedAt: now},
+		"thin":      {Signature: "minecraft:netherite_ingot", BaseSignature: "minecraft:netherite_ingot", QuickSellValue: 50_000, Volume24h: 1, PriceSellerCount: 1, ConfidenceBPS: 8_000, GeneratedAt: now},
 	}
 	targets := auctionResearchTargets(values, now, 10)
-	if len(targets) != 2 || targets[0] != "minecraft:diamond" || targets[1] != "minecraft:iron_ingot" {
+	if len(targets) != 3 || targets[0] != "minecraft:netherite_ingot" || targets[1] != "minecraft:diamond" || targets[2] != "minecraft:iron_ingot" {
 		t.Fatalf("auction shortlist=%v", targets)
 	}
 	if !canonicalBaseItem("minecraft:redstone_block") || canonicalBaseItem("minecraft:redstone block") || canonicalBaseItem("minecraft:my") ||
-		canonicalBaseItem("minecraft:netherite_spear") || canonicalBaseItem("minecraft:shulker_box") {
+		canonicalBaseItem("minecraft:netherite_spear") || canonicalBaseItem("minecraft:shulker_box") || !canonicalBaseItem("minecraft:dragon_head") {
 		t.Fatal("canonical search safety policy is inconsistent")
 	}
 }
@@ -1320,6 +1331,51 @@ func TestAuctionShortlistCanScheduleItemBeforeOrderEvidence(t *testing.T) {
 	if err != nil || task == nil || task.Kind != "focused_watch" || task.Signature != "minecraft:diamond_block" {
 		t.Fatalf("auction-prior task=%+v err=%v", task, err)
 	}
+}
+
+func TestAuctionShortlistPrecedesReplaceableFillerRefresh(t *testing.T) {
+	system, err := NewSystem(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	ctx := context.Background()
+	if _, err = system.Register(ctx, ObserverRegistration{ObserverID: "observer", ParserVersion: "p1", ProxyLabel: "proxy"}); err != nil {
+		t.Fatal(err)
+	}
+	system.candidates.Store(&CandidateFeed{Candidates: []Candidate{{
+		Route: "ORDER_TO_AUCTION", State: "READY", OrderTier: "research", Signature: "minecraft:blue_ice",
+		SignatureComplete: true, PriorityScore: 100, TargetListPrice: 10_000, ConservativeProfit: 1_000,
+	}}})
+	targets := []string{"minecraft:netherite_ingot"}
+	system.research.Store(&targets)
+	if err = system.queueAutomaticResearch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	task, err := system.LeaseTask(ctx, "observer")
+	if err != nil || task == nil || task.Signature != "minecraft:netherite_ingot" {
+		t.Fatalf("price-first task=%+v err=%v", task, err)
+	}
+}
+
+func TestBuildCandidatesUsesAPIProvenExitQuantityBelowStackLimit(t *testing.T) {
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	evidence := Evidence{ItemID: "minecraft:netherite_ingot", Signature: "minecraft:netherite_ingot", DisplayName: "Netherite Ingot",
+		Tier: "research", CompleteScans: 4, BestUnitRewardCents: 5_000_000, ObservedQuantity: 1, MaxStackSize: 64,
+		LastSeenAt: now, Stable: true, SignatureComplete: true}
+	valuation := market.Valuation{Signature: evidence.Signature, BaseSignature: evidence.Signature, PricingQuantity: 1,
+		QuickSellValue: 60_000, SingularQuickSell: 60_000, Volume24h: 8, PriceSellerCount: 3,
+		ConfidenceBPS: 8_000, ExpectedSellMinutes: 30, GeneratedAt: now}
+	values := buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now)
+	for _, value := range values {
+		if value.Route == "ORDER_TO_AUCTION" {
+			if value.Quantity != 1 || value.MaxStackSize != 64 {
+				t.Fatalf("exit quantity=%d stack cap=%d", value.Quantity, value.MaxStackSize)
+			}
+			return
+		}
+	}
+	t.Fatal("missing order-to-auction candidate")
 }
 
 func TestCandidateScoringSaturatesInsteadOfOverflowing(t *testing.T) {

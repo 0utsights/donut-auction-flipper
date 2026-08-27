@@ -31,6 +31,7 @@ const baseOnlyCommodities = new Set([
   'minecraft:gilded_blackstone', 'minecraft:hopper', 'minecraft:iron_block', 'minecraft:iron_ingot', 'minecraft:iron_nugget', 'minecraft:lapis_block', 'minecraft:lapis_lazuli',
   'minecraft:leather', 'minecraft:magma_cream', 'minecraft:nether_quartz_ore', 'minecraft:netherite_block',
   'minecraft:netherite_ingot', 'minecraft:netherite_scrap', 'minecraft:obsidian', 'minecraft:phantom_membrane',
+  'minecraft:dragon_head', 'minecraft:nether_star', 'minecraft:netherite_upgrade_smithing_template',
   'minecraft:prismarine_crystals', 'minecraft:prismarine_shard', 'minecraft:quartz', 'minecraft:quartz_block',
   'minecraft:rabbit_foot', 'minecraft:rabbit_hide', 'minecraft:raw_copper', 'minecraft:raw_copper_block',
   'minecraft:raw_gold', 'minecraft:raw_gold_block', 'minecraft:raw_iron', 'minecraft:raw_iron_block',

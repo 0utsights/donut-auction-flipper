@@ -17,7 +17,8 @@ final class PortfolioAllocator {
     }
 
     record Allocation(long balance, long deployable, int reserveBps, int availableOrderSlots,
-                      int availableAuctionSlots, long riskAdjustedProfitDay, List<Selection> selections) {
+                      int availableAuctionSlots, long minimumProfitPerExit,
+                      long riskAdjustedProfitDay, List<Selection> selections) {
         long selectedCapital() { return selections.stream().mapToLong(Selection::capital).reduce(0, PortfolioAllocator::safeAdd); }
         int selectedOrderSlots() { return selections.stream().mapToInt(value -> value.candidate().orderSlots()).sum(); }
         int totalExitBatches() { return selections.stream().mapToInt(Selection::batches).sum(); }
@@ -31,28 +32,39 @@ final class PortfolioAllocator {
 
     Allocation allocate(List<CandidateFeedClient.Candidate> input, long balance, int usedOrderSlots, int usedAuctionSlots,
                         Set<String> activeOrderItems) {
-        List<CandidateFeedClient.Candidate> ranked = input.stream()
+        List<CandidateFeedClient.Candidate> eligible = input.stream()
                 .filter(candidate -> candidate.route().equals("ORDER_TO_AUCTION") && candidate.state().equals("READY")
                         && candidate.acquisitionCost() > 0 && candidate.conservativeProfit() > 0
                         && candidate.riskAdjustedProfitDay() > 0 && candidate.executableBatches() > 0
                         && !activeOrderItems.contains(candidate.itemId()))
-                .sorted(Comparator.comparingLong(PortfolioAllocator::marketOpportunity).reversed()
-                        .thenComparing(Comparator.comparingLong(CandidateFeedClient.Candidate::riskAdjustedProfitDay).reversed())
-                        .thenComparing(CandidateFeedClient.Candidate::id))
                 .toList();
 
-        Map<String, CandidateFeedClient.Candidate> unique = new LinkedHashMap<>();
-        for (CandidateFeedClient.Candidate candidate : ranked) unique.putIfAbsent(candidate.itemId(), candidate);
-        List<CandidateFeedClient.Candidate> candidates = unique.values().stream().limit(MAX_CANDIDATES).toList();
-
-        int quality = candidates.isEmpty() ? 0 : (int) candidates.stream()
+        int quality = eligible.isEmpty() ? 0 : (int) eligible.stream()
                 .mapToInt(candidate -> Math.min(candidate.confidenceBps(), candidate.completionBps())).average().orElse(0);
         int reserveBps = Math.max(1_500, Math.min(3_500, 3_500 - quality * 2_000 / 10_000));
         long deployable = safeMultiply(balance, 10_000 - reserveBps) / 10_000;
         int orderSlots = Math.max(0, 20 - usedOrderSlots);
         int auctionSlots = Math.max(0, 18 - usedAuctionSlots);
+
+        // Every candidate is one exact exit listing (at most 64 items). Require
+        // that listing to earn at least 1% of the capital budget represented by
+        // one currently available auction slot. The dollar floor therefore
+        // rises with the player's balance and with slot scarcity instead of
+        // being a fixed server-wide constant.
+        int planningAuctionSlots = Math.max(1, auctionSlots);
+        long minimumProfitPerExit = safeMultiply(deployable / planningAuctionSlots, 100) / 10_000;
+        List<CandidateFeedClient.Candidate> ranked = eligible.stream()
+                .filter(candidate -> candidate.conservativeProfit() >= minimumProfitPerExit)
+                .sorted(Comparator.comparingLong(PortfolioAllocator::marketOpportunity).reversed()
+                        .thenComparing(Comparator.comparingLong(CandidateFeedClient.Candidate::riskAdjustedProfitDay).reversed())
+                        .thenComparing(Comparator.comparingLong(CandidateFeedClient.Candidate::conservativeProfit).reversed())
+                        .thenComparing(CandidateFeedClient.Candidate::id))
+                .toList();
+        Map<String, CandidateFeedClient.Candidate> unique = new LinkedHashMap<>();
+        for (CandidateFeedClient.Candidate candidate : ranked) unique.putIfAbsent(candidate.itemId(), candidate);
+        List<CandidateFeedClient.Candidate> candidates = unique.values().stream().limit(MAX_CANDIDATES).toList();
         if (candidates.isEmpty() || deployable <= 0 || orderSlots <= 0) {
-            return new Allocation(balance, deployable, reserveBps, orderSlots, auctionSlots, 0, List.of());
+            return new Allocation(balance, deployable, reserveBps, orderSlots, auctionSlots, minimumProfitPerExit, 0, List.of());
         }
 
         // A large acquisition order creates sequential exact-stack exits; it
@@ -103,7 +115,7 @@ final class PortfolioAllocator {
         }
         selections.sort(Comparator.comparingLong(Selection::riskAdjustedProfitDay).reversed()
                 .thenComparing(value -> value.candidate().id()));
-        return new Allocation(balance, deployable, reserveBps, orderSlots, auctionSlots, score, List.copyOf(selections));
+        return new Allocation(balance, deployable, reserveBps, orderSlots, auctionSlots, minimumProfitPerExit, score, List.copyOf(selections));
     }
 
     private static Node activate(List<CandidateFeedClient.Candidate> candidates, int[] maxima,

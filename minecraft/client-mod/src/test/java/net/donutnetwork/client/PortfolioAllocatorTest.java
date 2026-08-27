@@ -38,6 +38,20 @@ class PortfolioAllocatorTest {
         assertTrue(new PortfolioAllocator().allocate(List.of(research), 10_000_000, 0, 0).selections().isEmpty());
     }
 
+    @Test void minimumExitProfitScalesWithBalanceAndFreeAuctionSlots() {
+        CandidateFeedClient.Candidate tiny = candidate("tiny", 100_000, 1_000, 1, 1, 1);
+        CandidateFeedClient.Candidate useful = candidate("useful", 100_000, 10_000, 1, 1, 1);
+        PortfolioAllocator allocator = new PortfolioAllocator();
+        PortfolioAllocator.Allocation starter = allocator.allocate(List.of(tiny, useful), 1_000_000, 0, 0);
+        PortfolioAllocator.Allocation progressed = allocator.allocate(List.of(tiny, useful), 100_000_000, 0, 0);
+        assertTrue(starter.minimumProfitPerExit() < progressed.minimumProfitPerExit());
+        assertTrue(starter.selections().stream().anyMatch(selection -> selection.candidate().id().equals("useful")));
+        assertTrue(progressed.selections().stream().noneMatch(selection -> selection.candidate().id().equals("tiny")));
+
+        PortfolioAllocator.Allocation scarce = allocator.allocate(List.of(useful), 10_000_000, 0, 17);
+        assertTrue(scarce.minimumProfitPerExit() > allocator.allocate(List.of(useful), 10_000_000, 0, 0).minimumProfitPerExit());
+    }
+
     @Test void multipleBatchesFromOneBuyOrderUseOneOrderSlot() {
         CandidateFeedClient.Candidate bulk = candidate("bulk", 100_000, 50_000, 1, 1, 5);
         PortfolioAllocator.Allocation allocation = new PortfolioAllocator().allocate(List.of(bulk), 10_000_000, 19, 0);
@@ -86,7 +100,7 @@ class PortfolioAllocatorTest {
     }
 
     @Test void largeOrderUsesSequentialExitListingsInsteadOfAnEighteenStackCap() {
-        CandidateFeedClient.Candidate bulk = candidate("bulk", 1_000, 500, 1, 1, 50_000);
+        CandidateFeedClient.Candidate bulk = candidate("bulk", 1_000, 100_000, 1, 1, 50_000);
         PortfolioAllocator.Allocation allocation = new PortfolioAllocator().allocate(List.of(bulk), 10_000_000, 19, 18);
         PortfolioAllocator.Selection selected = allocation.selections().getFirst();
         assertTrue(selected.batches() > 18);

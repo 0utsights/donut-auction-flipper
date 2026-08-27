@@ -450,6 +450,47 @@ func (e *Engine) QuantityValuation(signature string, quantity int) (Valuation, b
 	if quantity < 1 {
 		quantity = 1
 	}
+	return e.quantityValuationLocked(signature, quantity, make(map[quantityValuationKey]quantityValuationResult))
+}
+
+// QuantityValuations evaluates only exact batch sizes present in completed-sale
+// history, under one read lock and one shared calculation cache. Callers that
+// need the best quantity up to a stack cap should use this instead of probing
+// every integer separately.
+func (e *Engine) QuantityValuations(signature string, maximum int) []Valuation {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	maximum = max(1, maximum)
+	quantities := map[int]struct{}{}
+	collect := func(transactions []Transaction) {
+		for _, transaction := range transactions {
+			quantity := max(1, transaction.Item.Quantity)
+			if quantity <= maximum {
+				quantities[quantity] = struct{}{}
+			}
+		}
+	}
+	collect(e.transactions[signature])
+	base := e.baseSignatureLocked(signature)
+	if base != signature {
+		collect(e.baseTransactions[base])
+	}
+	ordered := make([]int, 0, len(quantities))
+	for quantity := range quantities {
+		ordered = append(ordered, quantity)
+	}
+	sort.Ints(ordered)
+	cache := make(map[quantityValuationKey]quantityValuationResult)
+	result := make([]Valuation, 0, len(ordered))
+	for _, quantity := range ordered {
+		if valuation, ok := e.quantityValuationLocked(signature, quantity, cache); ok {
+			result = append(result, valuation)
+		}
+	}
+	return result
+}
+
+func (e *Engine) baseSignatureLocked(signature string) string {
 	base := signature
 	if transactions := e.transactions[signature]; len(transactions) > 0 {
 		base = transactions[0].Signature.Base
@@ -459,7 +500,11 @@ func (e *Engine) QuantityValuation(signature string, quantity int) (Valuation, b
 			break
 		}
 	}
-	cache := make(map[quantityValuationKey]quantityValuationResult)
+	return base
+}
+
+func (e *Engine) quantityValuationLocked(signature string, quantity int, cache map[quantityValuationKey]quantityValuationResult) (Valuation, bool) {
+	base := e.baseSignatureLocked(signature)
 	if valuation, ok := e.quantityPairValuationLocked(signature, base, quantity, false, cache); ok {
 		return valuation, true
 	}

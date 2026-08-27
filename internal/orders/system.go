@@ -91,10 +91,10 @@ func (s *System) CompleteTask(ctx context.Context, value TaskResult) error {
 }
 
 func (s *System) queueAutomaticResearch(ctx context.Context) error {
-	// The auction API establishes the exit value. READY markets take priority,
-	// followed by previously proven markets that only need a short current-price
-	// recheck, then new RESEARCH markets. Within a tier, research the strongest
-	// risk-adjusted opportunity first. Raw item value is only a tie-breaker.
+	// The auction API establishes the exit value. Keep proven CORE markets warm,
+	// then explore the API's price-first safe frontier before revisiting FILLER
+	// rows. Otherwise a handful of already-profitable cheap rows can permanently
+	// monopolize the only observer and prevent stronger items from being tested.
 	feed := s.CandidateFeed()
 	candidates := make([]Candidate, 0, len(feed.Candidates))
 	for _, candidate := range feed.Candidates {
@@ -126,9 +126,9 @@ func (s *System) queueAutomaticResearch(ctx context.Context) error {
 	signatures := make([]string, 0, len(candidates))
 	priorities := make(map[string]int, len(candidates))
 	seen := make(map[string]struct{}, len(candidates))
-	for _, candidate := range candidates {
+	appendCandidate := func(candidate Candidate) {
 		if _, exists := seen[candidate.Signature]; exists {
-			continue
+			return
 		}
 		seen[candidate.Signature] = struct{}{}
 		signatures = append(signatures, candidate.Signature)
@@ -136,6 +136,13 @@ func (s *System) queueAutomaticResearch(ctx context.Context) error {
 			priorities[candidate.Signature] = 75
 		} else {
 			priorities[candidate.Signature] = 50
+		}
+	}
+	// A genuinely actionable or previously proven row deserves a quick current
+	// recheck before exploration. Thin FILLER rows do not.
+	for _, candidate := range candidates {
+		if candidate.Profiled || (candidate.State == "READY" && candidate.OrderTier == "actionable") {
+			appendCandidate(candidate)
 		}
 	}
 	// Completed-auction history supplies a broad, safe shortlist even before an
@@ -151,6 +158,11 @@ func (s *System) queueAutomaticResearch(ctx context.Context) error {
 			signatures = append(signatures, signature)
 			priorities[signature] = 50
 		}
+	}
+	// Only after price-first API exploration do we spend observer time refreshing
+	// replaceable FILLER rows and incomplete new candidates.
+	for _, candidate := range candidates {
+		appendCandidate(candidate)
 	}
 	// A profile may have no current candidate at all after its price sample ages
 	// out. Keep rotating those known markets through the expedited read-only lane
@@ -230,22 +242,21 @@ func (s *System) refreshLocked(ctx context.Context, engine *market.Engine) error
 	}
 	now := s.now()
 	marketSnapshot := engine.Snapshot()
-	targets := auctionResearchTargets(marketSnapshot.Valuations, now, 100)
+	// Twenty-four targets keep one complete rotation short while leaving enough
+	// breadth to fill the player's twenty order slots after unprofitable spreads
+	// and unavailable order markets are discarded.
+	targets := auctionResearchTargets(marketSnapshot.Valuations, now, 24)
 	s.research.Store(&targets)
 	valuations := make(map[string]market.Valuation, len(evidence))
 	for _, item := range evidence {
 		if item.BestUnitRewardCents <= 0 {
 			continue
 		}
-		// Every stackable recommendation is a full-stack trade. The valuation must
-		// therefore contain exact evidence for that same batch quantity. A singular
-		// valuation remains a useful ceiling inside QuantityValuation, but can never
-		// turn a 64-stack market into a misleading 1-item recommendation.
-		quantity := max(1, item.MaxStackSize)
-		valuation, ok := engine.QuantityValuation(item.Signature, quantity)
-		if !ok && item.ItemID != item.Signature {
-			valuation, ok = engine.QuantityValuation(item.ItemID, quantity)
-		}
+		// A listing can contain any exact quantity up to the item's stack limit.
+		// Select the quantity with the strongest conservative per-listing profit
+		// for which the API has exact-quantity evidence. Fabric may combine many of
+		// these batches into one acquisition order and list them sequentially.
+		valuation, ok := bestExitValuation(engine, item, s.cfg, now)
 		if ok {
 			valuations[item.Signature] = valuation
 		}
@@ -264,9 +275,50 @@ func (s *System) refreshLocked(ctx context.Context, engine *market.Engine) error
 	return s.queueAutomaticResearch(ctx)
 }
 
+func bestExitValuation(engine *market.Engine, evidence Evidence, cfg Config, now time.Time) (market.Valuation, bool) {
+	maximum := max(1, min(64, evidence.MaxStackSize))
+	bestScore := int64(math.MinInt64)
+	bestQuantity := 0
+	var best market.Valuation
+	valuations := engine.QuantityValuations(evidence.Signature, maximum)
+	if len(valuations) == 0 && evidence.ItemID != evidence.Signature {
+		valuations = engine.QuantityValuations(evidence.ItemID, maximum)
+	}
+	for _, valuation := range valuations {
+		quantity := valuation.PricingQuantity
+		if quantity < 1 || quantity > maximum || valuation.QuickSellValue <= 0 {
+			continue
+		}
+		quickUnit := valuation.QuickSellValue
+		if quantity > 1 {
+			if valuation.QuantityQuickSell <= 0 {
+				continue
+			}
+			quickUnit = min64(quickUnit, valuation.QuantityQuickSell)
+		}
+		gross := mulMoney(quickUnit, int64(quantity))
+		net := applyFee(gross, cfg.AuctionFeeBPS)
+		cost := centsForQuantity(effectiveOrderUnitReward(evidence, now)+1, int64(quantity), true)
+		profit := net - cost
+		// Confidence is useful when comparing two profitable batch quantities. For
+		// losing quantities retain the signed profit so the least-bad row remains
+		// visible as REJECTED in engineering diagnostics.
+		score := profit
+		if profit > 0 {
+			score = mulDivNonNegative(profit, int64(valuation.ConfidenceBPS), 10_000)
+		}
+		if score > bestScore || (score == bestScore && quantity > bestQuantity) {
+			bestScore, bestQuantity, best = score, quantity, valuation
+		}
+	}
+	return best, bestQuantity > 0
+}
+
 type rankedAuctionTarget struct {
-	signature string
-	score     int64
+	signature  string
+	unitValue  int64
+	volume     int
+	confidence int
 }
 
 // Keep the API-first research frontier aligned with the collector's audited
@@ -285,6 +337,7 @@ var auctionResearchBaseItems = map[string]struct{}{
 	"minecraft:gilded_blackstone": {}, "minecraft:hopper": {}, "minecraft:iron_block": {}, "minecraft:iron_ingot": {}, "minecraft:iron_nugget": {},
 	"minecraft:lapis_block": {}, "minecraft:lapis_lazuli": {}, "minecraft:leather": {}, "minecraft:magma_cream": {}, "minecraft:nether_quartz_ore": {},
 	"minecraft:netherite_block": {}, "minecraft:netherite_ingot": {}, "minecraft:netherite_scrap": {}, "minecraft:obsidian": {}, "minecraft:phantom_membrane": {},
+	"minecraft:dragon_head": {}, "minecraft:nether_star": {}, "minecraft:netherite_upgrade_smithing_template": {},
 	"minecraft:prismarine_crystals": {}, "minecraft:prismarine_shard": {}, "minecraft:quartz": {}, "minecraft:quartz_block": {}, "minecraft:rabbit_foot": {},
 	"minecraft:rabbit_hide": {}, "minecraft:raw_copper": {}, "minecraft:raw_copper_block": {}, "minecraft:raw_gold": {}, "minecraft:raw_gold_block": {},
 	"minecraft:raw_iron": {}, "minecraft:raw_iron_block": {}, "minecraft:red_sand": {}, "minecraft:redstone": {}, "minecraft:redstone_block": {},
@@ -301,7 +354,7 @@ var auctionResearchBaseItems = map[string]struct{}{
 }
 
 func auctionResearchTargets(values map[string]market.Valuation, now time.Time, limit int) []string {
-	best := make(map[string]int64)
+	best := make(map[string]rankedAuctionTarget)
 	for _, value := range values {
 		signature := value.BaseSignature
 		if signature == "" {
@@ -311,29 +364,74 @@ func auctionResearchTargets(values map[string]market.Valuation, now time.Time, l
 			value.PriceSellerCount < minimumFillerAuctionSellers || value.ConfidenceBPS < minimumFillerExitConfidenceBPS || marketHoldReason(value, now, true) != "" {
 			continue
 		}
-		liquidity := int64(min(value.Volume24h, 20))
-		score := mulMoney(value.QuickSellValue, liquidity)
-		score = mulDivNonNegative(score, int64(value.ConfidenceBPS), 10_000)
-		if score > best[signature] {
-			best[signature] = score
+		target := rankedAuctionTarget{signature: signature, unitValue: value.QuickSellValue, volume: value.Volume24h, confidence: value.ConfidenceBPS}
+		if current, exists := best[signature]; !exists || auctionTargetLess(current, target) {
+			best[signature] = target
 		}
 	}
 	ranked := make([]rankedAuctionTarget, 0, len(best))
-	for signature, score := range best {
-		ranked = append(ranked, rankedAuctionTarget{signature: signature, score: score})
+	for _, target := range best {
+		ranked = append(ranked, target)
 	}
-	sort.Slice(ranked, func(i, j int) bool {
-		if ranked[i].score != ranked[j].score {
-			return ranked[i].score > ranked[j].score
-		}
-		return ranked[i].signature < ranked[j].signature
+	sort.SliceStable(ranked, func(i, j int) bool {
+		return auctionTargetLess(ranked[j], ranked[i])
 	})
 	limit = min(max(0, limit), len(ranked))
-	result := make([]string, limit)
-	for index := range result {
-		result[index] = ranked[index].signature
+	result := make([]string, 0, limit)
+	seen := make(map[string]struct{}, limit)
+	// Reserve two thirds of the bounded frontier for reliable high unit values.
+	// The remaining third is an economic-throughput lane so cheaper, genuinely
+	// high-volume markets still get tested instead of being excluded forever.
+	priceSlots := min(limit, max(1, limit*2/3))
+	for _, target := range ranked[:priceSlots] {
+		result = append(result, target.signature)
+		seen[target.signature] = struct{}{}
+	}
+	throughput := append([]rankedAuctionTarget(nil), ranked...)
+	sort.SliceStable(throughput, func(i, j int) bool {
+		left := mulMoney(throughput[i].unitValue, int64(min(throughput[i].volume, 20)))
+		right := mulMoney(throughput[j].unitValue, int64(min(throughput[j].volume, 20)))
+		if left != right {
+			return left > right
+		}
+		return auctionTargetLess(throughput[j], throughput[i])
+	})
+	for _, target := range throughput {
+		if len(result) >= limit {
+			break
+		}
+		if _, exists := seen[target.signature]; exists {
+			continue
+		}
+		seen[target.signature] = struct{}{}
+		result = append(result, target.signature)
+	}
+	// Small test/development feeds can exhaust the throughput lane with rows
+	// already selected above; preserve the remaining price ordering in that case.
+	for _, target := range ranked {
+		if len(result) >= limit {
+			break
+		}
+		if _, exists := seen[target.signature]; exists {
+			continue
+		}
+		seen[target.signature] = struct{}{}
+		result = append(result, target.signature)
 	}
 	return result
+}
+
+func auctionTargetLess(left, right rankedAuctionTarget) bool {
+	if left.unitValue != right.unitValue {
+		return left.unitValue < right.unitValue
+	}
+	if left.volume != right.volume {
+		return left.volume < right.volume
+	}
+	if left.confidence != right.confidence {
+		return left.confidence < right.confidence
+	}
+	return left.signature > right.signature
 }
 
 func canonicalBaseItem(signature string) bool {
@@ -420,11 +518,11 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 		if !ok {
 			continue
 		}
-		// Orders are intentionally created in full-stack batches. Reject any
-		// valuation that was built for a different quantity instead of silently
-		// publishing a 1x recommendation for a stackable item.
-		quantity := max(1, evidence.MaxStackSize)
-		if valuation.PricingQuantity != quantity {
+		// Exact resale quantity is chosen from API-supported quantities between 1
+		// and the stack cap. This is not necessarily a full stack: expensive items
+		// can use 1x exits while cheaper commodities use a proven 64x exit.
+		quantity := valuation.PricingQuantity
+		if quantity < 1 || quantity > max(1, min(64, evidence.MaxStackSize)) {
 			continue
 		}
 		if quantity > 1 && valuation.QuantityQuickSell <= 0 {
@@ -437,10 +535,7 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 		if quickUnit <= 0 || evidence.BestUnitRewardCents <= 0 {
 			continue
 		}
-		orderUnitRewardCents := evidence.BestUnitRewardCents
-		if evidence.FocusedUnitRewardCents > 0 && !evidence.FocusedSeenAt.IsZero() && !evidence.FocusedSeenAt.After(now) && now.Sub(evidence.FocusedSeenAt) <= 30*time.Second {
-			orderUnitRewardCents = evidence.FocusedUnitRewardCents
-		}
+		orderUnitRewardCents := effectiveOrderUnitReward(evidence, now)
 		completion := completionBPS(evidence, valuation)
 		fresh := now.Sub(evidence.LastSeenAt) <= orderObservationWindow
 		marketReason := marketHoldReason(valuation, now, false)
@@ -579,6 +674,13 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 		}
 	}
 	return result
+}
+
+func effectiveOrderUnitReward(evidence Evidence, now time.Time) int64 {
+	if evidence.FocusedUnitRewardCents > 0 && !evidence.FocusedSeenAt.IsZero() && !evidence.FocusedSeenAt.After(now) && now.Sub(evidence.FocusedSeenAt) <= 30*time.Second {
+		return evidence.FocusedUnitRewardCents
+	}
+	return evidence.BestUnitRewardCents
 }
 
 func candidate(value Candidate) Candidate {

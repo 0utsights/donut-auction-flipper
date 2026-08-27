@@ -110,7 +110,8 @@ final class DonutScreen extends Screen {
                 + compact(portfolio.totalExitBatches()) + " future listings · page " + (portfolioPage + 1) + "/"
                 + Math.max(1, (portfolio.selections().size() + PAGE_SIZE - 1) / PAGE_SIZE)), left, top + 66, 0xFFFFFF);
         context.drawTextWithShadow(textRenderer, Text.literal("One row = one buy order. Exit stacks are ≤64 and reuse your "
-                + portfolio.availableAuctionSlots() + " currently free auction slots."), left, top + 78, 0xAAAAAA);
+                + portfolio.availableAuctionSlots() + " free auction slots · current minimum +$"
+                + FlipNotifier.format(portfolio.minimumProfitPerExit()) + " per exit."), left, top + 78, 0xAAAAAA);
         if (portfolio.selections().isEmpty()) context.drawTextWithShadow(textRenderer, Text.literal("No current CORE/FILLER offer fits. Collector freshness and local cash are required."), left, top + 104, 0x888888);
         super.render(context, mouseX, mouseY, delta);
     }
