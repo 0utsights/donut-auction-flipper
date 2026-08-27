@@ -84,9 +84,9 @@ func (s *System) CompleteTask(ctx context.Context, value TaskResult) error {
 
 func (s *System) queueAutomaticResearch(ctx context.Context) error {
 	// The auction API establishes the exit value. READY markets take priority,
-	// followed by RESEARCH markets, then by the exact-quantity auction resale
-	// value. Profit score breaks ties so expensive but uneconomic items do not
-	// outrank useful research indefinitely.
+	// followed by RESEARCH markets. Within a tier, research the strongest
+	// risk-adjusted opportunity first. Raw item value is only a tie-breaker;
+	// otherwise a few expensive items can monopolize the observer indefinitely.
 	feed := s.CandidateFeed()
 	candidates := make([]Candidate, 0, len(feed.Candidates))
 	for _, candidate := range feed.Candidates {
@@ -100,10 +100,16 @@ func (s *System) queueAutomaticResearch(ctx context.Context) error {
 		if candidates[i].State != candidates[j].State {
 			return candidates[i].State == "READY"
 		}
+		if candidates[i].PriorityScore != candidates[j].PriorityScore {
+			return candidates[i].PriorityScore > candidates[j].PriorityScore
+		}
+		if candidates[i].ConservativeProfit != candidates[j].ConservativeProfit {
+			return candidates[i].ConservativeProfit > candidates[j].ConservativeProfit
+		}
 		if candidates[i].TargetListPrice != candidates[j].TargetListPrice {
 			return candidates[i].TargetListPrice > candidates[j].TargetListPrice
 		}
-		return candidates[i].PriorityScore > candidates[j].PriorityScore
+		return candidates[i].Signature < candidates[j].Signature
 	})
 	signatures := make([]string, 0, len(candidates))
 	seen := make(map[string]struct{}, len(candidates))
@@ -174,20 +180,14 @@ func (s *System) refreshLocked(ctx context.Context, engine *market.Engine) error
 		if item.BestUnitRewardCents <= 0 {
 			continue
 		}
-		// Prefer a full inventory slot. QuantityValuation still requires both
-		// singular and exact-batch sale evidence, so this cannot inflate a stack
-		// from the singular market. Fall back to one only when the exact stack
-		// cohort has not accumulated enough evidence yet.
+		// Every stackable recommendation is a full-stack trade. The valuation must
+		// therefore contain exact evidence for that same batch quantity. A singular
+		// valuation remains a useful ceiling inside QuantityValuation, but can never
+		// turn a 64-stack market into a misleading 1-item recommendation.
 		quantity := max(1, item.MaxStackSize)
 		valuation, ok := engine.QuantityValuation(item.Signature, quantity)
 		if !ok && item.ItemID != item.Signature {
 			valuation, ok = engine.QuantityValuation(item.ItemID, quantity)
-		}
-		if !ok && quantity > 1 {
-			valuation, ok = engine.QuantityValuation(item.Signature, 1)
-			if !ok && item.ItemID != item.Signature {
-				valuation, ok = engine.QuantityValuation(item.ItemID, 1)
-			}
 		}
 		if ok {
 			valuations[item.Signature] = valuation
@@ -265,9 +265,12 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 		if !ok {
 			continue
 		}
-		quantity := max(1, evidence.ObservedQuantity)
-		if valuation.PricingQuantity > 0 {
-			quantity = valuation.PricingQuantity
+		// Orders are intentionally created in full-stack batches. Reject any
+		// valuation that was built for a different quantity instead of silently
+		// publishing a 1x recommendation for a stackable item.
+		quantity := max(1, evidence.MaxStackSize)
+		if valuation.PricingQuantity != quantity {
+			continue
 		}
 		if quantity > 1 && valuation.QuantityQuickSell <= 0 {
 			continue

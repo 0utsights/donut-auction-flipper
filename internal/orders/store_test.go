@@ -284,6 +284,38 @@ func TestFocusedWatchRequestsCurrentDiscoveryLeaseToYield(t *testing.T) {
 	}
 }
 
+func TestAutomaticResearchWaitsForDiscoveryBreadthFloor(t *testing.T) {
+	system, err := NewSystem(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	ctx := context.Background()
+	if _, err := system.Register(ctx, ObserverRegistration{ObserverID: "one", ParserVersion: "p1", ProxyLabel: "proxy"}); err != nil {
+		t.Fatal(err)
+	}
+	discovery, err := system.LeaseTask(ctx, "one")
+	if err != nil || discovery == nil || discovery.Kind != "discovery" {
+		t.Fatalf("discovery=%+v err=%v", discovery, err)
+	}
+	if err := system.store.QueueAutomaticResearch(ctx, []string{"minecraft:diamond_block"}, time.Minute, 5*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	heartbeat := Heartbeat{ObserverID: "one", State: "scanning", TaskID: discovery.ID, LeaseToken: discovery.LeaseToken, Page: 3}
+	if yield, err := system.ShouldYieldDiscovery(ctx, heartbeat); err != nil || yield {
+		t.Fatalf("automatic research starved early discovery: yield=%v err=%v", yield, err)
+	}
+	heartbeat.Page = automaticFocusDiscoveryPage
+	if yield, err := system.ShouldYieldDiscovery(ctx, heartbeat); err != nil || !yield {
+		t.Fatalf("automatic research did not yield at breadth floor: yield=%v err=%v", yield, err)
+	}
+	wrong := heartbeat
+	wrong.LeaseToken = "lease_wrong"
+	if yield, err := system.ShouldYieldDiscovery(ctx, wrong); err != nil || yield {
+		t.Fatalf("wrong lease interrupted discovery: yield=%v err=%v", yield, err)
+	}
+}
+
 func TestLegacyDollarRewardsAreQuarantinedFromCentEvidence(t *testing.T) {
 	system, err := NewSystem(Config{})
 	if err != nil {
@@ -368,7 +400,7 @@ func TestDiscoveryTaskCadenceAndSchemaHold(t *testing.T) {
 	}
 }
 
-func TestDiscoveryCompletionQueuesHighestAuctionValueResearch(t *testing.T) {
+func TestDiscoveryCompletionQueuesHighestPriorityResearch(t *testing.T) {
 	system, err := NewSystem(Config{})
 	if err != nil {
 		t.Fatal(err)
@@ -393,7 +425,7 @@ func TestDiscoveryCompletionQueuesHighestAuctionValueResearch(t *testing.T) {
 	if err != nil || focused == nil {
 		t.Fatalf("automatic focused task=%+v err=%v", focused, err)
 	}
-	if focused.Kind != "focused_watch" || focused.Signature != "minecraft:diamond_block" || focused.Priority != 50 {
+	if focused.Kind != "focused_watch" || focused.Signature != "minecraft:iron_ingot" || focused.Priority != 50 {
 		t.Fatalf("wrong automatic priority task: %+v", focused)
 	}
 	if err = system.CompleteTask(ctx, TaskResult{ObserverID: "one", TaskID: focused.ID, LeaseToken: focused.LeaseToken, Status: "complete"}); err != nil {
@@ -867,6 +899,12 @@ func TestCandidateBuilderIsQuantityAndEvidenceSafe(t *testing.T) {
 	if got := buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now); len(got) != 0 {
 		t.Fatalf("stack escaped exact-quantity gate: %+v", got)
 	}
+	valuation.QuantityQuickSell = 5_000
+	valuation.PricingQuantity = 1
+	if got := buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now); len(got) != 0 {
+		t.Fatalf("singular valuation became a stackable 1x recommendation: %+v", got)
+	}
+	valuation.PricingQuantity = 64
 	evidence.AvailableUnits = 0
 	evidence.FilledUnits24h = 0
 	valuation.QuantityQuickSell = 5_000

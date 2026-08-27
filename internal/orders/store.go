@@ -284,10 +284,16 @@ func (s *Store) Heartbeat(ctx context.Context, heartbeat Heartbeat) error {
 	return nil
 }
 
-// ShouldYieldDiscovery lets a low-priority discovery pass hand its observer to
-// an explicitly requested focused watch. It only returns true for the exact
-// live discovery lease presented by that observer; a stale or forged task ID
-// can never interrupt another collector.
+// automaticFocusDiscoveryPage guarantees that the sole observer samples a
+// useful breadth of the price-sorted market before recurring research can take
+// over. At the observed cadence this is roughly four minutes of discovery.
+const automaticFocusDiscoveryPage = 200
+
+// ShouldYieldDiscovery lets a discovery pass hand its observer to focused
+// work. Player-requested watches preempt immediately; automatic research waits
+// until discovery has reached the breadth floor. It only returns true for the
+// exact live discovery lease presented by that observer; a stale or forged task
+// ID can never interrupt another collector.
 func (s *Store) ShouldYieldDiscovery(ctx context.Context, heartbeat Heartbeat) (bool, error) {
 	if heartbeat.TaskID == "" || heartbeat.LeaseToken == "" {
 		return false, nil
@@ -297,8 +303,9 @@ func (s *Store) ShouldYieldDiscovery(ctx context.Context, heartbeat Heartbeat) (
 		SELECT 1 FROM tasks active
 		WHERE active.id=? AND active.kind='discovery' AND active.state='leased'
 			AND active.assigned_observer=? AND active.lease_token=? AND active.lease_expires_ms>?
-			AND EXISTS(SELECT 1 FROM tasks focused WHERE focused.kind='focused_watch' AND focused.state='ready')
-	)`, heartbeat.TaskID, heartbeat.ObserverID, heartbeat.LeaseToken, s.now().UnixMilli()).Scan(&ready)
+			AND EXISTS(SELECT 1 FROM tasks focused WHERE focused.kind='focused_watch' AND focused.state='ready'
+				AND (focused.automatic=0 OR ?>=?))
+	)`, heartbeat.TaskID, heartbeat.ObserverID, heartbeat.LeaseToken, s.now().UnixMilli(), heartbeat.Page, automaticFocusDiscoveryPage).Scan(&ready)
 	return ready == 1, err
 }
 
