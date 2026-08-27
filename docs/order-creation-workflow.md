@@ -37,14 +37,14 @@ Before taking the final action, Fabric must verify:
 
 Because the exact success/failure chat fixtures are not yet captured, pressing the server action records a conservative local pending position rather than claiming success. The same item cannot be allocated again across client restarts. Direct duplicate-order server messages fail closed and persist the item lock. The player can clear local locks with `Reset order cache`; this only makes the item eligible for review again, and the exact personal-order menu check still blocks creation if the order remains present.
 
-The Fabric executor may press the final `Create Order` control only for one portfolio selection that the player explicitly armed in the local UI. A selection combines its allocated resale batches into one acquisition order for that item; it never creates duplicate per-stack orders. Arming must be disabled by default, visibly identify the item, total quantity, resale-stack count, maximum escrow, and session budget, and expire if any screen, value, candidate, allocation, or freshness check changes. Immediately before the click, Fabric must repeat every review invariant and cancel on uncertainty. One arm authorizes one order attempt; it must never loop or silently arm another candidate. Mineflayer remains observation-only and must never enter `Your Orders`, the creation wizard, or any transactional screen.
+The Fabric executor supports two explicit consent scopes. `ARM ONE ORDER` authorizes exactly one portfolio selection. `ENABLE AUTO ORDERS` authorizes the currently allocated queue for the current Minecraft session and is disabled by default. A selection combines its allocated resale batches into one acquisition order for that item; it never creates duplicate per-stack orders. Before each queued order, Fabric obtains a new focused observation and repeats every review invariant. After clicking `Create Order`, it reopens the verified personal-order menu and requires exactly one matching canonical item before continuing. Unknown screens, missing orders, duplicate matches, changed economics, stale data, disconnects, balance/slot failures, and server duplicate messages stop the entire queue and leave the affected item locked for manual review. Mineflayer remains observation-only and never enters `Your Orders`, the creation wizard, or any transactional screen.
 
 ## Data still required for safe live acceptance
 
 - Fabric screen/widget identifiers for all five wizard screens; the live discovery established the visible contract but not stable internal widget IDs.
 - Behavior for invalid, fractional, suffix-formatted, minimum, maximum, and overflow amounts/prices.
 - Whether creation fees exist but are omitted from the review screen.
-- Exact server responses for success, insufficient funds, slot exhaustion, price changes, duplicate orders, disconnects, and timeouts.
+- Exact server responses for insufficient funds, slot exhaustion, price changes, disconnects, and timeouts. Until fixtures exist, post-submit success is proven from an exact canonical match in `Your Orders` rather than chat text.
 - Personal-order row schema, filled-item collection flow, cancellation/refund behavior, and expiry.
 - A low-value, explicitly armed end-to-end acceptance order followed by manual cancellation/refund verification before enabling normal-budget order creation.
 

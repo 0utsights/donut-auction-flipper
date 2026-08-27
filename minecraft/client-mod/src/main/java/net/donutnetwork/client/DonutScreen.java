@@ -66,15 +66,22 @@ final class DonutScreen extends Screen {
             addDrawableChild(arm);
         }
 
-        addDrawableChild(ButtonWidget.builder(Text.literal("Chat alerts: " + (auctions.alertsEnabled() ? "ON" : "OFF")), button -> { auctions.setAlertsEnabled(!auctions.alertsEnabled()); clearAndInit(); })
+        addDrawableChild(ButtonWidget.builder(Text.literal("Alerts: " + (auctions.alertsEnabled() ? "ON" : "OFF")), button -> { auctions.setAlertsEnabled(!auctions.alertsEnabled()); clearAndInit(); })
                 .tooltip(Tooltip.of(Text.literal("Includes immediate API-auction alerts, which remain in chat to keep this order screen concise.")))
-                .dimensions(left, top + 188, 144, 20).build());
+                .dimensions(left, top + 188, 106, 20).build());
         addDrawableChild(ButtonWidget.builder(Text.literal("Diagnostics: " + (candidates.diagnosticsEnabled() ? "ON" : "OFF")), button -> { candidates.setDiagnostics(!candidates.diagnosticsEnabled()); clearAndInit(); })
-                .dimensions(left + 148, top + 188, 144, 20).build());
+                .dimensions(left + 110, top + 188, 106, 20).build());
+        addDrawableChild(ButtonWidget.builder(Text.literal(orderExecutor.autoEnabled() ? "STOP AUTO (" + orderExecutor.autoRemaining() + ")" : "Auto orders: OFF"), button -> {
+                    if (orderExecutor.autoEnabled()) { orderExecutor.disableAuto(client, "automatic order queue stopped by player"); clearAndInit(); }
+                    else client.setScreen(new AutoOrderConsentScreen(this, candidates, orderExecutor));
+                }).tooltip(Tooltip.of(Text.literal(orderExecutor.autoEnabled()
+                        ? "Stop the automatic queue and cancel any in-progress wizard."
+                        : "Review and explicitly enable sequential verified buy-order creation for this session.")))
+                .dimensions(left + 220, top + 188, 106, 20).build());
         if (orderExecutor.status().active()) {
             addDrawableChild(ButtonWidget.builder(Text.literal("STOP ORDER"), button -> { orderExecutor.cancel(client, "cancelled by player"); clearAndInit(); })
-                    .dimensions(left + 296, top + 188, 144, 20).build());
-        } else addDrawableChild(ButtonWidget.builder(Text.literal("Close"), button -> close()).dimensions(left + 296, top + 188, 144, 20).build());
+                    .dimensions(left + 330, top + 188, 110, 20).build());
+        } else addDrawableChild(ButtonWidget.builder(Text.literal("Close"), button -> close()).dimensions(left + 330, top + 188, 110, 20).build());
         ButtonWidget previous = ButtonWidget.builder(Text.literal("← Orders"), button -> { portfolioPage--; clearAndInit(); })
                 .tooltip(Tooltip.of(Text.literal("Show the previous four planned acquisition orders."))).dimensions(left, top + 212, 106, 20).build();
         previous.active = portfolioPage > 0;
@@ -122,7 +129,8 @@ final class DonutScreen extends Screen {
     private String feedKey() {
         StringBuilder key = new StringBuilder().append(candidates.status().version()).append(':').append(candidates.balance()).append(':')
                 .append(candidates.usedOrderSlots()).append(':').append(candidates.usedAuctionSlots()).append(':').append(auctions.status().version())
-                .append(':').append(orderExecutor.status().phase()).append(':').append(orderExecutor.status().message());
+                .append(':').append(orderExecutor.status().phase()).append(':').append(orderExecutor.status().message()).append(':')
+                .append(orderExecutor.autoEnabled()).append(':').append(orderExecutor.autoRemaining());
         for (PortfolioAllocator.Selection selection : candidates.allocation().selections()) key.append(':').append(selection.candidate().id()).append('=').append(selection.batches());
         return key.toString();
     }

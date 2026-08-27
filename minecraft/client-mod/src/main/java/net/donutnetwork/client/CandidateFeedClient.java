@@ -69,7 +69,7 @@ final class CandidateFeedClient implements AutoCloseable {
     private final AtomicReference<Status> status = new AtomicReference<>(new Status("waiting", Instant.EPOCH, "not started", 0, 0));
     private final AtomicReference<Instant> generatedAt = new AtomicReference<>(Instant.EPOCH);
     private final AtomicLong balance;
-    private final AtomicReference<String> balanceSource = new AtomicReference<>("saved/manual");
+    private final AtomicReference<String> balanceSource = new AtomicReference<>("saved fallback");
     private final AtomicLong pendingBalanceCeiling = new AtomicLong(Long.MAX_VALUE);
     private final AtomicLong pendingBalanceUntilMillis = new AtomicLong();
     private final AtomicLong usedSlots;
@@ -106,6 +106,7 @@ final class CandidateFeedClient implements AutoCloseable {
     PortfolioAllocator.Allocation allocation() { return allocation.get(); }
     long balance() { return balance.get(); }
     String balanceSource() { return balanceSource.get(); }
+    boolean balanceUsableForOrders() { return !balanceSource.get().equals("saved fallback"); }
     int usedOrderSlots() { return unpackOrder(usedSlots.get()); }
     int usedAuctionSlots() { return unpackAuction(usedSlots.get()); }
     boolean diagnosticsEnabled() { return diagnostics.get(); }

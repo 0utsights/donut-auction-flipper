@@ -26,18 +26,20 @@ import org.slf4j.LoggerFactory;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.LinkedHashMap;
 import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 
-/** Executes exactly one explicitly armed order through Donut's server-driven 1.21.11 screens. */
+/** Executes verified manual or explicitly enabled queued orders through Donut's server-driven 1.21.11 screens. */
 final class OrderCreationExecutor {
-    enum Phase { IDLE, WAIT_FRESH, ORDER_BOARD, YOUR_ORDERS, ITEM_SEARCH, ITEM_RESULT, AMOUNT, PRICE, REVIEW, PENDING_VERIFICATION, ABORTED }
+    enum Phase { IDLE, WAIT_FRESH, ORDER_BOARD, YOUR_ORDERS, ITEM_SEARCH, ITEM_RESULT, AMOUNT, PRICE, REVIEW, PENDING_VERIFICATION, VERIFY_BOARD, VERIFY_YOUR_ORDERS, ABORTED }
     record Status(Phase phase, String message, long sessionSpent, String candidateId) {
-        boolean active() { return phase != Phase.IDLE && phase != Phase.PENDING_VERIFICATION && phase != Phase.ABORTED; }
+        boolean active() { return phase != Phase.IDLE && phase != Phase.ABORTED; }
     }
     record ArmResult(boolean armed, String message) {}
 
@@ -67,12 +69,51 @@ final class OrderCreationExecutor {
     private long nextActionAt;
     private long sessionSpent;
     private OrderPlan lastSubmittedPlan;
+    private boolean autoEnabled;
+    private Instant nextAutoAttempt = Instant.EPOCH;
+    private final ArrayDeque<String> autoQueue = new ArrayDeque<>();
+    private final Map<String, Long> autoEscrowCaps = new LinkedHashMap<>();
 
     OrderCreationExecutor(CandidateFeedClient feed) {
         this.feed = feed;
     }
 
-    Status status() { return new Status(phase, message, sessionSpent, plan == null ? "" : plan.candidateId()); }
+    Status status() {
+        OrderPlan current = plan != null ? plan : lastSubmittedPlan;
+        return new Status(phase, message, sessionSpent, current == null ? "" : current.candidateId());
+    }
+    boolean autoEnabled() { return autoEnabled; }
+    int autoRemaining() { return autoQueue.size(); }
+
+    ArmResult enableAuto(MinecraftClient client) {
+        if (status().active()) return new ArmResult(false, "an order workflow is already active");
+        String error = serverError(client);
+        if (!error.isEmpty()) return new ArmResult(false, error);
+        if (!feed.balanceUsableForOrders()) return new ArmResult(false, "waiting for the live scoreboard balance or a manual override");
+        List<PortfolioAllocator.Selection> selections = feed.allocation().selections();
+        if (selections.isEmpty()) return new ArmResult(false, "the local portfolio has no eligible orders");
+        if (phase == Phase.ABORTED) phase = Phase.IDLE;
+        autoQueue.clear();
+        autoEscrowCaps.clear();
+        selections.stream().limit(feed.allocation().availableOrderSlots()).forEach(selection -> {
+            autoQueue.addLast(selection.candidate().id());
+            autoEscrowCaps.put(selection.candidate().id(), selection.capital());
+        });
+        if (autoQueue.isEmpty()) return new ArmResult(false, "no free local order slots are available");
+        autoEnabled = true;
+        message = "automatic order queue enabled for " + autoQueue.size() + " reviewed candidates";
+        nextAutoAttempt = Instant.EPOCH;
+        feed.diagnostic("order_workflow", "auto_enabled", Map.of("candidate_state", "queue", "route", "ORDER_TO_AUCTION", "reason_code", "explicit_auto_consent"));
+        return new ArmResult(true, message);
+    }
+
+    void disableAuto(MinecraftClient client, String reason) {
+        autoEnabled = false;
+        autoQueue.clear();
+        autoEscrowCaps.clear();
+        if (status().active()) abort(client, reason == null || reason.isBlank() ? "automatic order queue stopped by player" : reason);
+        else message = reason == null || reason.isBlank() ? "automatic order queue disabled" : reason;
+    }
 
     ArmResult canArm(PortfolioAllocator.Selection selection, Instant now) {
         if (status().active()) return new ArmResult(false, "another order workflow is active");
@@ -113,6 +154,9 @@ final class OrderCreationExecutor {
         phase = Phase.ABORTED;
         message = "server reported a duplicate order; item was locked until Your Orders is reviewed";
         plan = null;
+        autoEnabled = false;
+        autoQueue.clear();
+        autoEscrowCaps.clear();
         feed.diagnostic("order_workflow", "duplicate_reported", Map.of("candidate_state", "unknown", "route", "ORDER_TO_AUCTION", "reason_code", "server_duplicate_message"));
         if (client.currentScreen != null) client.setScreen(null);
         tell(client, "Duplicate-order response detected. This item is blocked locally; open Your Orders before retrying it.");
@@ -125,7 +169,13 @@ final class OrderCreationExecutor {
     void cancel(MinecraftClient client, String reason) { abort(client, reason == null || reason.isBlank() ? "cancelled by player" : reason); }
 
     void tick(MinecraftClient client) {
-        if (!status().active() || plan == null) return;
+        if (phase == Phase.IDLE) {
+            maybeStartAuto(client);
+            return;
+        }
+        if (phase == Phase.ABORTED) return;
+        OrderPlan currentPlan = plan != null ? plan : lastSubmittedPlan;
+        if (currentPlan == null) { abort(client, "order workflow lost its checked plan"); return; }
         if (client.player == null || client.getNetworkHandler() == null) { abort(client, "disconnected during the armed order workflow"); return; }
         Instant now = Instant.now();
         String serverError = serverError(client);
@@ -140,8 +190,18 @@ final class OrderCreationExecutor {
             } else if (Duration.between(phaseAt, now).compareTo(FRESH_WAIT) > 0) abort(client, error);
             return;
         }
-        String error = liveError(plan, now, true);
-        if (!error.isEmpty()) { abort(client, error); return; }
+        if (phase == Phase.PENDING_VERIFICATION) {
+            if (System.nanoTime() < nextActionAt) return;
+            client.getNetworkHandler().sendChatCommand("orders");
+            transition(Phase.VERIFY_BOARD, "verifying the submitted order in Your Orders");
+            delay();
+            return;
+        }
+        boolean verifying = phase == Phase.VERIFY_BOARD || phase == Phase.VERIFY_YOUR_ORDERS;
+        if (!verifying) {
+            String error = liveError(currentPlan, now, true);
+            if (!error.isEmpty()) { abort(client, error); return; }
+        }
         if (System.nanoTime() < nextActionAt) return;
         if (Duration.between(phaseAt, now).compareTo(SCREEN_TIMEOUT) > 0) { abort(client, "server screen did not advance before its deadline"); return; }
         Screen screen = client.currentScreen;
@@ -154,11 +214,39 @@ final class OrderCreationExecutor {
                 case AMOUNT -> handleAmount(client, screen);
                 case PRICE -> handlePrice(client, screen);
                 case REVIEW -> handleReview(client, screen);
+                case VERIFY_BOARD -> handleVerifyBoard(client, screen);
+                case VERIFY_YOUR_ORDERS -> handleVerifyYourOrders(client, screen);
                 default -> { }
             }
         } catch (RuntimeException errorValue) {
             abort(client, "screen verification failed: " + safe(errorValue.getMessage()));
         }
+    }
+
+    private void maybeStartAuto(MinecraftClient client) {
+        if (!autoEnabled || Instant.now().isBefore(nextAutoAttempt) || client.currentScreen != null) return;
+        if (autoQueue.isEmpty()) {
+            autoEnabled = false;
+            message = "automatic order queue completed";
+            tell(client, message);
+            return;
+        }
+        String candidateID = autoQueue.getFirst();
+        Optional<PortfolioAllocator.Selection> current = feed.allocation().selections().stream()
+                .filter(selection -> selection.candidate().id().equals(candidateID)
+                        && !feed.hasActiveOrder(selection.candidate().itemId())).findFirst();
+        if (current.isEmpty()) { stopAuto(client, "automatic order queue stopped because a reviewed allocation changed or disappeared"); return; }
+        long cap = autoEscrowCaps.getOrDefault(candidateID, 0L);
+        int authorizedBatches = authorizedBatches(current.get().batches(), current.get().candidate().acquisitionCost(), cap);
+        if (authorizedBatches <= 0) { stopAuto(client, "automatic order queue stopped because the reviewed escrow no longer covers this item"); return; }
+        PortfolioAllocator.Selection next = new PortfolioAllocator.Selection(current.get().candidate(), authorizedBatches);
+        ArmResult result = arm(next);
+        if (!result.armed()) stopAuto(client, "automatic order queue stopped: " + result.message());
+    }
+
+    static int authorizedBatches(int currentBatches, long acquisitionCost, long escrowCap) {
+        if (currentBatches <= 0 || acquisitionCost <= 0 || escrowCap <= 0) return 0;
+        return (int) Math.min(currentBatches, escrowCap / acquisitionCost);
     }
 
     private void handleOrderBoard(MinecraftClient client, Screen screen) {
@@ -265,11 +353,57 @@ final class OrderCreationExecutor {
         lastSubmittedPlan = plan;
         feed.recordOrderSubmitted(current, plan);
         transition(Phase.PENDING_VERIFICATION, "Create Order sent once; server outcome is pending local verification");
-        tell(client, "Create Order sent once for " + plan.quantity() + "× " + registryName + " (" + plan.batches() + " resale stacks) at $" + plan.priceInput() + " each. Verify the server outcome in Your Orders.");
+        delayVerification();
+        tell(client, "Create Order sent once for " + plan.quantity() + "× " + registryName + " (" + plan.batches() + " resale stacks) at $" + plan.priceInput() + " each. Verifying it in Your Orders.");
         plan = null;
     }
 
+    private void handleVerifyBoard(MinecraftClient client, Screen screen) {
+        if (screen == null) return;
+        String title = title(screen);
+        if (!(screen instanceof GenericContainerScreen) || !ORDERS_TITLE.matcher(title).matches()) {
+            abort(client, "unexpected screen while verifying submitted order: " + title); return;
+        }
+        ItemStack stack = containerSlot(client, 51);
+        if (!labelEquals(stack.getName().getString(), "Your Orders")) { abort(client, "Your Orders verification control did not match slot 51"); return; }
+        clickSlot(client, 51);
+        transition(Phase.VERIFY_YOUR_ORDERS, "checking that the submitted item exists exactly once");
+        delay();
+    }
+
+    private void handleVerifyYourOrders(MinecraftClient client, Screen screen) {
+        if (screen == null) return;
+        String title = title(screen);
+        if (ORDERS_TITLE.matcher(title).matches()) return;
+        if (!(screen instanceof GenericContainerScreen) || !title.equals("Orders -> Your Orders")) {
+            abort(client, "unexpected personal-orders verification screen: " + title); return;
+        }
+        int matches = personalOrderCount(client, lastSubmittedPlan.itemId());
+        if (matches == 1) {
+            String itemName = lastSubmittedPlan.itemName();
+            String candidateID = lastSubmittedPlan.candidateId();
+            feed.markActiveOrder(lastSubmittedPlan.itemId());
+            feed.diagnostic("order_workflow", "verified", Map.of("candidate_state", "active", "route", "ORDER_TO_AUCTION", "reason_code", "personal_order_exact_match"));
+            phase = Phase.IDLE;
+            message = "verified " + itemName + " in Your Orders";
+            lastSubmittedPlan = null;
+            if (autoEnabled && !autoQueue.isEmpty() && autoQueue.getFirst().equals(candidateID)) {
+                autoQueue.removeFirst();
+                autoEscrowCaps.remove(candidateID);
+            }
+            nextAutoAttempt = Instant.now().plusSeconds(2);
+            if (client.currentScreen != null) client.setScreen(null);
+            tell(client, "Order verified in Your Orders: " + itemName + (autoEnabled
+                    ? ". " + autoQueue.size() + " reviewed orders remain." : "."));
+            return;
+        }
+        if (matches > 1) { abort(client, "multiple personal orders matched the submitted item; automatic orders stopped"); return; }
+        if (Duration.between(phaseAt, Instant.now()).compareTo(Duration.ofSeconds(1)) < 0) return;
+        abort(client, "submitted order was not found in Your Orders; its item remains locked for manual review");
+    }
+
     private String liveError(OrderPlan expected, Instant now, boolean requireAllocation) {
+        if (!feed.balanceUsableForOrders()) return "waiting for the live scoreboard balance or a manual override";
         if (!"ready".equals(feed.status().state())) return "backend candidate feed is not ready";
         if (age(feed.generatedAt(), now).compareTo(FEED_MAX_AGE) > 0) return "candidate feed is stale";
         Optional<CandidateFeedClient.Candidate> currentValue = feed.candidate(expected.candidateId());
@@ -306,17 +440,27 @@ final class OrderCreationExecutor {
     }
 
     private void abort(MinecraftClient client, String reason) {
-        if (phase == Phase.IDLE || phase == Phase.PENDING_VERIFICATION || phase == Phase.ABORTED) return;
+        if (phase == Phase.IDLE || phase == Phase.ABORTED) return;
         String safeReason = safe(reason);
         LOGGER.warn("Order workflow aborted in {}: {}; screen={}", phase, safeReason, describeScreen(client.currentScreen));
         feed.diagnostic("order_workflow", "aborted", Map.of("candidate_state", phase.name(), "route", "ORDER_TO_AUCTION", "reason_code", "workflow_abort"));
-        phase = Phase.ABORTED; message = safeReason; plan = null;
+        phase = Phase.ABORTED; message = safeReason; plan = null; autoEnabled = false; autoQueue.clear(); autoEscrowCaps.clear();
         if (client.currentScreen != null) client.setScreen(null);
         tell(client, "Order creation stopped safely: " + safeReason);
     }
 
+    private void stopAuto(MinecraftClient client, String reason) {
+        autoEnabled = false;
+        autoQueue.clear();
+        autoEscrowCaps.clear();
+        phase = Phase.ABORTED;
+        message = safe(reason);
+        tell(client, message);
+    }
+
     private void transition(Phase next, String detail) { phase = next; phaseAt = Instant.now(); message = detail; }
     private void delay() { nextActionAt = System.nanoTime() + ACTION_DELAY_NANOS; }
+    private void delayVerification() { nextActionAt = System.nanoTime() + Duration.ofSeconds(1).toNanos(); }
 
     private static ItemStack containerSlot(MinecraftClient client, int index) {
         if (!(client.player.currentScreenHandler instanceof GenericContainerScreenHandler handler)) throw new IllegalStateException("not a generic container");
@@ -345,15 +489,20 @@ final class OrderCreationExecutor {
     }
 
     private static boolean personalOrdersContain(MinecraftClient client, String expectedItemId) {
-        if (!(client.player.currentScreenHandler instanceof GenericContainerScreenHandler handler)) return false;
+        return personalOrderCount(client, expectedItemId) > 0;
+    }
+
+    private static int personalOrderCount(MinecraftClient client, String expectedItemId) {
+        if (!(client.player.currentScreenHandler instanceof GenericContainerScreenHandler handler)) return 0;
         int limit = Math.min(handler.getInventory().size(), handler.slots.size());
+        int matches = 0;
         for (int index = 0; index < limit; index++) {
             ItemStack stack = handler.getSlot(index).getStack();
             if (stack.isEmpty()) continue;
             Identifier id = Registries.ITEM.getId(stack.getItem());
-            if (id != null && id.toString().equals(expectedItemId)) return true;
+            if (id != null && id.toString().equals(expectedItemId)) matches++;
         }
-        return false;
+        return matches;
     }
 
     private static Dialog requireDialog(Screen screen, String exactTitle) {

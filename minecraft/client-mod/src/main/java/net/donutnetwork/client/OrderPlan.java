@@ -6,7 +6,7 @@ import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Immutable transaction values captured when a player explicitly arms one order. */
+/** Immutable transaction values captured when manual or session-scoped consent arms one order. */
 record OrderPlan(String candidateId, String signature, String itemId, String itemName, int batchQuantity, int batches,
                  int quantity, long unitRewardCents, long totalCents, long escrowDollars, long targetListPrice) {
     private static final Pattern MONEY = Pattern.compile("(?i)\\$?\\s*([0-9][0-9,]*(?:\\.[0-9]+)?)\\s*([KMBT]?)(?![A-Za-z])");
