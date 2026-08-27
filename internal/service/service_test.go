@@ -270,7 +270,7 @@ func TestOrderAuctionPageReportsRealObserverStateWithoutFakeRows(t *testing.T) {
 		t.Fatalf("order-auction page code=%d", response.Code)
 	}
 	body := response.Body.String()
-	for _, expected := range []string{"Order → Auction Flips", "Only verified opportunities are shown as buyable.", "No verified flips right now.", "RESEARCH items are not buy recommendations.", "/order-auction-flipper/debug"} {
+	for _, expected := range []string{"Order → Auction Flips", "Only verified markets are shown.", "No verified flips right now.", "RESEARCH items are not buy recommendations.", "/order-auction-flipper/debug"} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("order-auction page missing %q", expected)
 		}

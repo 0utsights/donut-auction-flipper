@@ -52,7 +52,7 @@ final class CandidateFeedClient implements AutoCloseable {
                      long conservativeProfit, int marginBps, int completionBps, int expectedCycleMinutes,
                      long riskAdjustedProfitDay, int executableBatches, int queuePosition, int orderSlots, int auctionSlots,
                      int inventorySlots, long profitInventorySlot, int confidenceBps, String orderTier,
-                     Instant orderFreshAt, Instant auctionFreshAt, String orderCommand, String auctionCommand) {}
+                     Instant orderFreshAt, Instant focusedFreshAt, Instant auctionFreshAt, String orderCommand, String auctionCommand) {}
     record Status(String state, Instant lastSuccess, String message, long version, int candidateCount) {}
     record DecodedFeed(long version, Instant generatedAt, List<Candidate> candidates) {}
 
@@ -271,7 +271,7 @@ final class CandidateFeedClient implements AutoCloseable {
                     boundedInt(value, "executable_batches", 0, 1_000_000), boundedInt(value, "queue_position", 0, 1_000_000), boundedInt(value, "order_slots", 0, 20), boundedInt(value, "auction_slots", 0, 18),
                     boundedInt(value, "inventory_slots", 1, 1728), boundedLong(value, "profit_per_inventory_slot", Long.MIN_VALUE, Long.MAX_VALUE),
                     boundedInt(value, "confidence_bps", 0, 10_000), required(value, "order_tier", 32), instant(value, "order_fresh_at"),
-                    instant(value, "auction_fresh_at"), orderCommand, auctionCommand));
+                    instant(value, "focused_fresh_at"), instant(value, "auction_fresh_at"), orderCommand, auctionCommand));
         }
         return new DecodedFeed(version, generatedAt, List.copyOf(result));
     }

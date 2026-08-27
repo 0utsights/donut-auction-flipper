@@ -90,7 +90,8 @@ func (s *System) queueAutomaticResearch(ctx context.Context) error {
 	feed := s.CandidateFeed()
 	candidates := make([]Candidate, 0, len(feed.Candidates))
 	for _, candidate := range feed.Candidates {
-		if candidate.Route == "ORDER_TO_AUCTION" && (candidate.State == "READY" || candidate.State == "RESEARCH") &&
+		needsOrderResearch := candidate.State == "READY" || (candidate.State == "RESEARCH" && candidate.OrderTier != "actionable")
+		if candidate.Route == "ORDER_TO_AUCTION" && needsOrderResearch &&
 			candidate.SignatureComplete && candidate.PriorityRank > 0 && candidate.PriorityScore > 0 &&
 			candidate.TargetListPrice > 0 && candidate.ConservativeProfit > 0 {
 			candidates = append(candidates, candidate)
@@ -287,6 +288,10 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 		if quickUnit <= 0 || evidence.BestUnitRewardCents <= 0 {
 			continue
 		}
+		orderUnitRewardCents := evidence.BestUnitRewardCents
+		if evidence.FocusedUnitRewardCents > 0 && !evidence.FocusedSeenAt.IsZero() && !evidence.FocusedSeenAt.After(now) && now.Sub(evidence.FocusedSeenAt) <= 30*time.Second {
+			orderUnitRewardCents = evidence.FocusedUnitRewardCents
+		}
 		completion := completionBPS(evidence, valuation)
 		fresh := now.Sub(evidence.LastSeenAt) <= orderObservationWindow
 		marketReason := marketHoldReason(valuation, now)
@@ -337,7 +342,7 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 
 		// Donut rewards are cent-precise. Beat the current best buy order by the
 		// smallest representable amount instead of scaling the increment with price.
-		competitiveUnitCents := evidence.BestUnitRewardCents + 1
+		competitiveUnitCents := orderUnitRewardCents + 1
 		orderCost := centsForQuantity(competitiveUnitCents, int64(quantity), true)
 		auctionGross := mulMoney(quickUnit, int64(quantity))
 		auctionNet := applyFee(auctionGross, cfg.AuctionFeeBPS)
@@ -348,7 +353,7 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 			AcquisitionCost: orderCost, ExpectedProceeds: auctionNet, OrderUnitRewardCents: competitiveUnitCents, TargetListPrice: auctionGross,
 			CompletionBPS: completion, ExpectedCycleMinutes: cycle,
 			ExecutableBatches: executable, ResearchBatches: researchBatches, QueuePosition: 1, OrderSlots: 1, AuctionSlots: 1, InventorySlots: inventorySlots,
-			ConfidenceBPS: valuation.ConfidenceBPS, OrderTier: evidence.Tier, SignatureComplete: evidence.SignatureComplete, OrderFreshAt: evidence.LastSeenAt, AuctionFreshAt: valuation.GeneratedAt,
+			ConfidenceBPS: valuation.ConfidenceBPS, OrderTier: evidence.Tier, SignatureComplete: evidence.SignatureComplete, ResearchFreshAt: evidence.LastSeenAt, OrderFreshAt: evidence.FocusedSeenAt, FocusedFreshAt: evidence.FocusedSeenAt, AuctionFreshAt: valuation.GeneratedAt,
 			AuctionVolume24h: valuation.Volume24h, AuctionSellerCount: valuation.PriceSellerCount, OrderFilledUnits24h: evidence.FilledUnits24h,
 			OrderAvailableUnits: evidence.AvailableUnits, VolatilityBPS: valuation.VolatilityBPS, ReferenceAgeSeconds: valuation.ReferenceAgeSeconds,
 			RiskFlags:    append([]string(nil), valuation.RiskFlags...),
@@ -358,7 +363,7 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 		activeUnit := valuation.ActiveBestAsk
 		if activeUnit > 0 {
 			auctionCost := mulMoney(activeUnit, int64(quantity))
-			orderGross := centsForQuantity(evidence.BestUnitRewardCents, int64(quantity), false)
+			orderGross := centsForQuantity(orderUnitRewardCents, int64(quantity), false)
 			orderNet := applyFee(orderGross, cfg.OrderFeeBPS)
 			immediateExecutable := min(int(evidence.AvailableUnits/int64(quantity)), valuation.ActiveDepth)
 			immediateState, immediateReason := state, reason
@@ -373,10 +378,10 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 			result = append(result, candidate(Candidate{
 				ID: candidateID("auction_to_order", evidence.Signature, quantity), Route: "AUCTION_TO_ORDER", State: immediateState, Reason: immediateReason,
 				Signature: evidence.Signature, ItemID: evidence.ItemID, ItemName: displayName(evidence), Quantity: quantity, MaxStackSize: maxStack,
-				AcquisitionCost: auctionCost, ExpectedProceeds: orderNet, OrderUnitRewardCents: evidence.BestUnitRewardCents,
+				AcquisitionCost: auctionCost, ExpectedProceeds: orderNet, OrderUnitRewardCents: orderUnitRewardCents,
 				CompletionBPS: completion, ExpectedCycleMinutes: 2,
 				ExecutableBatches: immediateExecutable, ResearchBatches: immediateExecutable, QueuePosition: 0, OrderSlots: 0, AuctionSlots: 0, InventorySlots: inventorySlots,
-				ConfidenceBPS: valuation.ConfidenceBPS, OrderTier: evidence.Tier, SignatureComplete: evidence.SignatureComplete, OrderFreshAt: evidence.LastSeenAt, AuctionFreshAt: valuation.GeneratedAt,
+				ConfidenceBPS: valuation.ConfidenceBPS, OrderTier: evidence.Tier, SignatureComplete: evidence.SignatureComplete, ResearchFreshAt: evidence.LastSeenAt, OrderFreshAt: evidence.FocusedSeenAt, FocusedFreshAt: evidence.FocusedSeenAt, AuctionFreshAt: valuation.GeneratedAt,
 				AuctionVolume24h: valuation.Volume24h, AuctionSellerCount: valuation.PriceSellerCount, OrderFilledUnits24h: evidence.FilledUnits24h,
 				OrderAvailableUnits: evidence.AvailableUnits, VolatilityBPS: valuation.VolatilityBPS, ReferenceAgeSeconds: valuation.ReferenceAgeSeconds,
 				RiskFlags:    append([]string(nil), valuation.RiskFlags...),

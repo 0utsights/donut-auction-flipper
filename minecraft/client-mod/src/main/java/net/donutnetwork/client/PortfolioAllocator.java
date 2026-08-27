@@ -1,6 +1,5 @@
 package net.donutnetwork.client;
 
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -17,11 +16,9 @@ final class PortfolioAllocator {
         long riskAdjustedProfitDay() { return safeMultiply(candidate.riskAdjustedProfitDay(), batches); }
     }
     record Allocation(long balance, long deployable, int reserveBps, int availableOrderSlots,
-                      int availableAuctionSlots, long riskAdjustedProfitDay, List<Selection> selections,
-                      boolean timedOut) {}
+                      int availableAuctionSlots, long riskAdjustedProfitDay, List<Selection> selections) {}
 
     private static final int MAX_CANDIDATES = 30;
-    private static final Duration SOLVER_BUDGET = Duration.ofMillis(100);
 
     Allocation allocate(List<CandidateFeedClient.Candidate> input, long balance, int usedOrderSlots, int usedAuctionSlots) {
         return allocate(input, balance, usedOrderSlots, usedAuctionSlots, Set.of());
@@ -49,76 +46,73 @@ final class PortfolioAllocator {
         int auctionSlots = Math.max(0, 18 - usedAuctionSlots);
         int usefulItems = Math.max(1, Math.min(candidates.size(), Math.min(orderSlots, auctionSlots)));
         int maxBatchesPerItem = auctionSlots <= 0 ? 0 : Math.max(1, (auctionSlots + usefulItems - 1) / usefulItems);
-        Search search = new Search(candidates, deployable, orderSlots, auctionSlots,
-                maxBatchesPerItem, System.nanoTime() + SOLVER_BUDGET.toNanos());
-        search.run(0, 0, 0, 0, 0, new int[candidates.size()], new HashMap<>(), new HashMap<>());
+        Node best = optimize(candidates, deployable, orderSlots, auctionSlots, maxBatchesPerItem);
         List<Selection> selected = new ArrayList<>();
-        for (int index = 0; index < search.best.length; index++) {
-            if (search.best[index] > 0) selected.add(new Selection(candidates.get(index), search.best[index]));
+        for (int index = 0; index < best.counts().length; index++) {
+            if (best.counts()[index] > 0) selected.add(new Selection(candidates.get(index), best.counts()[index]));
         }
         return new Allocation(balance, deployable, reserveBps, orderSlots, auctionSlots,
-                search.bestScore, List.copyOf(selected), search.timedOut);
+                best.score(), List.copyOf(selected));
     }
 
-    private static final class Search {
-        private final List<CandidateFeedClient.Candidate> candidates;
-        private final long cashLimit;
-        private final int orderLimit;
-        private final int auctionLimit;
-        private final int maxBatchesPerItem;
-        private final long deadline;
-        private final int[] best;
-        private long bestScore;
-        private boolean timedOut;
-
-        private Search(List<CandidateFeedClient.Candidate> candidates, long cashLimit, int orderLimit,
-                       int auctionLimit, int maxBatchesPerItem, long deadline) {
-            this.candidates = candidates; this.cashLimit = cashLimit; this.orderLimit = orderLimit;
-            this.auctionLimit = auctionLimit; this.maxBatchesPerItem = maxBatchesPerItem;
-            this.deadline = deadline; this.best = new int[candidates.size()];
-        }
-
-        private void run(int index, long cash, int orders, int auctions, long score, int[] counts,
-                         Map<String, Long> exactExposure, Map<String, Long> baseExposure) {
-            if (System.nanoTime() >= deadline) { timedOut = true; return; }
-            if (score > bestScore) { bestScore = score; System.arraycopy(counts, 0, best, 0, counts.length); }
-            if (index >= candidates.size()) return;
-            long optimistic = score;
-            for (int rest = index; rest < candidates.size(); rest++) optimistic = safeAdd(optimistic,
-                    safeMultiply(candidates.get(rest).riskAdjustedProfitDay(), candidates.get(rest).executableBatches()));
-            if (optimistic <= bestScore) return;
+    /** Exact multiple-choice knapsack over the tiny Donut slot frontier. */
+    private static Node optimize(List<CandidateFeedClient.Candidate> candidates, long cashLimit,
+                                 int orderLimit, int auctionLimit, int maxBatchesPerItem) {
+        Map<Integer, List<Node>> frontier = new HashMap<>();
+        frontier.put(0, List.of(new Node(0, 0, 0, 0, new int[candidates.size()])));
+        long exactExposureCap = cashLimit / 4;
+        for (int index = 0; index < candidates.size(); index++) {
             CandidateFeedClient.Candidate candidate = candidates.get(index);
-            long exactCap = cashLimit / 4;
-            long baseCap = cashLimit * 2 / 5;
-            long exactUsed = exactExposure.getOrDefault(candidate.signature(), 0L);
-            String base = candidate.itemId();
-            long baseUsed = baseExposure.getOrDefault(base, 0L);
-            int maximum = candidate.executableBatches();
-            maximum = Math.min(maximum, maxBatchesPerItem);
-            if (candidate.acquisitionCost() > 0) maximum = Math.min(maximum, (int) Math.min(Integer.MAX_VALUE, (cashLimit - cash) / candidate.acquisitionCost()));
-            if (candidate.orderSlots() > 0 && orders + candidate.orderSlots() > orderLimit) maximum = 0;
-            if (candidate.auctionSlots() > 0) maximum = Math.min(maximum, (auctionLimit - auctions) / candidate.auctionSlots());
-            maximum = Math.min(maximum, (int) Math.max(0, (exactCap - exactUsed) / candidate.acquisitionCost()));
-            maximum = Math.min(maximum, (int) Math.max(0, (baseCap - baseUsed) / candidate.acquisitionCost()));
-            for (int count = maximum; count >= 0; count--) {
-                counts[index] = count;
-                long capital = safeMultiply(candidate.acquisitionCost(), count);
-                if (count > 0) {
-                    exactExposure.put(candidate.signature(), exactUsed + capital);
-                    baseExposure.put(base, baseUsed + capital);
-                }
-                run(index + 1, cash + capital, orders + (count > 0 ? candidate.orderSlots() : 0),
-                        auctions + candidate.auctionSlots() * count,
-                        safeAdd(score, safeMultiply(candidate.riskAdjustedProfitDay(), count)), counts,
-                        exactExposure, baseExposure);
-                if (count > 0) {
-                    if (exactUsed == 0) exactExposure.remove(candidate.signature()); else exactExposure.put(candidate.signature(), exactUsed);
-                    if (baseUsed == 0) baseExposure.remove(base); else baseExposure.put(base, baseUsed);
+            int maximum = Math.min(candidate.executableBatches(), maxBatchesPerItem);
+            if (candidate.auctionSlots() > 0) maximum = Math.min(maximum, auctionLimit / candidate.auctionSlots());
+            maximum = Math.min(maximum, candidate.acquisitionCost() <= 0 ? 0
+                    : (int) Math.min(Integer.MAX_VALUE, exactExposureCap / candidate.acquisitionCost()));
+            Map<Integer, List<Node>> expanded = new HashMap<>();
+            for (List<Node> nodes : frontier.values()) {
+                for (Node node : nodes) {
+                    for (int count = 0; count <= maximum; count++) {
+                        int orders = node.orders() + (count > 0 ? candidate.orderSlots() : 0);
+                        int auctions = node.auctions() + candidate.auctionSlots() * count;
+                        if (orders > orderLimit || auctions > auctionLimit) continue;
+                        long capital = safeMultiply(candidate.acquisitionCost(), count);
+                        long cash = safeAdd(node.cash(), capital);
+                        if (cash > cashLimit) continue;
+                        int[] counts = node.counts().clone();
+                        counts[index] = count;
+                        long score = safeAdd(node.score(), safeMultiply(candidate.riskAdjustedProfitDay(), count));
+                        int key = orders * (auctionLimit + 1) + auctions;
+                        expanded.computeIfAbsent(key, ignored -> new ArrayList<>())
+                                .add(new Node(cash, score, orders, auctions, counts));
+                    }
                 }
             }
-            counts[index] = 0;
+            frontier = prune(expanded);
         }
+        return frontier.values().stream().flatMap(List::stream)
+                .max(Comparator.comparingLong(Node::score)
+                        .thenComparing(Comparator.comparingLong(Node::cash).reversed()))
+                .orElseGet(() -> new Node(0, 0, 0, 0, new int[candidates.size()]));
     }
+
+    /** Remove states that cost at least as much and score no better at equal slot use. */
+    private static Map<Integer, List<Node>> prune(Map<Integer, List<Node>> values) {
+        Map<Integer, List<Node>> result = new HashMap<>(values.size());
+        for (Map.Entry<Integer, List<Node>> entry : values.entrySet()) {
+            List<Node> sorted = entry.getValue().stream().sorted(Comparator.comparingLong(Node::cash)
+                    .thenComparing(Comparator.comparingLong(Node::score).reversed())).toList();
+            List<Node> kept = new ArrayList<>();
+            long bestScore = -1;
+            for (Node node : sorted) {
+                if (node.score() <= bestScore) continue;
+                kept.add(node);
+                bestScore = node.score();
+            }
+            result.put(entry.getKey(), kept);
+        }
+        return result;
+    }
+
+    private record Node(long cash, long score, int orders, int auctions, int[] counts) {}
 
     private static long safeMultiply(long value, long multiplier) {
         if (value <= 0 || multiplier <= 0) return 0;

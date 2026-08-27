@@ -113,7 +113,7 @@ func (s *Store) migrate() error {
 		`CREATE TABLE IF NOT EXISTS order_price_samples (
 			signature TEXT NOT NULL,observer_id TEXT NOT NULL,session_id TEXT NOT NULL,
 			unit_reward_cents INTEGER NOT NULL,price_position INTEGER NOT NULL DEFAULT 0,
-			observed_ms INTEGER NOT NULL,
+			observed_ms INTEGER NOT NULL,focused INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY(signature,observer_id,session_id))`,
 		`CREATE INDEX IF NOT EXISTS order_price_samples_recent ON order_price_samples(observed_ms DESC)`,
 		`CREATE TABLE IF NOT EXISTS fill_events (
@@ -167,6 +167,9 @@ func (s *Store) migrate() error {
 	}
 	if _, err := s.db.Exec(`ALTER TABLE fill_events ADD COLUMN previous_observed_ms INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 		return fmt.Errorf("migrate fill observation interval: %w", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE order_price_samples ADD COLUMN focused INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return fmt.Errorf("migrate focused price sample marker: %w", err)
 	}
 	// A pseudo order key may repeat in the same slot on a different menu page.
 	// Demote any prior confirmation that cannot prove both observations came
@@ -240,9 +243,10 @@ func (s *Store) migrate() error {
 		return fmt.Errorf("count order price samples: %w", err)
 	}
 	if priceSampleCount == 0 {
-		if _, err := s.db.Exec(`INSERT OR IGNORE INTO order_price_samples(signature,observer_id,session_id,unit_reward_cents,price_position,observed_ms)
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO order_price_samples(signature,observer_id,session_id,unit_reward_cents,price_position,observed_ms,focused)
 			SELECT r.signature,r.observer_id,s.session_id,MAX(r.unit_reward_cents),
-			COALESCE(MIN(CASE WHEN r.price_position>0 THEN r.price_position END),0),MAX(r.observed_ms)
+			COALESCE(MIN(CASE WHEN r.price_position>0 THEN r.price_position END),0),MAX(r.observed_ms),
+			MAX(CASE WHEN COALESCE(t.kind,'')='focused_watch' AND t.signature=r.signature THEN 1 ELSE 0 END)
 			FROM order_rows r JOIN scans s ON s.id=r.scan_id LEFT JOIN tasks t ON t.id=s.task_id
 			WHERE r.unit_reward_cents>0 AND r.observed_ms>=?
 				AND (COALESCE(t.kind,'')<>'focused_watch' OR t.signature=r.signature)
@@ -518,14 +522,17 @@ func (s *Store) SaveScan(ctx context.Context, batch ScanBatch) (bool, error) {
 				WHERE signature=? AND observer_id=? AND session_id=?`, batch.ObservedAt.UnixMilli(), order.Signature, batch.ObserverID, batch.SessionID); err != nil {
 				return false, err
 			}
-			if _, err = tx.ExecContext(ctx, `INSERT INTO order_price_samples(signature,observer_id,session_id,unit_reward_cents,price_position,observed_ms)
-				VALUES(?,?,?,?,?,?) ON CONFLICT(signature,observer_id,session_id) DO UPDATE SET
-				unit_reward_cents=MAX(order_price_samples.unit_reward_cents,excluded.unit_reward_cents),
-				price_position=CASE WHEN order_price_samples.price_position<=0 THEN excluded.price_position
+			if _, err = tx.ExecContext(ctx, `INSERT INTO order_price_samples(signature,observer_id,session_id,unit_reward_cents,price_position,observed_ms,focused)
+				VALUES(?,?,?,?,?,?,?) ON CONFLICT(signature,observer_id,session_id) DO UPDATE SET
+				unit_reward_cents=CASE WHEN excluded.focused=1 AND excluded.observed_ms>=order_price_samples.observed_ms
+					THEN excluded.unit_reward_cents ELSE MAX(order_price_samples.unit_reward_cents,excluded.unit_reward_cents) END,
+				price_position=CASE WHEN excluded.focused=1 AND excluded.observed_ms>=order_price_samples.observed_ms THEN excluded.price_position
+					WHEN order_price_samples.price_position<=0 THEN excluded.price_position
 					WHEN excluded.price_position<=0 THEN order_price_samples.price_position
 					ELSE MIN(order_price_samples.price_position,excluded.price_position) END,
-				observed_ms=MAX(order_price_samples.observed_ms,excluded.observed_ms)`,
-				order.Signature, batch.ObserverID, batch.SessionID, summary.bestReward, summary.bestPosition, batch.ObservedAt.UnixMilli()); err != nil {
+				observed_ms=MAX(order_price_samples.observed_ms,excluded.observed_ms),focused=MAX(order_price_samples.focused,excluded.focused)`,
+				order.Signature, batch.ObserverID, batch.SessionID, summary.bestReward, summary.bestPosition, batch.ObservedAt.UnixMilli(),
+				boolInt(taskKind == "focused_watch" && taskSignature == order.Signature)); err != nil {
 				return false, err
 			}
 			_, err = tx.ExecContext(ctx, `INSERT INTO order_evidence_summary(signature,item_id,display_name,complete_scans,first_seen_ms,last_seen_ms,observed_quantity,max_stack_size,available_units)
@@ -808,19 +815,21 @@ func (s *Store) enrichEvidence(ctx context.Context, evidence []Evidence) error {
 	}
 
 	priceRows, err := s.db.QueryContext(ctx, `WITH samples AS (
-		SELECT signature,unit_reward_cents AS reward,price_position AS position,observer_id,observed_ms,
+		SELECT signature,unit_reward_cents AS reward,price_position AS position,observer_id,observed_ms,focused,
 		ROW_NUMBER() OVER (PARTITION BY signature ORDER BY observed_ms DESC) AS sample_rank
 		FROM order_price_samples WHERE unit_reward_cents>0 AND observed_ms>=?)
-		SELECT signature,reward,position,observer_id,observed_ms FROM samples WHERE sample_rank<=32`, recent)
+		SELECT signature,reward,position,observer_id,observed_ms,focused FROM samples WHERE sample_rank<=32`, recent)
 	if err != nil {
 		return err
 	}
 	latestPrices := make(map[string]observedPrice, len(evidence))
+	latestFocused := make(map[string]observedPrice, len(evidence))
 	for priceRows.Next() {
 		var signature, observer string
 		var price, observedMS int64
 		var position int
-		if err := priceRows.Scan(&signature, &price, &position, &observer, &observedMS); err != nil {
+		var focused bool
+		if err := priceRows.Scan(&signature, &price, &position, &observer, &observedMS, &focused); err != nil {
 			priceRows.Close()
 			return err
 		}
@@ -832,6 +841,10 @@ func (s *Store) enrichEvidence(ctx context.Context, evidence []Evidence) error {
 		latest := latestPrices[signature]
 		if observedMS > latest.observedMS || (observedMS == latest.observedMS && price > latest.reward) {
 			latestPrices[signature] = observedPrice{reward: price, observedMS: observedMS}
+		}
+		focusedPrice := latestFocused[signature]
+		if focused && (observedMS > focusedPrice.observedMS || (observedMS == focusedPrice.observedMS && price > focusedPrice.reward)) {
+			latestFocused[signature] = observedPrice{reward: price, observedMS: observedMS}
 		}
 		if _, exists := observerPrices[signature]; !exists {
 			observerPrices[signature] = map[string]observedPrice{}
@@ -851,6 +864,10 @@ func (s *Store) enrichEvidence(ctx context.Context, evidence []Evidence) error {
 		evidence[index].BestUnitRewardCents = latest.reward
 		if latest.observedMS > 0 {
 			evidence[index].LastSeenAt = time.UnixMilli(latest.observedMS).UTC()
+		}
+		if focusedPrice := latestFocused[evidence[index].Signature]; focusedPrice.observedMS > 0 {
+			evidence[index].FocusedSeenAt = time.UnixMilli(focusedPrice.observedMS).UTC()
+			evidence[index].FocusedUnitRewardCents = focusedPrice.reward
 		}
 		evidence[index].Stable = stablePrices(currentPrices)
 		if evidence[index].BestUnitRewardCents > 0 {

@@ -25,7 +25,7 @@ class CandidateFeedClientTest {
                   "conservative_profit":8000000,"margin_bps":10000,"completion_bps":8000,"expected_cycle_minutes":30,
                   "risk_adjusted_profit_day":307200000,"executable_batches":2,"queue_position":1,"order_slots":1,"auction_slots":1,
                   "inventory_slots":1,"profit_per_inventory_slot":8000000,"confidence_bps":9000,"order_tier":"actionable",
-                  "order_fresh_at":"2026-08-23T20:00:00Z","auction_fresh_at":"2026-08-23T20:00:00Z",
+                  "order_fresh_at":"2026-08-23T20:00:00Z","focused_fresh_at":"2026-08-23T20:00:00Z","auction_fresh_at":"2026-08-23T20:00:00Z",
                   "order_command":"/orders","auction_command":"/ah diamond_block"
                 }]}
                 """;
@@ -46,7 +46,7 @@ class CandidateFeedClientTest {
                   "conservative_profit":1,"margin_bps":1,"completion_bps":1,
                   "expected_cycle_minutes":1,"risk_adjusted_profit_day":1,"executable_batches":1,"queue_position":1,"order_slots":1,
                   "auction_slots":1,"inventory_slots":1,"profit_per_inventory_slot":1,"confidence_bps":1,"order_tier":"actionable",
-                  "order_fresh_at":"2026-08-23T20:00:00Z","auction_fresh_at":"2026-08-23T20:00:00Z",
+                  "order_fresh_at":"2026-08-23T20:00:00Z","focused_fresh_at":"2026-08-23T20:00:00Z","auction_fresh_at":"2026-08-23T20:00:00Z",
                   "order_command":"/orders buy diamond","auction_command":"/ah diamond"}]}
                 """;
         assertThrows(IllegalArgumentException.class, () -> CandidateFeedClient.decode(json.getBytes(StandardCharsets.UTF_8)));

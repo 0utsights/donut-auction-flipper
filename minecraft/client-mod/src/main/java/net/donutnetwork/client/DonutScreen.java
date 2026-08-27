@@ -68,9 +68,9 @@ final class DonutScreen extends Screen {
             addDrawableChild(ButtonWidget.builder(Text.literal("STOP ORDER"), button -> { orderExecutor.cancel(client, "cancelled by player"); clearAndInit(); })
                     .dimensions(left + 296, top + 300, 144, 20).build());
         } else addDrawableChild(ButtonWidget.builder(Text.literal("Close"), button -> close()).dimensions(left + 296, top + 300, 144, 20).build());
-        addDrawableChild(ButtonWidget.builder(Text.literal("Recheck tracked orders (" + candidates.activeOrderCount() + ")"), button -> {
+        addDrawableChild(ButtonWidget.builder(Text.literal("Reset order cache (" + candidates.activeOrderCount() + ")"), button -> {
                     candidates.recheckTrackedOrders(); clearAndInit();
-                }).tooltip(Tooltip.of(Text.literal("Clears local locks only. Before creating, Fabric still opens Your Orders and blocks any existing item.")))
+                }).tooltip(Tooltip.of(Text.literal("Clears local locks only; each next arm opens Your Orders and verifies the exact item before creating.")))
                 .dimensions(left + 220, top + 324, 220, 20).build());
         renderedKey = feedKey();
     }

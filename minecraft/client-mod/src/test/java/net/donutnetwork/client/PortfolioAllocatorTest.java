@@ -52,7 +52,7 @@ class PortfolioAllocatorTest {
                 strongest.expectedProceeds(), strongest.orderUnitRewardCents(), strongest.targetListPrice(), 70_000, strongest.marginBps(),
                 strongest.completionBps(), strongest.expectedCycleMinutes(), 70_000, 1, strongest.queuePosition(), strongest.orderSlots(),
                 strongest.auctionSlots(), strongest.inventorySlots(), strongest.profitInventorySlot(), strongest.confidenceBps(), strongest.orderTier(),
-                strongest.orderFreshAt(), strongest.auctionFreshAt(), strongest.orderCommand(), strongest.auctionCommand());
+                strongest.orderFreshAt(), strongest.focusedFreshAt(), strongest.auctionFreshAt(), strongest.orderCommand(), strongest.auctionCommand());
         PortfolioAllocator.Allocation allocation = new PortfolioAllocator().allocate(List.of(duplicate, strongest), 10_000_000, 0, 0);
         assertEquals(1, allocation.selections().size());
         assertEquals("same", allocation.selections().getFirst().candidate().id());
@@ -75,11 +75,30 @@ class PortfolioAllocatorTest {
         assertTrue(allocation.selections().stream().allMatch(selection -> selection.batches() == 1));
     }
 
+    @Test void broadFrontierCompletesWithinItsDeterministicBudget() {
+        List<CandidateFeedClient.Candidate> candidates = new ArrayList<>();
+        for (int index = 0; index < 30; index++) {
+            candidates.add(candidate("frontier_" + index, 20_000 + index * 1_000L, 100_000 - index * 317L, 1, 1, 18));
+        }
+        PortfolioAllocator.Allocation allocation = new PortfolioAllocator().allocate(candidates, 10_000_000, 0, 0);
+        assertEquals(18, allocation.selections().stream().mapToInt(PortfolioAllocator.Selection::batches).sum());
+    }
+
+    @Test void optimizerChoosesTheHigherCombinedScoreUnderCashPressure() {
+        List<CandidateFeedClient.Candidate> candidates = new ArrayList<>();
+        candidates.add(candidate("expensive", 150_000, 100_000, 1, 1, 1));
+        for (int index = 0; index < 6; index++) candidates.add(candidate("cheap_" + index, 100_000, 70_000, 1, 1, 1));
+        PortfolioAllocator.Allocation allocation = new PortfolioAllocator().allocate(candidates, 800_000, 0, 0);
+        assertEquals(450_000, allocation.riskAdjustedProfitDay());
+        assertEquals(6, allocation.selections().size());
+        assertTrue(allocation.selections().stream().anyMatch(selection -> selection.candidate().id().equals("expensive")));
+    }
+
     private static CandidateFeedClient.Candidate candidate(String id, long cost, long score, int orderSlots, int auctionSlots, int batches) {
         return new CandidateFeedClient.Candidate(id, "ORDER_TO_AUCTION", "READY", "", "minecraft:" + id,
                 "minecraft:" + id, id, 64, 64, cost, cost + score, Math.max(1, cost * 100 / 64), cost + score,
                 score, 1000, 9000, 30,
-                score, batches, 1, orderSlots, auctionSlots, 1, score, 9000, "actionable", Instant.now(), Instant.now(),
+                score, batches, 1, orderSlots, auctionSlots, 1, score, 9000, "actionable", Instant.now(), Instant.now(), Instant.now(),
                 "/orders", "/ah " + id);
     }
 
@@ -90,6 +109,6 @@ class PortfolioAllocatorTest {
                 value.conservativeProfit(), value.marginBps(), value.completionBps(), value.expectedCycleMinutes(),
                 value.riskAdjustedProfitDay(), value.executableBatches(), value.queuePosition(), value.orderSlots(), value.auctionSlots(),
                 value.inventorySlots(), value.profitInventorySlot(), value.confidenceBps(), value.orderTier(), value.orderFreshAt(),
-                value.auctionFreshAt(), value.orderCommand(), value.auctionCommand());
+                value.focusedFreshAt(), value.auctionFreshAt(), value.orderCommand(), value.auctionCommand());
     }
 }

@@ -109,25 +109,27 @@ type Diagnostic struct {
 }
 
 type Evidence struct {
-	Signature           string    `json:"signature"`
-	ItemID              string    `json:"item_id"`
-	DisplayName         string    `json:"display_name"`
-	Tier                string    `json:"tier"`
-	CompleteScans       int       `json:"complete_scans"`
-	FillEvents          int       `json:"fill_events"`
-	DistinctOrders      int       `json:"distinct_orders"`
-	FilledUnits24h      int64     `json:"filled_units_24h"`
-	AvailableUnits      int64     `json:"available_units"`
-	BestUnitRewardCents int64     `json:"best_unit_reward_cents"`
-	BestPricePosition   int       `json:"best_price_position"`
-	ObservedQuantity    int       `json:"observed_quantity"`
-	MaxStackSize        int       `json:"max_stack_size"`
-	FirstSeenAt         time.Time `json:"first_seen_at"`
-	LastSeenAt          time.Time `json:"last_seen_at"`
-	Stable              bool      `json:"stable"`
-	Conflict            bool      `json:"conflict"`
-	SignatureComplete   bool      `json:"signature_complete"`
-	Reason              string    `json:"reason,omitempty"`
+	Signature              string    `json:"signature"`
+	ItemID                 string    `json:"item_id"`
+	DisplayName            string    `json:"display_name"`
+	Tier                   string    `json:"tier"`
+	CompleteScans          int       `json:"complete_scans"`
+	FillEvents             int       `json:"fill_events"`
+	DistinctOrders         int       `json:"distinct_orders"`
+	FilledUnits24h         int64     `json:"filled_units_24h"`
+	AvailableUnits         int64     `json:"available_units"`
+	BestUnitRewardCents    int64     `json:"best_unit_reward_cents"`
+	BestPricePosition      int       `json:"best_price_position"`
+	ObservedQuantity       int       `json:"observed_quantity"`
+	MaxStackSize           int       `json:"max_stack_size"`
+	FirstSeenAt            time.Time `json:"first_seen_at"`
+	LastSeenAt             time.Time `json:"last_seen_at"`
+	FocusedSeenAt          time.Time `json:"focused_seen_at"`
+	FocusedUnitRewardCents int64     `json:"focused_unit_reward_cents"`
+	Stable                 bool      `json:"stable"`
+	Conflict               bool      `json:"conflict"`
+	SignatureComplete      bool      `json:"signature_complete"`
+	Reason                 string    `json:"reason,omitempty"`
 }
 
 type Candidate struct {
@@ -170,7 +172,9 @@ type Candidate struct {
 	RiskFlags             []string  `json:"risk_flags,omitempty"`
 	OrderTier             string    `json:"order_tier"`
 	SignatureComplete     bool      `json:"signature_complete"`
+	ResearchFreshAt       time.Time `json:"research_fresh_at"`
 	OrderFreshAt          time.Time `json:"order_fresh_at"`
+	FocusedFreshAt        time.Time `json:"focused_fresh_at"`
 	AuctionFreshAt        time.Time `json:"auction_fresh_at"`
 	OrderCommand          string    `json:"order_command"`
 	AuctionCommand        string    `json:"auction_command"`

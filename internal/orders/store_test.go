@@ -345,6 +345,36 @@ func TestAutomaticResearchWaitsForDiscoveryBreadthFloor(t *testing.T) {
 	}
 }
 
+func TestAutomaticResearchDoesNotWatchAuctionOnlyDeficiency(t *testing.T) {
+	system, err := NewSystem(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	value := Candidate{Route: "ORDER_TO_AUCTION", State: "RESEARCH", OrderTier: "actionable",
+		Signature: "minecraft:breeze_rod", SignatureComplete: true, PriorityRank: 1, PriorityScore: 100,
+		TargetListPrice: 10_000, ConservativeProfit: 1_000}
+	system.candidates.Store(&CandidateFeed{Candidates: []Candidate{value}})
+	if err := system.queueAutomaticResearch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := system.store.db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE kind='focused_watch'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("auction-only confidence deficiency consumed Mineflayer focused-watch time")
+	}
+	value.OrderTier = "research"
+	system.candidates.Store(&CandidateFeed{Candidates: []Candidate{value}})
+	if err := system.queueAutomaticResearch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := system.store.db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE kind='focused_watch'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("order-evidence deficiency did not queue focused research: count=%d err=%v", count, err)
+	}
+}
+
 func TestLegacyDollarRewardsAreQuarantinedFromCentEvidence(t *testing.T) {
 	system, err := NewSystem(Config{})
 	if err != nil {
@@ -705,6 +735,42 @@ func TestPriceStabilityUsesTopOfBookPerSessionNotPaginationDepth(t *testing.T) {
 	}
 }
 
+func TestFocusedSampleTracksLatestPriceInsteadOfSessionMaximum(t *testing.T) {
+	system, err := NewSystem(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	ctx := context.Background()
+	_, _ = system.Register(ctx, ObserverRegistration{ObserverID: "one", ParserVersion: "p1", ProxyLabel: "proxy"})
+	if _, err := system.AddWatch(ctx, "minecraft:diamond"); err != nil {
+		t.Fatal(err)
+	}
+	task, err := system.LeaseTask(ctx, "one")
+	if err != nil || task == nil || task.Kind != "focused_watch" {
+		t.Fatalf("focused task=%+v err=%v", task, err)
+	}
+	now := time.Now().UTC()
+	for index, reward := range []int64{100, 80} {
+		value := order("same", 100)
+		value.UnitRewardCents = reward
+		batch := scan("one", task.ID, "one-focused-session", 1, now.Add(time.Duration(index)*time.Second), value)
+		batch.LeaseToken = task.LeaseToken
+		batch.ContentHash = fmt.Sprintf("%064x", 9_000+index)
+		if _, err := system.SaveScan(ctx, batch); err != nil {
+			t.Fatal(err)
+		}
+	}
+	evidence, err := system.store.Evidence(ctx)
+	if err != nil || len(evidence) != 1 {
+		t.Fatalf("evidence=%+v err=%v", evidence, err)
+	}
+	if evidence[0].BestUnitRewardCents != 80 || evidence[0].FocusedUnitRewardCents != 80 ||
+		!evidence[0].FocusedSeenAt.Equal(now.Add(time.Second).Truncate(time.Millisecond)) {
+		t.Fatalf("focused session retained a stale peak price: %+v", evidence[0])
+	}
+}
+
 func TestFillInferenceRequiresObservedQuantityDecrease(t *testing.T) {
 	system, err := NewSystem(Config{})
 	if err != nil {
@@ -745,6 +811,9 @@ func TestFillInferenceRequiresObservedQuantityDecrease(t *testing.T) {
 	}
 	if evidence[0].FillEvents != 6 || evidence[0].DistinctOrders != 3 || evidence[0].Tier != "actionable" {
 		t.Fatalf("expected actionable fill evidence, got %+v", evidence[0])
+	}
+	if evidence[0].FocusedSeenAt.IsZero() || !evidence[0].FocusedSeenAt.Equal(base.Add(observedAt[5]).Truncate(time.Millisecond)) {
+		t.Fatalf("focused freshness was not recorded independently: %+v", evidence[0])
 	}
 	var confirmed, quarantined int
 	if err := system.store.db.QueryRow(`SELECT SUM(CASE WHEN confirmation_level>=2 THEN 1 ELSE 0 END),SUM(CASE WHEN confirmation_level<2 THEN 1 ELSE 0 END) FROM fill_events`).Scan(&confirmed, &quarantined); err != nil || confirmed != 6 || quarantined != 5 {
@@ -822,6 +891,9 @@ func TestDiscoveryScanCannotConfirmFill(t *testing.T) {
 	evidence, err := system.store.Evidence(ctx)
 	if err != nil || len(evidence) != 1 || evidence[0].FillEvents != 0 {
 		t.Fatalf("discovery reduction became trusted evidence: evidence=%+v err=%v", evidence, err)
+	}
+	if !evidence[0].FocusedSeenAt.IsZero() {
+		t.Fatalf("discovery page was mislabeled as focused freshness: %+v", evidence[0])
 	}
 }
 
@@ -982,6 +1054,26 @@ func TestCandidateOrderObservationTrustWindow(t *testing.T) {
 	for _, value := range values {
 		if value.State != "STALE" {
 			t.Fatalf("expired order observation remained actionable: %+v", value)
+		}
+	}
+}
+
+func TestCandidateUsesCurrentFocusedRewardForExecutionEconomics(t *testing.T) {
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	evidence := Evidence{Signature: "minecraft:diamond_block", ItemID: "minecraft:diamond_block", DisplayName: "Diamond Block",
+		Tier: "actionable", CompleteScans: 10, FillEvents: 8, DistinctOrders: 3, FilledUnits24h: 640, AvailableUnits: 640,
+		BestUnitRewardCents: 400_000, FocusedUnitRewardCents: 350_000, FocusedSeenAt: now, BestPricePosition: 1,
+		ObservedQuantity: 64, MaxStackSize: 64, LastSeenAt: now, Stable: true, SignatureComplete: true}
+	valuation := market.Valuation{Signature: evidence.Signature, QuickSellValue: 5_000, QuantityQuickSell: 5_000,
+		PricingQuantity: 64, Volume24h: 640, PriceSellerCount: 4, ConfidenceBPS: 9_000,
+		ExpectedSellMinutes: 30, ActiveBestAsk: 3_000, ActiveDepth: 20, GeneratedAt: now}
+	values := buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now)
+	if len(values) != 2 {
+		t.Fatalf("focused economics produced no routes: %+v", values)
+	}
+	for _, value := range values {
+		if value.OrderUnitRewardCents != 350_000+map[bool]int64{true: 1, false: 0}[value.Route == "ORDER_TO_AUCTION"] {
+			t.Fatalf("route retained stale discovery reward: %+v", value)
 		}
 	}
 }

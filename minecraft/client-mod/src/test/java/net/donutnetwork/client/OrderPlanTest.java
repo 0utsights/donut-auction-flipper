@@ -68,7 +68,7 @@ class OrderPlanTest {
                 value.itemName(), value.quantity(), value.maxStackSize(), value.acquisitionCost(), value.expectedProceeds(), value.orderUnitRewardCents(),
                 value.targetListPrice(), value.conservativeProfit(), value.marginBps(), value.completionBps(), value.expectedCycleMinutes(),
                 value.riskAdjustedProfitDay(), value.executableBatches(), value.queuePosition(), value.orderSlots(), value.auctionSlots(),
-                value.inventorySlots(), value.profitInventorySlot(), value.confidenceBps(), value.orderTier(), value.orderFreshAt(), value.auctionFreshAt(),
+                value.inventorySlots(), value.profitInventorySlot(), value.confidenceBps(), value.orderTier(), value.orderFreshAt(), value.focusedFreshAt(), value.auctionFreshAt(),
                 value.orderCommand(), value.auctionCommand());
         CandidateFeedClient.Candidate wrongRoute = value;
         assertThrows(IllegalArgumentException.class, () -> OrderPlan.from(wrongRoute));
@@ -79,7 +79,7 @@ class OrderPlanTest {
         return new CandidateFeedClient.Candidate("candidate", "ORDER_TO_AUCTION", "READY", "", "minecraft:diamond_block",
                 "minecraft:diamond_block", "Diamond Block", quantity, 64, cost, cost + 100_000, unitCents, cost + 120_000,
                 80_000, 2_000, 8_000, 30, 100_000, 1, 1, 1, 1, 1, 80_000,
-                9_000, "actionable", now, now, "/orders", "/ah diamond_block");
+                9_000, "actionable", now, now, now, "/orders", "/ah diamond_block");
     }
 
     private static CandidateFeedClient.Candidate withExecutableBatches(CandidateFeedClient.Candidate value, int batches) {
@@ -87,6 +87,6 @@ class OrderPlanTest {
                 value.itemName(), value.quantity(), value.maxStackSize(), value.acquisitionCost(), value.expectedProceeds(), value.orderUnitRewardCents(),
                 value.targetListPrice(), value.conservativeProfit(), value.marginBps(), value.completionBps(), value.expectedCycleMinutes(),
                 value.riskAdjustedProfitDay(), batches, value.queuePosition(), value.orderSlots(), value.auctionSlots(), value.inventorySlots(),
-                value.profitInventorySlot(), value.confidenceBps(), value.orderTier(), value.orderFreshAt(), value.auctionFreshAt(), value.orderCommand(), value.auctionCommand());
+                value.profitInventorySlot(), value.confidenceBps(), value.orderTier(), value.orderFreshAt(), value.focusedFreshAt(), value.auctionFreshAt(), value.orderCommand(), value.auctionCommand());
     }
 }
