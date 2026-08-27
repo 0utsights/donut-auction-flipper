@@ -206,6 +206,8 @@ Stack capacity is an upper bound, not a mandatory listing size. For each order i
 
 The second-PC collector is health-gated on the backend's real `/healthz` readiness response. It does not begin a Minecraft login while the API key is missing, startup valuation is incomplete, or the backend is otherwise unavailable. This avoids needless account reconnects during normal deployments.
 
+Once connected to Minecraft, a temporary backend outage is a control-plane failure, not a reason to discard the authenticated game session. Task polling backs off from one to thirty seconds, re-registers when possible, and resumes on the existing Mineflayer connection. Transactional actions remain impossible and an interrupted task lease expires safely on the backend.
+
 ## Assumptions made without operator input
 
 - The official API retains its bearer-authenticated listing and transaction endpoints and 250 requests/minute published limit.

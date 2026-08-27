@@ -9,7 +9,7 @@ import { EgressMismatchError, minecraftConnect, proxyAgent, verifyEgress } from 
 import { redactSensitiveText } from './redaction.js'
 import { SafeNavigator, type WindowView } from './safe-navigation.js'
 import { loadSchemas } from './schemas.js'
-import { taskResultForFailure, type TaskFailureClass } from './task-policy.js'
+import { backendRetryDelay, taskResultForFailure, type TaskFailureClass } from './task-policy.js'
 import { PARSER_VERSION, SCHEMA_VERSION, type ItemView, type MenuSchema, type ObserverTask, type RuntimeConfig, type ScanBatch } from './types.js'
 import { beginServerWindowUpdate, WindowClosedError, type WindowUpdateSource } from './window-update.js'
 
@@ -58,9 +58,29 @@ class ObserverRuntime {
     await this.backend.register(this.config.account.proxyLabel)
     this.log('backend_registered')
     this.heartbeat = setInterval(() => { const task = this.activeTask; void this.backend.heartbeat(this.bot?.player ? (task ? 'scanning' : 'online') : 'connecting', task?.id ?? '', task?.lease_token ?? '', this.activePage, this.bot?.player?.ping ?? 0, this.reconnects).catch(this.report) }, 5_000)
+    let backendFailures = 0
     while (!this.stopping) {
       const controller = new AbortController()
-      const task = await this.backend.nextTask(controller.signal)
+      let task: ObserverTask | undefined
+      try {
+        task = await this.backend.nextTask(controller.signal)
+        if (backendFailures > 0) this.log('backend_restored', `attempts=${backendFailures}`)
+        backendFailures = 0
+      } catch (error) {
+        backendFailures++
+        const delay = backendRetryDelay(backendFailures)
+        this.log('backend_unavailable', `retry_ms=${delay} reason=${safeMessage(error)}`)
+        await sleep(delay)
+        // Backend availability has no bearing on the read-only Minecraft
+        // transport. Keep the authenticated game session alive and re-register
+        // the observer after the control plane returns.
+        try {
+          await this.backend.register(this.config.account.proxyLabel)
+        } catch (registerError) {
+          this.log('backend_register_retry_failed', `reason=${safeMessage(registerError)}`)
+        }
+        continue
+      }
       if (!task) continue
       if (!this.connected) await this.reconnect()
       this.activeTask = task
