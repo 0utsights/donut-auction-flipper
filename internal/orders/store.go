@@ -292,12 +292,27 @@ func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) Register(ctx context.Context, registration ObserverRegistration) (Observer, error) {
 	now := s.now()
+	var previousParser string
+	lookupErr := s.db.QueryRowContext(ctx, `SELECT parser_version FROM observers WHERE observer_id=?`, registration.ObserverID).Scan(&previousParser)
+	if lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) {
+		return Observer{}, lookupErr
+	}
+	parserChanged := errors.Is(lookupErr, sql.ErrNoRows) || previousParser != registration.ParserVersion
 	_, err := s.db.ExecContext(ctx, `INSERT INTO observers(observer_id,parser_version,proxy_label,state,last_seen_ms)
 		VALUES(?,?,?,'registered',?) ON CONFLICT(observer_id) DO UPDATE SET
 		parser_version=excluded.parser_version,proxy_label=excluded.proxy_label,state='registered',last_seen_ms=excluded.last_seen_ms`,
 		registration.ObserverID, registration.ParserVersion, registration.ProxyLabel, now.UnixMilli())
 	if err != nil {
 		return Observer{}, err
+	}
+	if parserChanged {
+		// Old rows stop proving signature completeness as soon as the registered
+		// parser changes. Clear only completed automatic cooldown timestamps so the
+		// new parser can rebuild the frontier immediately without disturbing live
+		// leases or player-requested watches.
+		if _, err = s.db.ExecContext(ctx, `UPDATE tasks SET updated_ms=0 WHERE automatic=1 AND state='completed'`); err != nil {
+			return Observer{}, err
+		}
 	}
 	var count int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE kind='discovery' AND assigned_observer=? AND state IN ('ready','leased')`, registration.ObserverID).Scan(&count); err != nil {

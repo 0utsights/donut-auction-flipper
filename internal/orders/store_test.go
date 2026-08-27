@@ -1402,6 +1402,31 @@ func TestExplorationCooldownIsLongerThanCoreRecheck(t *testing.T) {
 	}
 }
 
+func TestParserRolloutClearsCompletedAutomaticCooldowns(t *testing.T) {
+	system, err := NewSystem(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	ctx := context.Background()
+	registration := ObserverRegistration{ObserverID: "observer", ParserVersion: "p1", ProxyLabel: "proxy"}
+	if _, err = system.Register(ctx, registration); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = system.store.db.Exec(`INSERT INTO tasks(id,kind,signature,priority,desired_freshness_ms,parser_schema,state,automatic,created_ms,updated_ms)
+		VALUES('old-auto','focused_watch','minecraft:blue_ice',50,1000,?,'completed',1,100,100)`, SchemaVersion); err != nil {
+		t.Fatal(err)
+	}
+	registration.ParserVersion = "p2"
+	if _, err = system.Register(ctx, registration); err != nil {
+		t.Fatal(err)
+	}
+	var updated int64
+	if err = system.store.db.QueryRow(`SELECT updated_ms FROM tasks WHERE id='old-auto'`).Scan(&updated); err != nil || updated != 0 {
+		t.Fatalf("automatic cooldown timestamp=%d err=%v", updated, err)
+	}
+}
+
 func TestBuildCandidatesUsesAPIProvenExitQuantityBelowStackLimit(t *testing.T) {
 	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
 	evidence := Evidence{ItemID: "minecraft:netherite_ingot", Signature: "minecraft:netherite_ingot", DisplayName: "Netherite Ingot",

@@ -1,5 +1,5 @@
 export const SCHEMA_VERSION = 'orders-v1'
-export const PARSER_VERSION = 'mineflayer-orders-1.7.1'
+export const PARSER_VERSION = 'mineflayer-orders-1.8.0'
 
 export interface AccountConfig {
   id: string
