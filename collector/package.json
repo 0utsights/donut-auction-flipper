@@ -13,8 +13,8 @@
     "test": "npm run build && node --test dist/**/*.test.js"
   },
   "dependencies": {
-    "minecraft-protocol": "1.67.0",
-    "mineflayer": "4.37.1",
+    "minecraft-protocol": "1.68.0",
+    "mineflayer": "4.38.0",
     "node-fetch": "^3.3.2",
     "prismarine-nbt": "2.8.0",
     "proxy-agent": "8.0.2",

@@ -54,6 +54,7 @@ Last updated: 2026-08-27
 20. Replaced the clipped expanded mod screen with a 440×240 barebones order console. Four-row pagination exposes all 20 planned offers while detailed tooltips and the arm screen explain bulk quantity, escrow, sequential exits, model quality, and duplicate behavior.
 21. Hardened the final live deployment against official-API rolling-window collisions: request pacing is configurable with a conservative default, `Retry-After` is bounded and honored, and a 429 pauses the shared fast/broad limiter rather than launching ineffective independent retries.
 22. Reframed the portfolio around the real 20-slot objective: strict CORE positions still scale from measured fills, while stable profitable plain commodities with two-seller exact-stack exits may occupy one replaceable FILLER slot. Removed automatic twenty-watch fan-out, broadened the audited plain-building-commodity set, and extended repeated collector login backoff to five minutes so Donut sequence cooldowns can clear.
+23. Updated the pinned collector runtime to Mineflayer 4.38.0 and minecraft-protocol 1.68.0 after live deployment isolated a post-spawn `Invalid sequence` rejection. The upstream release adds the required 1.21.4+ `player_loaded` acknowledgement; all 28 collector tests and the dependency audit pass before live redeployment.
 
 A fresh post-deployment pass found no further code-only improvement that outweighed the risk of weakening conservative evidence gates or inventing button/server-outcome behavior without another real fixture.
 

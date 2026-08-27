@@ -184,6 +184,8 @@ Candidate alerts do not create focused watches for the entire portfolio. Focused
 
 Repeated Mineflayer login failures back off exponentially to five minutes rather than retrying forever at one-minute intervals, allowing Donut's `Invalid sequence` session cooldown to expire. Normal transient failures still retry in seconds, and a runtime stable for five minutes resets the failure streak. This supersedes the earlier one-minute maximum reconnect paragraph.
 
+Mineflayer is pinned to 4.38.0 with minecraft-protocol 1.68.0. This release sends the 1.21.4+ `player_loaded` acknowledgement immediately after spawn; the previous 4.37.1 runtime could reach Donut's transferred server and then be rejected with `Invalid sequence`. Protocol dependencies remain exact-pinned and upgrades require the collector test suite plus a live observation-only login check.
+
 ## Assumptions made without operator input
 
 - The official API retains its bearer-authenticated listing and transaction endpoints and 250 requests/minute published limit.
