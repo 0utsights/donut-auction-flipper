@@ -75,3 +75,27 @@ func TestRejectsTrailingJSON(t *testing.T) {
 		t.Fatal("trailing JSON was accepted")
 	}
 }
+
+func TestRetryAfterParsing(t *testing.T) {
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	if got := retryAfter("17", now); got != 17*time.Second {
+		t.Fatalf("seconds retry-after=%s", got)
+	}
+	if got := retryAfter(now.Add(29*time.Second).Format(http.TimeFormat), now); got != 29*time.Second {
+		t.Fatalf("date retry-after=%s", got)
+	}
+	if got := retryAfter("nonsense", now); got != 0 {
+		t.Fatalf("invalid retry-after=%s", got)
+	}
+}
+
+func TestRateLimitCooldownIsShared(t *testing.T) {
+	client := New(Config{RequestsPerMinute: 225})
+	client.deferRequests(2 * time.Second)
+	client.mu.Lock()
+	remaining := time.Until(client.nextRequest)
+	client.mu.Unlock()
+	if remaining < 1500*time.Millisecond || remaining > 2500*time.Millisecond {
+		t.Fatalf("shared cooldown=%s", remaining)
+	}
+}

@@ -53,6 +53,10 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	requestsPerMinute, err := envInt("DN_REQUESTS_PER_MINUTE", 225, 30, 245)
+	if err != nil {
+		return err
+	}
 	thresholds := market.Thresholds{}
 	if thresholds.MinProfit, err = envInt64("DN_MIN_PROFIT", 100_000, 1, 9_000_000_000_000_000_000); err != nil {
 		return err
@@ -80,7 +84,7 @@ func run(logger *slog.Logger) error {
 
 	upstream := donutapi.New(donutapi.Config{
 		BaseURL: env("DONUT_API_BASE", "https://api.donutsmp.net"), APIKey: apiKey,
-		RequestsPerMinute: 240, MaxRetries: 4, Timeout: 10 * time.Second,
+		RequestsPerMinute: requestsPerMinute, MaxRetries: 4, Timeout: 10 * time.Second,
 	})
 	history := state.NewFile(env("DN_HISTORY_FILE", "data/history.json.gz"), 31*24*time.Hour, 100_000)
 	application, err := service.New(service.Config{

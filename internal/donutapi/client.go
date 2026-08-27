@@ -230,6 +230,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 			c.recordSuccess()
 			return nil
 		}
+		var rateLimitDelay time.Duration
 		if err == nil {
 			snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 			resp.Body.Close()
@@ -240,10 +241,24 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 			if resp.StatusCode != 429 && resp.StatusCode < 500 {
 				return last
 			}
+			if resp.StatusCode == http.StatusTooManyRequests {
+				// A key can be shared with another process during a deployment or
+				// its upstream rolling window can differ slightly from ours. Apply
+				// one client-wide cooldown so the fast and broad lanes recover
+				// together instead of racing through short, ineffective retries.
+				rateLimitDelay = retryAfter(resp.Header.Get("Retry-After"), time.Now())
+				if rateLimitDelay <= 0 {
+					rateLimitDelay = time.Duration(attempt+1) * 15 * time.Second
+				}
+				c.deferRequests(rateLimitDelay)
+			}
 		} else {
 			last = err
 		}
 		if attempt < c.cfg.MaxRetries {
+			if rateLimitDelay > 0 {
+				continue
+			}
 			delay := time.Duration(1<<attempt) * 100 * time.Millisecond
 			select {
 			case <-ctx.Done():
@@ -253,6 +268,40 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 		}
 	}
 	return last
+}
+
+func retryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds > 0 && seconds <= 300 {
+			return time.Duration(seconds) * time.Second
+		}
+		return 0
+	}
+	when, err := http.ParseTime(value)
+	if err != nil || !when.After(now) {
+		return 0
+	}
+	delay := when.Sub(now)
+	if delay > 5*time.Minute {
+		return 5 * time.Minute
+	}
+	return delay
+}
+
+func (c *Client) deferRequests(delay time.Duration) {
+	if delay <= 0 {
+		return
+	}
+	c.mu.Lock()
+	deferredUntil := time.Now().Add(delay)
+	if deferredUntil.After(c.nextRequest) {
+		c.nextRequest = deferredUntil
+	}
+	c.mu.Unlock()
 }
 
 func (c *Client) Stats() Stats {

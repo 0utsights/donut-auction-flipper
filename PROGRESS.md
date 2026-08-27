@@ -20,7 +20,7 @@ Last updated: 2026-08-27
 - Fabric diagnostics are allowlisted, batched, rate-limited, retained for 14 days, enabled with a visible opt-out, and exclude personal/secret market context.
 - Compose runs backend, collector manager, persistent data, and Caddy HTTPS termination. Loopback HTTP remains the development path.
 - The second-PC overlay bounds backend and collector CPU, memory, and process counts, uses read-only container filesystems with explicit writable mounts/tmpfs, prevents privilege escalation, and rotates container logs. The backend receives a bounded 512 MiB temporary filesystem because SQLite's initial evidence-session backfill can exceed a small default temp area; its total memory ceiling is 1.5 GiB.
-- The constrained second-PC profile polls the official newest auction page every 500ms, retains raw order observations for 24 hours, batches retention work, and keeps one automatic SQLite backup per UTC day for seven days. Live pruning reduced duplicate backup storage from 5.5 GiB to about 1.0 GiB while preserving the manually named safety copy.
+- The constrained second-PC profile polls the official newest auction page every 500ms within a shared 225-request/minute budget, retains raw order observations for 24 hours, batches retention work, and keeps one automatic SQLite backup per UTC day for seven days. A server-directed or conservative client-wide cooldown now recovers both auction lanes from 429 responses without retry churn. Live pruning reduced duplicate backup storage from 5.5 GiB to about 1.0 GiB while preserving the manually named safety copy.
 
 ## Verified locally
 
@@ -52,6 +52,7 @@ Last updated: 2026-08-27
 18. Added permanent compact item profiles and an expedited revalidation lane. A senior pass replaced the initial 90-day regrouping query with incremental profile/order aggregates so 750ms candidate refreshes remain bounded as data grows.
 19. Reworked Fabric allocation to maximize distinct safe offers before bulk sizing, added deterministic randomized invariant coverage, and enforced strict route-slot and exact-max-stack semantics on every decoded candidate.
 20. Replaced the clipped expanded mod screen with a 440×240 barebones order console. Four-row pagination exposes all 20 planned offers while detailed tooltips and the arm screen explain bulk quantity, escrow, sequential exits, model quality, and duplicate behavior.
+21. Hardened the final live deployment against official-API rolling-window collisions: request pacing is configurable with a conservative default, `Retry-After` is bounded and honored, and a 429 pauses the shared fast/broad limiter rather than launching ineffective independent retries.
 
 A fresh post-deployment pass found no further code-only improvement that outweighed the risk of weakening conservative evidence gates or inventing button/server-outcome behavior without another real fixture.
 
