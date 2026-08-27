@@ -33,10 +33,10 @@ final class DonutScreen extends Screen {
         addDrawableChild(ButtonWidget.builder(Text.literal("Balance +$1m"), button -> { candidates.adjustBalance(1_000_000); clearAndInit(); })
                 .tooltip(Tooltip.of(Text.literal("Increase the local planning balance by $1 million. Labeled balance chat can update it automatically.")))
                 .dimensions(left + 110, top + 40, 106, 20).build());
-        addDrawableChild(ButtonWidget.builder(Text.literal("Orders " + candidates.usedOrderSlots() + "/20"), button -> { candidates.adjustUsedSlots(candidates.usedOrderSlots() == 20 ? -20 : 1, 0); clearAndInit(); })
-                .tooltip(Tooltip.of(Text.literal("Orders already active on your account. Click to add one; 20 wraps to 0.\nTracked item locks are also counted automatically."))).dimensions(left + 220, top + 40, 106, 20).build());
-        addDrawableChild(ButtonWidget.builder(Text.literal("Auctions " + candidates.usedAuctionSlots() + "/18"), button -> { candidates.adjustUsedSlots(0, candidates.usedAuctionSlots() == 18 ? -18 : 1); clearAndInit(); })
-                .tooltip(Tooltip.of(Text.literal("Listings already active on your account. Large orders exit as multiple ≤64-item listings that reuse these slots."))).dimensions(left + 330, top + 40, 110, 20).build());
+        addDrawableChild(ButtonWidget.builder(Text.literal("Orders " + candidates.usedOrderSlots() + "/20"), button -> { candidates.adjustUsedSlots(client.isShiftPressed() ? 1 : -1, 0); clearAndInit(); })
+                .tooltip(Tooltip.of(Text.literal("Orders currently active. Click after cancelling one to subtract a used slot; Shift-click to add one.\nTracked item locks remain a safe lower bound."))).dimensions(left + 220, top + 40, 106, 20).build());
+        addDrawableChild(ButtonWidget.builder(Text.literal("Auctions " + candidates.usedAuctionSlots() + "/18"), button -> { candidates.adjustUsedSlots(0, client.isShiftPressed() ? 1 : -1); clearAndInit(); })
+                .tooltip(Tooltip.of(Text.literal("Listings currently active. Click to subtract one; Shift-click to add one. Large orders reuse these slots as ≤64-item exits sell."))).dimensions(left + 330, top + 40, 110, 20).build());
 
         List<PortfolioAllocator.Selection> selected = candidates.allocation().selections();
         int pageCount = Math.max(1, (selected.size() + PAGE_SIZE - 1) / PAGE_SIZE);
@@ -45,10 +45,13 @@ final class DonutScreen extends Screen {
         for (int row = 0; row < Math.min(PAGE_SIZE, selected.size() - firstSelection); row++) {
             PortfolioAllocator.Selection selection = selected.get(firstSelection + row);
             CandidateFeedClient.Candidate candidate = selection.candidate();
-            String label = abbreviate(candidate.itemName(), 12) + " · " + compact(selection.orderQuantity()) + " units / "
+            String label = (isFiller(candidate) ? "FILL " : "CORE ") + abbreviate(candidate.itemName(), 10) + " · " + compact(selection.orderQuantity()) + " units / "
                     + compact(selection.batches()) + "×" + candidate.quantity() + " exits · +$" + FlipNotifier.format(selection.conservativeProfit());
             addDrawableChild(ButtonWidget.builder(Text.literal(label), button -> CandidateNotifier.open(client, candidates, candidate))
-                    .tooltip(Tooltip.of(Text.literal("ONE BUY ORDER\n" + selection.orderQuantity() + " units at " + formatCents(candidate.orderUnitRewardCents())
+                    .tooltip(Tooltip.of(Text.literal((isFiller(candidate)
+                                    ? "FILLER OFFER\nOne conservative exit stack. It may fill slowly; cancel and replace it when a stronger CORE market appears.\n"
+                                    : "CORE OFFER\nMeasured order fills support this scalable position.\n")
+                            + "ONE BUY ORDER\n" + selection.orderQuantity() + " units at " + formatCents(candidate.orderUnitRewardCents())
                             + " each · escrow $" + FlipNotifier.format(selection.capital()) + "\nEXIT PLAN\n" + selection.batches()
                             + " listings of " + candidate.quantity() + " at $" + FlipNotifier.format(candidate.targetListPrice())
                             + " each · reuse auction slots as they sell\nMODEL\nconservative +$" + FlipNotifier.format(selection.conservativeProfit())
@@ -82,7 +85,7 @@ final class DonutScreen extends Screen {
         addDrawableChild(next);
         addDrawableChild(ButtonWidget.builder(Text.literal("Recheck tracked item locks (" + candidates.activeOrderCount() + ")"), button -> {
                     candidates.recheckTrackedOrders(); clearAndInit();
-                }).tooltip(Tooltip.of(Text.literal("Start fast focused rechecks for previously selected markets and clear local locks.\nBefore creating anything, the mod still opens Your Orders and blocks an existing matching item.")))
+                }).tooltip(Tooltip.of(Text.literal("After manually cancelling/replacing offers in Donut, clear local locks and rebuild the 20-slot plan.\nThe mod starts focused rechecks, then still opens Your Orders and blocks any duplicate item.")))
                 .dimensions(left + 220, top + 212, 220, 20).build());
         renderedKey = feedKey();
     }
@@ -96,7 +99,7 @@ final class DonutScreen extends Screen {
         PortfolioAllocator.Allocation portfolio = candidates.allocation();
         context.drawTextWithShadow(textRenderer, Text.literal("Balance $" + FlipNotifier.format(portfolio.balance()) + " (" + candidates.balanceSource() + ") · deployable $"
                 + FlipNotifier.format(portfolio.deployable()) + " · reserve " + portfolio.reserveBps() / 100.0 + "%"), left, top + 14, 0xDDDDDD);
-        context.drawTextWithShadow(textRenderer, Text.literal("Orders: " + candidates.status().state() + " · READY " + stateCount("READY")
+        context.drawTextWithShadow(textRenderer, Text.literal("Orders: " + candidates.status().state() + " · CORE " + readyCount(false) + " FILLER " + readyCount(true)
                 + " HOLD " + stateCount("HOLD") + " STALE " + stateCount("STALE") + " RESEARCH " + stateCount("RESEARCH")
                 + " · tracked " + candidates.activeOrderCount() + " · API " + auctions.status().state() + "/" + auctions.status().flipCount()), left, top + 26, 0xAAAAAA);
         if (orderExecutor.status().phase() != OrderCreationExecutor.Phase.IDLE) {
@@ -108,7 +111,7 @@ final class DonutScreen extends Screen {
                 + Math.max(1, (portfolio.selections().size() + PAGE_SIZE - 1) / PAGE_SIZE)), left, top + 66, 0xFFFFFF);
         context.drawTextWithShadow(textRenderer, Text.literal("One row = one buy order. Exit stacks are ≤64 and reuse your "
                 + portfolio.availableAuctionSlots() + " currently free auction slots."), left, top + 78, 0xAAAAAA);
-        if (portfolio.selections().isEmpty()) context.drawTextWithShadow(textRenderer, Text.literal("No READY market fits the local balance, reserve, and free order slots."), left, top + 104, 0x888888);
+        if (portfolio.selections().isEmpty()) context.drawTextWithShadow(textRenderer, Text.literal("No current CORE/FILLER offer fits. Collector freshness and local cash are required."), left, top + 104, 0x888888);
         super.render(context, mouseX, mouseY, delta);
     }
 
@@ -123,6 +126,8 @@ final class DonutScreen extends Screen {
         return key.toString();
     }
     private long stateCount(String state) { return candidates.candidates().stream().filter(candidate -> state.equals(candidate.state())).count(); }
+    private long readyCount(boolean filler) { return candidates.candidates().stream().filter(candidate -> "READY".equals(candidate.state()) && isFiller(candidate) == filler).count(); }
+    private static boolean isFiller(CandidateFeedClient.Candidate candidate) { return "READY".equals(candidate.state()) && !"actionable".equals(candidate.orderTier()); }
     private static String abbreviate(String value, int limit) { return value.length() <= limit ? value : value.substring(0, limit - 1) + "…"; }
     private static String compact(long value) { return value >= 1_000_000 ? FlipNotifier.format(value) : String.format(java.util.Locale.ROOT, "%,d", value); }
     private static String formatCents(long cents) { return String.format(java.util.Locale.ROOT, "$%,d.%02d", cents / 100, cents % 100); }

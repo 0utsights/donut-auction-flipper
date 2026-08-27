@@ -60,7 +60,8 @@ test('keeps modifier-bearing and variant items out of base auction evidence', ()
 })
 
 test('accepts verified plain bulk commodities used by the order frontier', () => {
-  for (const name of ['iron_block', 'sponge', 'blue_ice', 'breeze_rod', 'gilded_blackstone']) {
+  for (const name of ['iron_block', 'sponge', 'blue_ice', 'breeze_rod', 'gilded_blackstone',
+    'bone_block', 'lime_concrete', 'red_wool', 'sticky_piston', 'oxidized_copper_bulb']) {
     const item = projectItem({ name, count: 64, stackSize: 64, customLore: ['$5K each', '0/640 Delivered'] }, 1)
     assert.ok(item)
     assert.equal(parseOrder(item)?.signature_complete, true, name)

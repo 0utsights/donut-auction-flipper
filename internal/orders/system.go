@@ -15,7 +15,12 @@ import (
 	"donut-network/internal/market"
 )
 
-const minimumExactExitConfidenceBPS = 3_500
+const (
+	minimumExactExitConfidenceBPS  = 3_500
+	minimumFillerExitConfidenceBPS = 2_500
+	minimumFillerAuctionVolume     = 2
+	minimumFillerAuctionSellers    = 2
+)
 
 type Config struct {
 	DatabasePath   string
@@ -126,7 +131,7 @@ func (s *System) queueAutomaticResearch(ctx context.Context) error {
 		}
 		seen[candidate.Signature] = struct{}{}
 		signatures = append(signatures, candidate.Signature)
-		if candidate.Profiled {
+		if candidate.Profiled || (candidate.State == "READY" && candidate.OrderTier == "actionable") {
 			priorities[candidate.Signature] = 75
 		} else {
 			priorities[candidate.Signature] = 50
@@ -160,7 +165,7 @@ func researchSchedulingTier(candidate Candidate) int {
 	return 2
 }
 func (s *System) AddWatch(ctx context.Context, signature string) (Watch, error) {
-	return s.store.AddWatch(ctx, signature, 15*time.Minute)
+	return s.store.AddWatch(ctx, signature, time.Minute)
 }
 func (s *System) DeleteWatch(ctx context.Context, id string) error {
 	return s.store.DeleteWatch(ctx, id)
@@ -330,8 +335,18 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 		}
 		completion := completionBPS(evidence, valuation)
 		fresh := now.Sub(evidence.LastSeenAt) <= orderObservationWindow
-		marketReason := marketHoldReason(valuation, now)
-		ready := evidence.Tier == "actionable" && fresh && valuation.Volume24h >= 5 && valuation.PriceSellerCount >= 3 && valuation.ConfidenceBPS >= minimumExactExitConfidenceBPS && marketReason == ""
+		marketReason := marketHoldReason(valuation, now, false)
+		fillerMarketReason := marketHoldReason(valuation, now, true)
+		ready := evidence.Tier == "actionable" && evidence.FilledUnits24h >= int64(quantity) && fresh && valuation.Volume24h >= 5 && valuation.PriceSellerCount >= 3 && valuation.ConfidenceBPS >= minimumExactExitConfidenceBPS && marketReason == ""
+		// A cancelable order slot has option value even when the market has not
+		// yet proven enough volume for a large position. Admit one exploratory
+		// exact-stack filler when the current order price is stable, the item is
+		// modifier-safe, and two independent near-target auction exits support a
+		// conservative profit. Fabric still performs its six-second final recheck.
+		fillerReady := !ready && (evidence.Tier == "research" || evidence.Tier == "actionable") &&
+			evidence.CompleteScans >= 3 && evidence.Stable && evidence.SignatureComplete && fresh &&
+			valuation.Volume24h >= minimumFillerAuctionVolume && valuation.PriceSellerCount >= minimumFillerAuctionSellers &&
+			valuation.ConfidenceBPS >= minimumFillerExitConfidenceBPS && fillerMarketReason == ""
 		state, reason := strings.ToUpper(evidence.Tier), evidence.Reason
 		if ready {
 			state, reason = "READY", ""
@@ -367,6 +382,11 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 		// the only source of multi-batch ORDER_TO_AUCTION capacity.
 		researchBatches := min(1, auctionBatches)
 		orderState, orderReason := state, reason
+		if fillerReady {
+			orderState = "READY"
+			orderReason = "filler: profitable exact-stack exit with thinner measured volume; start with one stack and replace it when a stronger market qualifies"
+			executable = 1
+		}
 		if executable <= 0 {
 			if orderState == "READY" {
 				orderState = "RESEARCH"
@@ -515,7 +535,7 @@ func completionBPS(evidence Evidence, valuation market.Valuation) int {
 	return min(tier, valuation.ConfidenceBPS)
 }
 
-func marketHoldReason(valuation market.Valuation, now time.Time) string {
+func marketHoldReason(valuation market.Valuation, now time.Time, allowThinSellerEvidence bool) string {
 	if valuation.GeneratedAt.IsZero() || now.Sub(valuation.GeneratedAt) > 2*time.Minute {
 		return "auction valuation is older than two minutes"
 	}
@@ -541,6 +561,11 @@ func marketHoldReason(valuation market.Valuation, now time.Time) string {
 		"target_price_seller_concentration": "target-price sales are seller-concentrated",
 	}
 	for _, flag := range valuation.RiskFlags {
+		if allowThinSellerEvidence && valuation.Volume24h >= minimumFillerAuctionVolume &&
+			valuation.PriceSellerCount >= minimumFillerAuctionSellers &&
+			(flag == "seller_concentration" || flag == "target_price_seller_concentration") {
+			continue
+		}
 		if reason := blocking[flag]; reason != "" {
 			return reason
 		}

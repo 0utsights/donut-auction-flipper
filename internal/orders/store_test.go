@@ -293,7 +293,7 @@ func TestFocusedWatchRequestsCurrentDiscoveryLeaseToYield(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if watch.ExpiresAt.Sub(watch.CreatedAt) != 15*time.Minute {
+	if watch.ExpiresAt.Sub(watch.CreatedAt) != time.Minute {
 		t.Fatalf("watch lifetime=%s", watch.ExpiresAt.Sub(watch.CreatedAt))
 	}
 	if yield, err := system.ShouldYieldDiscovery(ctx, heartbeat); err != nil || !yield {
@@ -1085,8 +1085,8 @@ func TestCandidateBuilderIsQuantityAndEvidenceSafe(t *testing.T) {
 	evidence.FilledUnits24h = 0
 	valuation.QuantityQuickSell = 5_000
 	for _, value := range buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now) {
-		if value.State == "READY" || value.ExecutableBatches != 0 {
-			t.Fatalf("candidate invented executable volume: %+v", value)
+		if value.Route == "ORDER_TO_AUCTION" && (value.State != "READY" || value.ExecutableBatches != 1 || value.MaxOrderQuantity != 64) {
+			t.Fatalf("profitable filler did not stay bounded to one exploratory stack: %+v", value)
 		}
 		if value.Route == "ORDER_TO_AUCTION" && value.ResearchBatches > 1 {
 			t.Fatalf("competing order demand became speculative fill capacity: %+v", value)
@@ -1148,14 +1148,43 @@ func TestCandidateUsesCalibratedExactExitConfidenceAndVolumeFreshness(t *testing
 	}
 	valuation.ConfidenceBPS--
 	values = buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now)
-	if len(values) != 2 || values[0].State != "RESEARCH" {
-		t.Fatalf("below-floor exact exit confidence became ready: %+v", values)
+	if len(values) != 2 || values[0].State != "READY" || values[0].ExecutableBatches != 1 {
+		t.Fatalf("moderate-confidence exact exit was not admitted as a one-stack filler: %+v", values)
+	}
+	valuation.ConfidenceBPS = minimumFillerExitConfidenceBPS - 1
+	values = buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now)
+	if len(values) != 2 || values[0].State == "READY" {
+		t.Fatalf("below-filler confidence became ready: %+v", values)
 	}
 	valuation.ConfidenceBPS = minimumExactExitConfidenceBPS
 	valuation.PriceReferenceAgeSeconds = int64((10 * time.Hour).Seconds())
 	values = buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now)
 	if len(values) != 2 || values[0].State != "HOLD" {
 		t.Fatalf("stale five-sale market exceeded its adaptive freshness limit: %+v", values)
+	}
+}
+
+func TestCandidateAdmitsThinProfitableMarketAsOneStackFiller(t *testing.T) {
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	evidence := Evidence{Signature: "minecraft:bone_block", ItemID: "minecraft:bone_block", DisplayName: "Bone Blocks",
+		Tier: "research", CompleteScans: 6, BestUnitRewardCents: 10_000, ObservedQuantity: 64, MaxStackSize: 64,
+		LastSeenAt: now, Stable: true, SignatureComplete: true}
+	valuation := market.Valuation{Signature: evidence.Signature, QuickSellValue: 150, QuantityQuickSell: 150,
+		PricingQuantity: 64, Volume24h: 2, PriceSellerCount: 2, ConfidenceBPS: minimumFillerExitConfidenceBPS,
+		ExpectedSellMinutes: 720, GeneratedAt: now, RiskFlags: []string{"low_price_liquidity", "seller_concentration"}}
+	values := buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{AuctionFeeBPS: 250}, now)
+	if len(values) != 1 {
+		t.Fatalf("filler candidates=%+v", values)
+	}
+	value := values[0]
+	if value.Route != "ORDER_TO_AUCTION" || value.State != "READY" || value.OrderTier != "research" ||
+		value.ExecutableBatches != 1 || value.MaxOrderQuantity != 64 || value.ConservativeProfit <= 0 || value.PriorityRank <= 0 {
+		t.Fatalf("unsafe filler candidate: %+v", value)
+	}
+	valuation.PriceSellerCount = 1
+	values = buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{AuctionFeeBPS: 250}, now)
+	if len(values) != 1 || values[0].State == "READY" {
+		t.Fatalf("single-seller exit became filler-ready: %+v", values)
 	}
 }
 

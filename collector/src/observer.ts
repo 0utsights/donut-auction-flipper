@@ -22,7 +22,7 @@ const FOCUSED_CLICK_DELAY_MS = 500
 // The backend renews the short failure-detection lease on every successful
 // heartbeat. A focused scan therefore needs its own bounded work horizon so it
 // can traverse a large order book instead of stopping after the initial lease.
-const FOCUSED_WATCH_RUNTIME_MS = 4 * 60_000
+const FOCUSED_WATCH_RUNTIME_MS = 45_000
 // Allow enough time to reach a high-value early page and then collect the
 // 30-second minimum evidence window. This remains bounded and transaction-free.
 const AUTOMATIC_FOCUSED_RUNTIME_MS = 120_000

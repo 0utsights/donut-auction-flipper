@@ -36,7 +36,18 @@ const baseOnlyCommodities = new Set([
   'minecraft:raw_gold', 'minecraft:raw_gold_block', 'minecraft:raw_iron', 'minecraft:raw_iron_block',
   'minecraft:red_sand', 'minecraft:redstone', 'minecraft:redstone_block', 'minecraft:rotten_flesh',
   'minecraft:sand', 'minecraft:scute', 'minecraft:slime_ball', 'minecraft:spider_eye', 'minecraft:sponge',
-  'minecraft:stone', 'minecraft:string', 'minecraft:totem_of_undying'
+  'minecraft:stone', 'minecraft:string', 'minecraft:totem_of_undying',
+  'minecraft:anvil', 'minecraft:blast_furnace', 'minecraft:bone_block', 'minecraft:bookshelf',
+  'minecraft:carved_pumpkin', 'minecraft:cauldron', 'minecraft:chipped_anvil', 'minecraft:cobweb',
+  'minecraft:dead_fire_coral_fan', 'minecraft:diamond_ore', 'minecraft:fletching_table', 'minecraft:glass_bottle',
+  'minecraft:glowstone', 'minecraft:glowstone_dust', 'minecraft:ice', 'minecraft:jukebox', 'minecraft:lever',
+  'minecraft:note_block', 'minecraft:oxidized_copper_bulb', 'minecraft:pale_oak_shelf',
+  'minecraft:polished_blackstone', 'minecraft:quartz_stairs', 'minecraft:rail', 'minecraft:redstone_lamp',
+  'minecraft:redstone_torch', 'minecraft:sculk_catalyst', 'minecraft:sea_lantern', 'minecraft:slime_block',
+  'minecraft:sticky_piston', 'minecraft:stripped_acacia_log', 'minecraft:target', 'minecraft:tinted_glass',
+  'minecraft:warped_trapdoor', 'minecraft:waxed_oxidized_copper_bulb', 'minecraft:wind_charge',
+  'minecraft:white_wool', 'minecraft:red_wool', 'minecraft:gray_wool', 'minecraft:lime_concrete',
+  'minecraft:yellow_concrete', 'minecraft:black_glazed_terracotta', 'minecraft:green_glazed_terracotta'
 ])
 const modifierMarkers = /^(attribute_modifiers|bundle_contents|charged_projectiles|container|custom_model_data|damage|dyed_color|enchantments|firework_explosion|fireworks|instrument|map_decorations|map_id|potion_contents|stored_enchantments|trim)$/i
 

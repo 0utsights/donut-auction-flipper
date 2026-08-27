@@ -1,6 +1,7 @@
 import { fork, type ChildProcess } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { loadConfig } from './config.js'
+import { restartDelay } from './restart-policy.js'
 import type { AccountConfig, CollectorConfig, RuntimeConfig } from './types.js'
 
 process.umask(0o077)
@@ -38,7 +39,7 @@ function launch(account: AccountConfig): void {
     }
     const count = Date.now() - startedAt >= 5 * 60_000 ? 1 : (failures.get(account.id) ?? 0) + 1
     failures.set(account.id, count)
-    const delay = Math.min(60_000, 1_000 * 2 ** Math.min(6, count))
+    const delay = restartDelay(count)
     process.stderr.write(`[manager] ${account.id} exited code=${code ?? 'none'} signal=${signal ?? 'none'}; restart in ${delay}ms\n`)
     setTimeout(() => launch(account), delay)
   })

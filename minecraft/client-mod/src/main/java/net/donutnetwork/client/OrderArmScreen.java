@@ -32,10 +32,10 @@ final class OrderArmScreen extends Screen {
             validation = result.message();
             if (result.armed()) client.setScreen(null); else clearAndInit();
         }).tooltip(Tooltip.of(Text.literal("Authorizes exactly one Create Order click after live revalidation. It does not loop.")))
-                .dimensions(left, top + 170, 204, 20).build();
+                .dimensions(left, top + 184, 204, 20).build();
         arm.active = check.armed();
         addDrawableChild(arm);
-        addDrawableChild(ButtonWidget.builder(Text.literal("Cancel"), button -> close()).dimensions(left + 216, top + 170, 204, 20).build());
+        addDrawableChild(ButtonWidget.builder(Text.literal("Cancel"), button -> close()).dimensions(left + 216, top + 184, 204, 20).build());
     }
 
     @Override public void render(DrawContext context, int mouseX, int mouseY, float delta) {
@@ -50,9 +50,12 @@ final class OrderArmScreen extends Screen {
         context.drawTextWithShadow(textRenderer, Text.literal("Exit plan: " + String.format(java.util.Locale.ROOT, "%,d", plan.batches()) + " listings × " + plan.batchQuantity() + " at $" + FlipNotifier.format(candidate.targetListPrice())), left, top + 80, 0xDDDDDD);
         context.drawTextWithShadow(textRenderer, Text.literal("Conservative total profit: +$" + FlipNotifier.format(selection.conservativeProfit())), left, top + 96, 0xDDDDDD);
         context.drawTextWithShadow(textRenderer, Text.literal("Session budget remaining: $" + FlipNotifier.format(executor.status().sessionBudget() - executor.status().sessionSpent())), left, top + 118, 0xBBBBBB);
-        context.drawTextWithShadow(textRenderer, Text.literal("Listings are ≤64 each and reuse your auction slots as they sell."), left, top + 134, 0xAAAAAA);
-        context.drawTextWithShadow(textRenderer, Text.literal("This arm expires on any changed, stale, duplicate, or unknown value."), left, top + 146, 0xAAAAAA);
-        context.drawTextWithShadow(textRenderer, Text.literal(validation), left, top + 158, validation.startsWith("ready") || validation.startsWith("will") ? 0x66DD88 : 0xFF7777);
+        String readiness = "actionable".equals(candidate.orderTier()) ? "CORE: measured fills support this size."
+                : "FILLER: one-stack starter; it may fill slowly and can be replaced.";
+        context.drawTextWithShadow(textRenderer, Text.literal(readiness), left, top + 132, "actionable".equals(candidate.orderTier()) ? 0x77DD88 : 0xE0BD62);
+        context.drawTextWithShadow(textRenderer, Text.literal("Listings are ≤64 each and reuse your auction slots as they sell."), left, top + 144, 0xAAAAAA);
+        context.drawTextWithShadow(textRenderer, Text.literal("This arm expires on any changed, stale, duplicate, or unknown value."), left, top + 156, 0xAAAAAA);
+        context.drawTextWithShadow(textRenderer, Text.literal(validation), left, top + 168, validation.startsWith("ready") || validation.startsWith("will") ? 0x66DD88 : 0xFF7777);
         super.render(context, mouseX, mouseY, delta);
     }
 

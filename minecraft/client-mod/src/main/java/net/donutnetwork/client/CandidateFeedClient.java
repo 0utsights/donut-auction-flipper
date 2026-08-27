@@ -136,11 +136,10 @@ final class CandidateFeedClient implements AutoCloseable {
         // before any transactional control is used.
         activeOrderItems.clear();
         persistAndAllocate();
-        // Previously selected items receive an immediate backend focused watch.
-        // The server recognizes proven market profiles and uses its shorter
-        // revalidation lane; the exact Your Orders duplicate check still runs
-        // before any creation action.
-        for (PortfolioAllocator.Selection selection : allocation.get().selections()) focus(selection.candidate());
+        // Recheck only the strongest newly available item. Enqueuing all twenty
+        // as manual watches would starve market discovery; opening or arming any
+        // other row starts its own focused check on demand.
+        allocation.get().selections().stream().findFirst().ifPresent(selection -> focus(selection.candidate()));
     }
 
     void adjustBalance(long delta) {
@@ -214,7 +213,11 @@ final class CandidateFeedClient implements AutoCloseable {
             // shown from this allocation, but later one-stack fluctuations do
             // not spam chat; the live screen continues updating them.
             Candidate candidate = selection.candidate(); String key = candidate.id() + ":" + candidate.state();
-            if (!seen.containsKey(key)) { seen.put(key, true); focus(candidate); alertSink.accept(selection); }
+            // READY portfolio updates may contain all 20 slots at once. Alerting
+            // does not create 20 long-lived manual watches: a focused task starts
+            // only when the player opens or arms that candidate. This preserves
+            // discovery breadth and avoids reconnect pressure on the sole observer.
+            if (!seen.containsKey(key)) { seen.put(key, true); alertSink.accept(selection); }
         }
         while (seen.size() > 4096) seen.remove(seen.keySet().iterator().next());
     }

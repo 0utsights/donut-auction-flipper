@@ -16,8 +16,9 @@ final class CandidateNotifier {
         if (client.player == null) return;
         CandidateFeedClient.Candidate candidate = selection.candidate();
         String route = candidate.route().equals("ORDER_TO_AUCTION") ? "order → auction" : "auction → order";
+        String readiness = "actionable".equals(candidate.orderTier()) ? "CORE" : "FILLER";
         MutableText message = Text.literal("[DN] ").formatted(Formatting.GOLD, Formatting.BOLD)
-                .append(Text.literal(candidate.itemName() + " x" + selection.orderQuantity()
+                .append(Text.literal(readiness + " · " + candidate.itemName() + " x" + selection.orderQuantity()
                         + " (" + selection.batches() + " exit stacks)").formatted(Formatting.WHITE))
                 .append(Text.literal("  " + route).formatted(Formatting.GRAY))
                 .append(Text.literal("  +$" + FlipNotifier.format(selection.conservativeProfit()) + " · $"

@@ -560,6 +560,11 @@ func (s *Server) simpleOrderPageData() simpleOrderPageData {
 		switch candidate.State {
 		case "READY":
 			data.ReadyCount++
+			if candidate.OrderTier == "actionable" {
+				data.CoreCount++
+			} else {
+				data.FillerCount++
+			}
 			if len(data.Ready) < cap(data.Ready) {
 				candidate.PriorityRank = len(data.Ready) + 1
 				data.Ready = append(data.Ready, candidate)
