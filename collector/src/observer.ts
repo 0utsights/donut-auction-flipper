@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import mineflayer, { type Bot } from 'mineflayer'
 import { BackendClient } from './backend.js'
+import { installAuthenticationProxy } from './auth-proxy.js'
 import { fingerprintWindow, isMostPerItemOrder, parseOrder, plainText, projectItem } from './parser.js'
 import { EgressMismatchError, minecraftConnect, proxyAgent, verifyEgress } from './proxy.js'
 import { redactSensitiveText } from './redaction.js'
@@ -109,12 +110,19 @@ class ObserverRuntime {
   private async connect(): Promise<void> {
     mkdirSync(resolve(this.config.account.profilesFolder), { recursive: true, mode: 0o700 })
     const connect = minecraftConnect(this.config.account.proxyUrl, this.config.minecraftHost, this.config.minecraftPort)
-    const bot = mineflayer.createBot({
-      username: this.config.account.microsoftUsername, auth: 'microsoft', version: this.config.version,
-      host: this.config.minecraftHost, port: this.config.minecraftPort, profilesFolder: resolve(this.config.account.profilesFolder), fakeHost: this.config.minecraftHost,
-      connect: connect as never, agent: proxyAgent(this.config.account.proxyUrl) as never,
-      checkTimeoutInterval: 30_000, hideErrors: true, logErrors: false
-    })
+    const restoreAuthenticationFetch = installAuthenticationProxy(this.config.account.proxyUrl)
+    let bot: Bot
+    try {
+      bot = mineflayer.createBot({
+        username: this.config.account.microsoftUsername, auth: 'microsoft', version: this.config.version,
+        host: this.config.minecraftHost, port: this.config.minecraftPort, profilesFolder: resolve(this.config.account.profilesFolder), fakeHost: this.config.minecraftHost,
+        connect: connect as never, agent: proxyAgent(this.config.account.proxyUrl) as never,
+        checkTimeoutInterval: 30_000, hideErrors: true, logErrors: false
+      })
+    } catch (error) {
+      restoreAuthenticationFetch()
+      throw error
+    }
     // Market observers never move. Disable simulation immediately; the pinned
     // Mineflayer build still emits idle movement ticks until its mount state is
     // entered, so that state is applied after server transfers settle below.
@@ -124,11 +132,13 @@ class ObserverRuntime {
       if (this.bot === bot) this.connected = false
       this.report(new Error(`kicked: ${safeText(reason, 200)}`))
     })
+    bot._client.once('session', () => { restoreAuthenticationFetch(); this.log('microsoft_session_ready') })
     bot.once('login', () => this.log('minecraft_login_accepted'))
     bot.once('spawn', () => this.log('minecraft_spawn_received'))
     bot.on('error', error => this.report(new Error(`minecraft transport: ${safeMessage(error)}`)))
     bot._client.once('disconnect', packet => this.report(new Error(`minecraft disconnect: ${safeText(packet, 300)}`)))
     bot.once('end', reason => {
+      restoreAuthenticationFetch()
       if (this.bot === bot) {
         this.connected = false
         this.bot = undefined

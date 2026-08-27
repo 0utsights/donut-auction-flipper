@@ -2,6 +2,7 @@ import mineflayer from 'mineflayer'
 import { resolve } from 'node:path'
 import { mkdirSync } from 'node:fs'
 import { loadConfig } from './config.js'
+import { installAuthenticationProxy } from './auth-proxy.js'
 import { minecraftConnect, proxyAgent, verifyEgress } from './proxy.js'
 import { redactSensitiveText } from './redaction.js'
 
@@ -21,11 +22,13 @@ let finished = false
 let bot: ReturnType<typeof mineflayer.createBot> | undefined
 let loginDeadline: NodeJS.Timeout | undefined
 let disconnectReason = ''
+const restoreAuthenticationFetch = installAuthenticationProxy(account.proxyUrl)
 
 function fail(error: unknown): void {
   if (finished) return
   finished = true
   if (loginDeadline) clearTimeout(loginDeadline)
+  restoreAuthenticationFetch()
 
   const message = redactSensitiveText(error instanceof Error ? error.message : error).replace(/[\r\n\0]/g, ' ').slice(0, 500)
   const explanation = message.includes('Failed to obtain profile data')
@@ -50,10 +53,12 @@ bot.once('login', () => {
   if (finished) return
   finished = true
   if (loginDeadline) clearTimeout(loginDeadline)
+  restoreAuthenticationFetch()
   process.stdout.write(`authenticated ${account.id}; token cache saved\n`)
   bot?.quit('authentication complete')
 })
 bot.once('error', fail)
+bot._client.once('session', restoreAuthenticationFetch)
 bot._client.once('disconnect', packet => { disconnectReason = redactSensitiveText(packet).replace(/[\r\n\0]/g, ' ').slice(0, 300) })
 bot.once('end', reason => {
   if (!finished) fail(new Error(`Minecraft connection ended before login${disconnectReason ? `: ${disconnectReason}` : (reason ? `: ${String(reason).slice(0, 300)}` : '')}`))

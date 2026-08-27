@@ -174,6 +174,8 @@ The executable auction-liquidity model is `robust-v5-target-liquidity-quantity`.
 
 Persisted active-order item locks are a lower bound on used order slots. If server discovery or a duplicate-order response adds an item that the local counter missed, Fabric immediately raises its used-slot count before reallocating. It never creates a second order for that canonical item; intentional recreation requires the old server order to be gone and the local cache to be explicitly reset.
 
+Microsoft/Xbox/Minecraft token acquisition is explicitly wrapped with the account's assigned proxy. The wrapper is process-local to that isolated observer child and is removed as soon as `minecraft-protocol` emits its authenticated session, before any localhost backend call. The Minecraft socket and Mojang session-server verification continue using the same proxy agent. This closes the gap where passing an HTTP agent to `minecraft-protocol` did not affect `prismarine-auth`'s global fetch implementation.
+
 ## Assumptions made without operator input
 
 - The official API retains its bearer-authenticated listing and transaction endpoints and 250 requests/minute published limit.
