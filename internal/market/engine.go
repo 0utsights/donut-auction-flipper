@@ -44,6 +44,7 @@ type quantityValuationKey struct {
 	signature string
 	quantity  int
 	base      bool
+	pair      bool
 }
 
 type quantityValuationResult struct {
@@ -600,8 +601,13 @@ func (e *Engine) opportunityValuationLocked(listing Listing, cache map[quantityV
 }
 
 func (e *Engine) quantityPairValuationLocked(signature, base string, quantity int, baseFallback bool, cache map[quantityValuationKey]quantityValuationResult) (Valuation, bool) {
+	pairKey := quantityValuationKey{signature: signature, quantity: quantity, base: baseFallback, pair: true}
+	if cached, exists := cache[pairKey]; exists {
+		return cached.valuation, cached.ok
+	}
 	singular, ok := e.quantityCohortValuationLocked(signature, base, 1, baseFallback, cache)
 	if !ok {
+		cache[pairKey] = quantityValuationResult{}
 		return Valuation{}, false
 	}
 	if quantity == 1 {
@@ -610,10 +616,12 @@ func (e *Engine) quantityPairValuationLocked(signature, base string, quantity in
 		singular.PricingQuantity = 1
 		singular.SingularVolume24h = singular.Volume24h
 		singular.QuantityVolume24h = singular.Volume24h
+		cache[pairKey] = quantityValuationResult{valuation: singular, ok: true}
 		return singular, true
 	}
 	stacked, ok := e.quantityCohortValuationLocked(signature, base, quantity, baseFallback, cache)
 	if !ok {
+		cache[pairKey] = quantityValuationResult{}
 		return Valuation{}, false
 	}
 	combined := combineQuantityValuations(singular, stacked, quantity)
@@ -632,6 +640,7 @@ func (e *Engine) quantityPairValuationLocked(signature, base string, quantity in
 	combined.QuantityVolume24h = volume
 	combined.PriceReferenceAgeSeconds = priceAge
 	combined.RiskFlags = withLiquidityRiskFlags(combined.RiskFlags, volume, sellers)
+	cache[pairKey] = quantityValuationResult{valuation: combined, ok: true}
 	return combined, true
 }
 

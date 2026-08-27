@@ -26,7 +26,7 @@ Last updated: 2026-08-26
 - `go test ./...` and `go vet ./...` pass. Tests cover authenticated leases, idempotent scans, capture-only exclusion, fill/disappearance semantics, current-price freshness, shared-watch lifecycle, exact-quantity valuation, candidate executable volume, backups, scoped auth, API handlers, and diagnostic redaction.
 - Node TypeScript build and 26 parser, packet-settlement, navigation, proxy, configuration, and redaction tests pass; `npm audit --omit=dev` reports zero vulnerabilities.
 - Fabric JUnit/build passes on Minecraft 1.21.11, Java 21, Loader 0.19.2, Fabric API 0.141.6, Loom 1.17.19, and Gradle 9.6.1.
-- Candidate-frontier benchmark is approximately 140µs/op for 100 evidence rows on the local i5-11600K. The checked-in market benchmarks are approximately 0.19–1.91ms/op in the final pass.
+- Candidate-frontier benchmark is approximately 142µs/op for 100 evidence rows on the local i5-11600K. Quantity-aware opportunity analysis is approximately 1.46ms/op after caching the completed quantity pair; the other checked-in market benchmarks are approximately 0.17–2.56ms/op in the final pass.
 - The Go race suite passes in a fresh Go 1.26 Linux container on the second PC. Compose is deployed there at commit `fa54a6c`; backend and collector containers are healthy, and live focused pages submit roughly once per second.
 
 ## Senior review passes
