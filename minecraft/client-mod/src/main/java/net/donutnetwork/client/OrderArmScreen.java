@@ -49,7 +49,7 @@ final class OrderArmScreen extends Screen {
         context.drawTextWithShadow(textRenderer, Text.literal("Maximum escrow: $" + FlipNotifier.format(plan.escrowDollars())), left, top + 64, 0xDDDDDD);
         context.drawTextWithShadow(textRenderer, Text.literal("Exit plan: " + String.format(java.util.Locale.ROOT, "%,d", plan.batches()) + " listings × " + plan.batchQuantity() + " at $" + FlipNotifier.format(candidate.targetListPrice())), left, top + 80, 0xDDDDDD);
         context.drawTextWithShadow(textRenderer, Text.literal("Conservative total profit: +$" + FlipNotifier.format(selection.conservativeProfit())), left, top + 96, 0xDDDDDD);
-        context.drawTextWithShadow(textRenderer, Text.literal("Session budget remaining: $" + FlipNotifier.format(executor.status().sessionBudget() - executor.status().sessionSpent())), left, top + 118, 0xBBBBBB);
+        context.drawTextWithShadow(textRenderer, Text.literal("Orders submitted this session: $" + FlipNotifier.format(executor.status().sessionSpent())), left, top + 118, 0xBBBBBB);
         String readiness = "actionable".equals(candidate.orderTier()) ? "CORE: measured fills support this size."
                 : "FILLER: one-stack starter; it may fill slowly and can be replaced.";
         context.drawTextWithShadow(textRenderer, Text.literal(readiness), left, top + 132, "actionable".equals(candidate.orderTier()) ? 0x77DD88 : 0xE0BD62);

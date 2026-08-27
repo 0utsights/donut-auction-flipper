@@ -9,11 +9,19 @@ import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
+import net.minecraft.scoreboard.Scoreboard;
+import net.minecraft.scoreboard.ScoreboardDisplaySlot;
+import net.minecraft.scoreboard.ScoreboardEntry;
+import net.minecraft.scoreboard.ScoreboardObjective;
+import net.minecraft.scoreboard.Team;
 import net.minecraft.text.Text;
 import net.minecraft.util.Identifier;
 import org.lwjgl.glfw.GLFW;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.ArrayList;
+import java.util.List;
 
 import static net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.literal;
 
@@ -24,6 +32,7 @@ public final class DonutNetworkClient implements ClientModInitializer {
 	private CandidateFeedClient candidates;
     private OrderCreationExecutor orderExecutor;
     private boolean startupHintShown;
+    private int scoreboardPollTicks;
 
     @Override public void onInitializeClient() {
         try {
@@ -60,6 +69,7 @@ public final class DonutNetworkClient implements ClientModInitializer {
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             while (open.wasPressed()) openScreen(client);
             orderExecutor.tick(client);
+            observeSidebarBalance(client);
             showStartupHint(client);
         });
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) ->
@@ -67,6 +77,26 @@ public final class DonutNetworkClient implements ClientModInitializer {
                     openScreen(MinecraftClient.getInstance());
                     return 1;
                 })));
+    }
+
+    private void observeSidebarBalance(MinecraftClient client) {
+        if (++scoreboardPollTicks < 20) return;
+        scoreboardPollTicks = 0;
+        if (client.world == null) return;
+        Scoreboard scoreboard = client.world.getScoreboard();
+        ScoreboardObjective objective = scoreboard.getObjectiveForSlot(ScoreboardDisplaySlot.SIDEBAR);
+        if (objective == null) return;
+        List<String> lines = new ArrayList<>();
+        for (ScoreboardEntry entry : scoreboard.getScoreboardEntries(objective)) {
+            if (entry.hidden()) continue;
+            Text name = entry.name();
+            Team team = scoreboard.getScoreHolderTeam(entry.owner());
+            if (team != null) name = team.decorateName(name);
+            lines.add(name.getString());
+            if (entry.display() != null) lines.add(entry.display().getString());
+            lines.add(entry.owner());
+        }
+        candidates.observeSidebarBalance(lines);
     }
 
     private void openScreen(MinecraftClient client) {

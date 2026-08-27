@@ -193,46 +193,15 @@ type CandidateFeed struct {
 	Candidates  []Candidate `json:"candidates"`
 }
 
-// ReferenceMinimumProfitPerExit mirrors Fabric's balance-scaled slot floor for
-// the public $10M reference view. Player-specific decisions remain local.
-func ReferenceMinimumProfitPerExit(candidates []Candidate, balance int64, freeAuctionSlots int) int64 {
-	qualityTotal, qualityCount := 0, 0
-	for _, candidate := range candidates {
-		if candidate.Route != "ORDER_TO_AUCTION" || candidate.State != "READY" || candidate.ConservativeProfit <= 0 {
-			continue
-		}
-		qualityTotal += min(candidate.ConfidenceBPS, candidate.CompletionBPS)
-		qualityCount++
-	}
-	quality := 0
-	if qualityCount > 0 {
-		quality = qualityTotal / qualityCount
-	}
-	reserveBPS := max(1_500, min(3_500, 3_500-quality*2_000/10_000))
-	deployable := mulDivNonNegative(max64(0, balance), int64(10_000-reserveBPS), 10_000)
-	return mulDivNonNegative(deployable/int64(max(1, freeAuctionSlots)), 100, 10_000)
-}
-
 type DebugSnapshot struct {
-	Observers          []Observer           `json:"observers"`
-	Evidence           []Evidence           `json:"evidence"`
-	Watches            []Watch              `json:"watches"`
-	Candidates         []Candidate          `json:"candidates"`
-	ScanCoverage       ScanCoverage         `json:"scan_coverage"`
-	RecentFills        []FillEvidence       `json:"recent_fills"`
-	ReferencePortfolio []ReferenceSelection `json:"reference_portfolio"`
-	Diagnostics        int                  `json:"diagnostics_14d"`
-	GeneratedAt        time.Time            `json:"generated_at"`
-}
-
-type ReferenceSelection struct {
-	CandidateID           string `json:"candidate_id"`
-	ItemName              string `json:"item_name"`
-	Route                 string `json:"route"`
-	Batches               int    `json:"batches"`
-	OrderQuantity         int    `json:"order_quantity"`
-	Capital               int64  `json:"capital"`
-	RiskAdjustedProfitDay int64  `json:"risk_adjusted_profit_day"`
+	Observers    []Observer     `json:"observers"`
+	Evidence     []Evidence     `json:"evidence"`
+	Watches      []Watch        `json:"watches"`
+	Candidates   []Candidate    `json:"candidates"`
+	ScanCoverage ScanCoverage   `json:"scan_coverage"`
+	RecentFills  []FillEvidence `json:"recent_fills"`
+	Diagnostics  int            `json:"diagnostics_14d"`
+	GeneratedAt  time.Time      `json:"generated_at"`
 }
 
 type ScanCoverage struct {

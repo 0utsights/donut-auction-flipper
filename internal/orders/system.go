@@ -462,50 +462,7 @@ func (s *System) Debug(ctx context.Context) (DebugSnapshot, error) {
 		return DebugSnapshot{}, err
 	}
 	debug.Candidates = s.CandidateFeed().Candidates
-	debug.ReferencePortfolio = referencePortfolio(debug.Candidates, 10_000_000)
 	return debug, nil
-}
-
-func referencePortfolio(candidates []Candidate, balance int64) []ReferenceSelection {
-	deployable := balance * 7_500 / 10_000
-	var cash int64
-	ordersUsed, auctionsUsed := 0, 0
-	exactExposure, itemExposure := map[string]int64{}, map[string]int64{}
-	selectedItems := map[string]struct{}{}
-	result := []ReferenceSelection{}
-	for _, value := range candidates {
-		if value.Route != "ORDER_TO_AUCTION" || value.State != "READY" || value.AcquisitionCost <= 0 || value.RiskAdjustedProfitDay <= 0 {
-			continue
-		}
-		if _, duplicate := selectedItems[value.ItemID]; duplicate {
-			continue
-		}
-		maximum := value.ExecutableBatches
-		maximum = min(maximum, int((deployable-cash)/value.AcquisitionCost))
-		if value.OrderSlots > 0 && ordersUsed+value.OrderSlots > 20 {
-			maximum = 0
-		}
-		if value.AuctionSlots > 0 {
-			maximum = min(maximum, (18-auctionsUsed)/value.AuctionSlots)
-		}
-		maximum = min(maximum, int((deployable/4-exactExposure[value.Signature])/value.AcquisitionCost))
-		maximum = min(maximum, int((deployable*2/5-itemExposure[value.ItemID])/value.AcquisitionCost))
-		if maximum <= 0 {
-			continue
-		}
-		capital := mulMoney(value.AcquisitionCost, int64(maximum))
-		cash += capital
-		// One order can request multiple exact resale batches. It occupies one
-		// order slot, while each concurrently listed batch consumes an auction slot.
-		ordersUsed += value.OrderSlots
-		auctionsUsed += value.AuctionSlots * maximum
-		exactExposure[value.Signature] += capital
-		itemExposure[value.ItemID] += capital
-		selectedItems[value.ItemID] = struct{}{}
-		result = append(result, ReferenceSelection{CandidateID: value.ID, ItemName: value.ItemName, Route: value.Route,
-			Batches: maximum, OrderQuantity: safeIntProduct(value.Quantity, maximum), Capital: capital, RiskAdjustedProfitDay: mulMoney(value.RiskAdjustedProfitDay, int64(maximum))})
-	}
-	return result
 }
 
 func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuation, cfg Config, now time.Time) []Candidate {

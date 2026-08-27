@@ -62,4 +62,12 @@ class CandidateFeedClientTest {
                 """;
         assertThrows(IllegalArgumentException.class, () -> CandidateFeedClient.decode(json.getBytes(StandardCharsets.UTF_8)));
     }
+
+    @Test void parsesCompactDonutSidebarBalance() {
+        assertEquals(119_000_000L, CandidateFeedClient.parseSidebarBalance("$ 119M").orElseThrow());
+        assertEquals(2_500_000L, CandidateFeedClient.parseSidebarBalance("§a$ 2.5M").orElseThrow());
+        assertEquals(32_000L, CandidateFeedClient.parseSidebarBalance("$ 32K").orElseThrow());
+        assertTrue(CandidateFeedClient.parseSidebarBalance("MARKWO bought 64 Stone for $10.9K").isEmpty());
+        assertTrue(CandidateFeedClient.parseSidebarBalance("$ 999999999999999999999T").isEmpty());
+    }
 }

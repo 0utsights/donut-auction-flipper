@@ -5,7 +5,8 @@ All JSON endpoints reject unknown fields and oversized bodies. Collector, Fabric
 ## Operational pages
 
 - `GET /` — official auction API health, valuation evidence, and auction-only flips.
-- `GET /order-auction-flipper` — observer health, scan coverage, disagreements, order evidence, candidate economics, rejection reasons, and the reference `$10M` portfolio.
+- `GET /order-auction-flipper` — the complete market-ranked order-to-auction frontier. It never applies a player balance; Fabric allocates locally.
+- `GET /order-auction-flipper/debug` — observer health, scan coverage, disagreements, order evidence, candidate economics, and rejection reasons.
 - `GET /healthz` — `200` after a successful official-API scan, otherwise `503`.
 
 ## Existing auction feed

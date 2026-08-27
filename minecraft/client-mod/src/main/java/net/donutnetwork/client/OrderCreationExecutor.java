@@ -36,7 +36,7 @@ import java.util.regex.Pattern;
 /** Executes exactly one explicitly armed order through Donut's server-driven 1.21.11 screens. */
 final class OrderCreationExecutor {
     enum Phase { IDLE, WAIT_FRESH, ORDER_BOARD, YOUR_ORDERS, ITEM_SEARCH, ITEM_RESULT, AMOUNT, PRICE, REVIEW, PENDING_VERIFICATION, ABORTED }
-    record Status(Phase phase, String message, long sessionSpent, long sessionBudget, String candidateId) {
+    record Status(Phase phase, String message, long sessionSpent, String candidateId) {
         boolean active() { return phase != Phase.IDLE && phase != Phase.PENDING_VERIFICATION && phase != Phase.ABORTED; }
     }
     record ArmResult(boolean armed, String message) {}
@@ -59,7 +59,6 @@ final class OrderCreationExecutor {
     private static final Set<String> PRICE_ACTIONS = Set.of("review order");
 
     private final CandidateFeedClient feed;
-    private final long sessionBudget;
     private OrderPlan plan;
     private Phase phase = Phase.IDLE;
     private String message = "idle";
@@ -71,10 +70,9 @@ final class OrderCreationExecutor {
 
     OrderCreationExecutor(CandidateFeedClient feed) {
         this.feed = feed;
-        this.sessionBudget = feed.orderSessionBudget();
     }
 
-    Status status() { return new Status(phase, message, sessionSpent, sessionBudget, plan == null ? "" : plan.candidateId()); }
+    Status status() { return new Status(phase, message, sessionSpent, plan == null ? "" : plan.candidateId()); }
 
     ArmResult canArm(PortfolioAllocator.Selection selection, Instant now) {
         if (status().active()) return new ArmResult(false, "another order workflow is active");
@@ -85,7 +83,6 @@ final class OrderCreationExecutor {
         catch (IllegalArgumentException | ArithmeticException error) { return new ArmResult(false, error.getMessage()); }
         String liveError = liveError(candidatePlan, now, true);
         if (!liveError.isEmpty() && !liveError.equals(FOCUSED_STALE)) return new ArmResult(false, liveError);
-        if (candidatePlan.escrowDollars() > sessionBudget - sessionSpent) return new ArmResult(false, "order exceeds the remaining local session budget");
         if (feed.hasActiveOrder(candidatePlan.itemId())) {
             return new ArmResult(false, "an order for this item is already active or pending verification");
         }
@@ -286,7 +283,6 @@ final class OrderCreationExecutor {
         PortfolioAllocator.Allocation allocation = feed.allocation();
         if (allocation.availableOrderSlots() < 1) return "local order slots are exhausted";
         if (expected.escrowDollars() > allocation.deployable()) return "order exceeds deployable balance after reserve";
-        if (expected.escrowDollars() > sessionBudget - sessionSpent) return "order exceeds the remaining local session budget";
         return "";
     }
 

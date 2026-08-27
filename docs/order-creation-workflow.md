@@ -50,4 +50,4 @@ The Fabric executor may press the final `Create Order` control only for one port
 
 ## Acceptance test sequence
 
-Use a deliberately low-cost base item and lower `order_session_budget` independently of the normal flipping budget. Capture each screen transition, verify the debited balance equals the review total, confirm the order appears once in `Your Orders`, then manually cancel it and verify the refund. Increase the session budget only after this acceptance test and the known failure cases pass.
+Use a deliberately low-cost base item on an account with a deliberately limited balance. Capture each screen transition, verify the debited balance equals the review total, confirm the order appears once in `Your Orders`, then manually cancel it and verify the refund. Do not fund a larger acceptance test until these checks and the known failure cases pass.

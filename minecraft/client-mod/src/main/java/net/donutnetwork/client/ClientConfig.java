@@ -25,7 +25,7 @@ final class ClientConfig {
 
     record Settings(URI backend, String token, Duration pollInterval, boolean chatAlerts,
                     long balance, int usedOrderSlots, int usedAuctionSlots, boolean diagnostics, String installId,
-                    long orderSessionBudget, Set<String> orderServerHosts, Set<String> activeOrderItems) {}
+                    Set<String> orderServerHosts, Set<String> activeOrderItems) {}
 
     private ClientConfig() {}
 
@@ -60,8 +60,7 @@ final class ClientConfig {
                 || token.chars().anyMatch(character -> character < 33 || character > 126))) {
             throw new IllegalArgumentException("client_token must be 16-512 printable ASCII characters without spaces");
         }
-        long balance = boundedLong(properties, "balance", 10_000_000L, 0, Long.MAX_VALUE);
-        long orderSessionBudget = boundedLong(properties, "order_session_budget", 10_000_000L, 1, 100_000_000_000L);
+        long balance = boundedLong(properties, "balance", 0, 0, Long.MAX_VALUE);
         Set<String> orderServerHosts = Arrays.stream(properties.getProperty("order_server_hosts", "play.donutsmp.net,donutsmp.net").split(","))
                 .map(value -> value.strip().toLowerCase(Locale.ROOT)).filter(value -> value.matches("[a-z0-9.-]{1,253}"))
                 .collect(Collectors.toUnmodifiableSet());
@@ -80,7 +79,7 @@ final class ClientConfig {
         return new Settings(backend, token, Duration.ofMillis(milliseconds),
                 Boolean.parseBoolean(properties.getProperty("chat_alerts", "true")), balance,
                 usedOrderSlots, usedAuctionSlots, Boolean.parseBoolean(properties.getProperty("diagnostics", "true")), installId,
-                orderSessionBudget, orderServerHosts, activeOrderItems);
+                orderServerHosts, activeOrderItems);
     }
 
     static void saveChatAlerts(boolean enabled) {
@@ -123,12 +122,11 @@ final class ClientConfig {
         properties.setProperty("client_token", "");
         properties.setProperty("poll_millis", "250");
         properties.setProperty("chat_alerts", "true");
-		properties.setProperty("balance", "10000000");
+		properties.setProperty("balance", "0");
 		properties.setProperty("used_order_slots", "0");
 		properties.setProperty("used_auction_slots", "0");
 		properties.setProperty("diagnostics", "true");
 		properties.setProperty("install_id", "");
-		properties.setProperty("order_session_budget", "10000000");
 		properties.setProperty("order_server_hosts", "play.donutsmp.net,donutsmp.net");
 		properties.setProperty("active_order_items", "");
         return properties;

@@ -275,7 +275,7 @@ func TestOrderAuctionPageReportsRealObserverStateWithoutFakeRows(t *testing.T) {
 			t.Fatalf("order-auction page missing %q", expected)
 		}
 	}
-	for _, noise := range []string{"legacy reductions quarantined", "$10M reference portfolio", "Auction → existing order", "Blocked and stale candidate diagnostics"} {
+	for _, noise := range []string{"legacy reductions quarantined", "$10M", "Auction → existing order", "Blocked and stale candidate diagnostics"} {
 		if strings.Contains(body, noise) {
 			t.Fatalf("simple order page still contains debug section %q", noise)
 		}

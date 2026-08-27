@@ -1210,16 +1210,6 @@ func TestCandidateOrderObservationTrustWindow(t *testing.T) {
 	}
 }
 
-func TestReferenceExitFloorScalesWithBalanceAndSlotScarcity(t *testing.T) {
-	candidates := []Candidate{{Route: "ORDER_TO_AUCTION", State: "READY", ConservativeProfit: 10_000, ConfidenceBPS: 8_000, CompletionBPS: 8_000}}
-	starter := ReferenceMinimumProfitPerExit(candidates, 10_000_000, 18)
-	progressed := ReferenceMinimumProfitPerExit(candidates, 100_000_000, 18)
-	scarce := ReferenceMinimumProfitPerExit(candidates, 10_000_000, 1)
-	if starter <= 0 || progressed <= starter || scarce <= starter {
-		t.Fatalf("dynamic floors starter=%d progressed=%d scarce=%d", starter, progressed, scarce)
-	}
-}
-
 func TestCandidateUsesCalibratedExactExitConfidenceAndVolumeFreshness(t *testing.T) {
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 	evidence := Evidence{Signature: "minecraft:diamond_block", ItemID: "minecraft:diamond_block", DisplayName: "Diamond Block",

@@ -13,6 +13,8 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -23,6 +25,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -42,7 +45,8 @@ final class CandidateFeedClient implements AutoCloseable {
     private static final int MAX_CANDIDATES = 100;
     private static final Pattern ITEM_ID = Pattern.compile("[a-z0-9_.-]+:[a-z0-9_./-]+");
     private static final Pattern AUCTION_COMMAND = Pattern.compile("/ah(?: [a-z0-9_-]{1,64})?");
-    private static final Pattern BALANCE = Pattern.compile("(?i)\\b(?:balance|money|cash)\\b[^$0-9]{0,20}\\$?([0-9][0-9,]*)");
+    private static final Pattern LABELED_BALANCE = Pattern.compile("(?i)\\b(?:balance|money|cash)\\b[^$0-9]{0,20}\\$?\\s*([0-9][0-9,]*(?:\\.[0-9]+)?)([KMBT]?)\\b");
+    private static final Pattern SIDEBAR_BALANCE = Pattern.compile("(?i)^\\s*\\$\\s*([0-9][0-9,]*(?:\\.[0-9]+)?)([KMBT]?)\\s*$");
     private static final String MOD_VERSION = FabricLoader.getInstance().getModContainer("donut-network-client")
             .map(container -> container.getMetadata().getVersion().getFriendlyString()).orElse("unknown");
 
@@ -66,6 +70,8 @@ final class CandidateFeedClient implements AutoCloseable {
     private final AtomicReference<Instant> generatedAt = new AtomicReference<>(Instant.EPOCH);
     private final AtomicLong balance;
     private final AtomicReference<String> balanceSource = new AtomicReference<>("saved/manual");
+    private final AtomicLong pendingBalanceCeiling = new AtomicLong(Long.MAX_VALUE);
+    private final AtomicLong pendingBalanceUntilMillis = new AtomicLong();
     private final AtomicLong usedSlots;
     private final Set<String> activeOrderItems = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean diagnostics;
@@ -104,7 +110,6 @@ final class CandidateFeedClient implements AutoCloseable {
     int usedAuctionSlots() { return unpackAuction(usedSlots.get()); }
     boolean diagnosticsEnabled() { return diagnostics.get(); }
     Instant generatedAt() { return generatedAt.get(); }
-    long orderSessionBudget() { return config.orderSessionBudget(); }
     Set<String> orderServerHosts() { return config.orderServerHosts(); }
 
     Optional<Candidate> candidate(String id) {
@@ -144,17 +149,68 @@ final class CandidateFeedClient implements AutoCloseable {
 
     void adjustBalance(long delta) {
         balance.updateAndGet(value -> delta > 0 && value > Long.MAX_VALUE - delta ? Long.MAX_VALUE : Math.max(0, value + delta));
+        pendingBalanceCeiling.set(Long.MAX_VALUE);
+        pendingBalanceUntilMillis.set(0);
         balanceSource.set("manual");
         persistAndAllocate();
     }
 
     void observeBalance(String message) {
-        Matcher matcher = BALANCE.matcher(message == null ? "" : message.replace("§", ""));
-        if (!matcher.find()) return;
+        parseBalance(message, LABELED_BALANCE).ifPresent(value -> updateBalance(value, "labeled chat"));
+    }
+
+    void observeSidebarBalance(Iterable<String> lines) {
+        if (lines == null) return;
+        for (String line : lines) {
+            OptionalLong parsed = parseBalance(line, SIDEBAR_BALANCE);
+            if (parsed.isPresent()) {
+                updateBalance(parsed.getAsLong(), "scoreboard");
+                return;
+            }
+        }
+    }
+
+    static OptionalLong parseSidebarBalance(String line) {
+        return parseBalance(line, SIDEBAR_BALANCE);
+    }
+
+    private static OptionalLong parseBalance(String text, Pattern pattern) {
+        String clean = text == null ? "" : text.replaceAll("§[0-9A-FK-ORa-fk-or]", "").strip();
+        Matcher matcher = pattern.matcher(clean);
+        if (!matcher.find()) return OptionalLong.empty();
         try {
-            long observed = Long.parseLong(matcher.group(1).replace(",", ""));
-            balance.set(observed); balanceSource.set("labeled chat"); persistAndAllocate();
-        } catch (NumberFormatException ignored) { }
+            BigDecimal amount = new BigDecimal(matcher.group(1).replace(",", ""));
+            long multiplier = switch (matcher.group(2).toUpperCase(Locale.ROOT)) {
+                case "K" -> 1_000L;
+                case "M" -> 1_000_000L;
+                case "B" -> 1_000_000_000L;
+                case "T" -> 1_000_000_000_000L;
+                default -> 1L;
+            };
+            BigDecimal dollars = amount.multiply(BigDecimal.valueOf(multiplier)).setScale(0, RoundingMode.DOWN);
+            if (dollars.signum() < 0 || dollars.compareTo(BigDecimal.valueOf(Long.MAX_VALUE)) > 0) return OptionalLong.empty();
+            return OptionalLong.of(dollars.longValueExact());
+        } catch (ArithmeticException | NumberFormatException error) {
+            return OptionalLong.empty();
+        }
+    }
+
+    private void updateBalance(long observed, String source) {
+        long effective = observed;
+        String effectiveSource = source;
+        if (source.equals("scoreboard")) {
+            long ceiling = pendingBalanceCeiling.get();
+            if (System.currentTimeMillis() < pendingBalanceUntilMillis.get() && observed > ceiling) {
+                effective = ceiling;
+                effectiveSource = "scoreboard (pending order)";
+            } else {
+                pendingBalanceCeiling.set(Long.MAX_VALUE);
+                pendingBalanceUntilMillis.set(0);
+            }
+        }
+        long previous = balance.getAndSet(effective);
+        String previousSource = balanceSource.getAndSet(effectiveSource);
+        if (previous != effective || !previousSource.equals(effectiveSource)) persistAndAllocate();
     }
 
     void adjustUsedSlots(int orderDelta, int auctionDelta) {
@@ -170,7 +226,9 @@ final class CandidateFeedClient implements AutoCloseable {
     }
 
     void recordOrderSubmitted(Candidate candidate, OrderPlan plan) {
-        balance.updateAndGet(value -> Math.max(0, value - plan.escrowDollars()));
+        long afterEscrow = balance.updateAndGet(value -> Math.max(0, value - plan.escrowDollars()));
+        pendingBalanceCeiling.set(afterEscrow);
+        pendingBalanceUntilMillis.set(System.currentTimeMillis() + 10_000);
         usedSlots.updateAndGet(value -> packSlots(Math.min(20, unpackOrder(value) + 1), unpackAuction(value)));
         activeOrderItems.add(candidate.itemId());
         balanceSource.set("local pending order");
