@@ -1295,7 +1295,8 @@ func TestAuctionResearchTargetsPreferValuableLiquidCanonicalItems(t *testing.T) 
 	if len(targets) != 2 || targets[0] != "minecraft:diamond" || targets[1] != "minecraft:iron_ingot" {
 		t.Fatalf("auction shortlist=%v", targets)
 	}
-	if !canonicalBaseItem("minecraft:redstone_block") || canonicalBaseItem("minecraft:redstone block") || canonicalBaseItem("minecraft:my") {
+	if !canonicalBaseItem("minecraft:redstone_block") || canonicalBaseItem("minecraft:redstone block") || canonicalBaseItem("minecraft:my") ||
+		canonicalBaseItem("minecraft:netherite_spear") || canonicalBaseItem("minecraft:shulker_box") {
 		t.Fatal("canonical search safety policy is inconsistent")
 	}
 }

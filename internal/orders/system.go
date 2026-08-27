@@ -269,6 +269,37 @@ type rankedAuctionTarget struct {
 	score     int64
 }
 
+// Keep the API-first research frontier aligned with the collector's audited
+// base-only signature policy. Variant-bearing markets can be observed safely,
+// but cannot become actionable until component-aware identity exists, so they
+// must not consume the sole observer's focused time.
+var auctionResearchBaseItems = map[string]struct{}{
+	"minecraft:ancient_debris": {}, "minecraft:amethyst_shard": {}, "minecraft:apple": {}, "minecraft:armadillo_scute": {},
+	"minecraft:blaze_powder": {}, "minecraft:blaze_rod": {}, "minecraft:bone": {}, "minecraft:bone_meal": {}, "minecraft:blue_ice": {}, "minecraft:breeze_rod": {},
+	"minecraft:charcoal": {}, "minecraft:coal": {}, "minecraft:coal_block": {}, "minecraft:cobblestone": {}, "minecraft:copper_ingot": {}, "minecraft:crying_obsidian": {},
+	"minecraft:diamond": {}, "minecraft:diamond_block": {}, "minecraft:dirt": {}, "minecraft:emerald": {}, "minecraft:emerald_block": {}, "minecraft:end_crystal": {},
+	"minecraft:ender_eye": {}, "minecraft:ender_pearl": {}, "minecraft:enchanted_golden_apple": {}, "minecraft:experience_bottle": {}, "minecraft:feather": {},
+	"minecraft:fermented_spider_eye": {}, "minecraft:ghast_tear": {}, "minecraft:glass": {}, "minecraft:glow_ink_sac": {}, "minecraft:gold_ingot": {},
+	"minecraft:gold_nugget": {}, "minecraft:golden_apple": {}, "minecraft:golden_carrot": {}, "minecraft:gravel": {}, "minecraft:gunpowder": {},
+	"minecraft:heart_of_the_sea": {}, "minecraft:honey_block": {}, "minecraft:honeycomb": {}, "minecraft:honeycomb_block": {}, "minecraft:ink_sac": {},
+	"minecraft:gilded_blackstone": {}, "minecraft:hopper": {}, "minecraft:iron_block": {}, "minecraft:iron_ingot": {}, "minecraft:iron_nugget": {},
+	"minecraft:lapis_block": {}, "minecraft:lapis_lazuli": {}, "minecraft:leather": {}, "minecraft:magma_cream": {}, "minecraft:nether_quartz_ore": {},
+	"minecraft:netherite_block": {}, "minecraft:netherite_ingot": {}, "minecraft:netherite_scrap": {}, "minecraft:obsidian": {}, "minecraft:phantom_membrane": {},
+	"minecraft:prismarine_crystals": {}, "minecraft:prismarine_shard": {}, "minecraft:quartz": {}, "minecraft:quartz_block": {}, "minecraft:rabbit_foot": {},
+	"minecraft:rabbit_hide": {}, "minecraft:raw_copper": {}, "minecraft:raw_copper_block": {}, "minecraft:raw_gold": {}, "minecraft:raw_gold_block": {},
+	"minecraft:raw_iron": {}, "minecraft:raw_iron_block": {}, "minecraft:red_sand": {}, "minecraft:redstone": {}, "minecraft:redstone_block": {},
+	"minecraft:rotten_flesh": {}, "minecraft:sand": {}, "minecraft:scute": {}, "minecraft:slime_ball": {}, "minecraft:spider_eye": {}, "minecraft:sponge": {},
+	"minecraft:stone": {}, "minecraft:string": {}, "minecraft:totem_of_undying": {}, "minecraft:anvil": {}, "minecraft:blast_furnace": {},
+	"minecraft:bone_block": {}, "minecraft:bookshelf": {}, "minecraft:carved_pumpkin": {}, "minecraft:cauldron": {}, "minecraft:chipped_anvil": {},
+	"minecraft:cobweb": {}, "minecraft:dead_fire_coral_fan": {}, "minecraft:diamond_ore": {}, "minecraft:fletching_table": {}, "minecraft:glass_bottle": {},
+	"minecraft:glowstone": {}, "minecraft:glowstone_dust": {}, "minecraft:ice": {}, "minecraft:jukebox": {}, "minecraft:lever": {}, "minecraft:note_block": {},
+	"minecraft:oxidized_copper_bulb": {}, "minecraft:pale_oak_shelf": {}, "minecraft:polished_blackstone": {}, "minecraft:quartz_stairs": {}, "minecraft:rail": {},
+	"minecraft:redstone_lamp": {}, "minecraft:redstone_torch": {}, "minecraft:sculk_catalyst": {}, "minecraft:sea_lantern": {}, "minecraft:slime_block": {},
+	"minecraft:sticky_piston": {}, "minecraft:stripped_acacia_log": {}, "minecraft:target": {}, "minecraft:tinted_glass": {}, "minecraft:warped_trapdoor": {},
+	"minecraft:waxed_oxidized_copper_bulb": {}, "minecraft:wind_charge": {}, "minecraft:white_wool": {}, "minecraft:red_wool": {}, "minecraft:gray_wool": {},
+	"minecraft:lime_concrete": {}, "minecraft:yellow_concrete": {}, "minecraft:black_glazed_terracotta": {}, "minecraft:green_glazed_terracotta": {},
+}
+
 func auctionResearchTargets(values map[string]market.Valuation, now time.Time, limit int) []string {
 	best := make(map[string]int64)
 	for _, value := range values {
@@ -323,7 +354,8 @@ func canonicalBaseItem(signature string) bool {
 	case "buy", "cancel", "claim", "collect", "confirm", "create", "fulfill", "help", "list", "my", "purchase", "reload", "search", "sell":
 		return false
 	}
-	return true
+	_, allowed := auctionResearchBaseItems[signature]
+	return allowed
 }
 
 func (s *System) Debug(ctx context.Context) (DebugSnapshot, error) {
