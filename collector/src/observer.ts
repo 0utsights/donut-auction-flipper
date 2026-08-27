@@ -29,7 +29,7 @@ const AUTOMATIC_FOCUSED_RUNTIME_MS = 120_000
 // Priority 75 is reserved for an item whose long-lived fill profile is already
 // proven. It still receives fresh menu samples, but does not repeat the full
 // two-minute discovery process needed by a new market.
-const PROFILE_REVALIDATION_RUNTIME_MS = 20_000
+const PROFILE_REVALIDATION_RUNTIME_MS = 150_000
 // A runaway guard, not a normal scan boundary. The live market has exceeded
 // 200 pages, so discovery must continue until the server removes pagination or
 // refuses to advance it. Connections are rotated after every completed pass.

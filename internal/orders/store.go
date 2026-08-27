@@ -343,9 +343,10 @@ func (s *Store) Heartbeat(ctx context.Context, heartbeat Heartbeat) error {
 }
 
 // automaticFocusDiscoveryPage guarantees that the sole observer samples a
-// useful breadth of the price-sorted market before recurring research can take
-// over. At the observed cadence this is roughly four minutes of discovery.
-const automaticFocusDiscoveryPage = 200
+// useful breadth of the highest-per-item price-sorted market before recurring
+// research can take over. At the observed cadence this is roughly two to three
+// minutes and reaches the retained commodity profiles seen in production.
+const automaticFocusDiscoveryPage = 120
 
 // ShouldYieldDiscovery lets a discovery pass hand its observer to focused
 // work. Player-requested watches preempt immediately; automatic research waits
@@ -362,7 +363,7 @@ func (s *Store) ShouldYieldDiscovery(ctx context.Context, heartbeat Heartbeat) (
 		WHERE active.id=? AND active.kind='discovery' AND active.state='leased'
 			AND active.assigned_observer=? AND active.lease_token=? AND active.lease_expires_ms>?
 			AND EXISTS(SELECT 1 FROM tasks focused WHERE focused.kind='focused_watch' AND focused.state='ready'
-				AND (focused.automatic=0 OR focused.priority>=75 OR ?>=?))
+				AND (focused.automatic=0 OR ?>=?))
 	)`, heartbeat.TaskID, heartbeat.ObserverID, heartbeat.LeaseToken, s.now().UnixMilli(), heartbeat.Page, automaticFocusDiscoveryPage).Scan(&ready)
 	return ready == 1, err
 }
@@ -871,8 +872,16 @@ func (s *Store) enrichEvidence(ctx context.Context, evidence []Evidence) error {
 
 	recent := s.now().Add(-orderObservationWindow).UnixMilli()
 	signatureRecent := s.now().Add(-signatureEvidenceWindow).UnixMilli()
-	completeRows, err := s.db.QueryContext(ctx, `SELECT signature,MIN(signature_complete) FROM order_rows
-		WHERE unit_reward_cents>0 AND observed_ms>=? GROUP BY signature`, signatureRecent)
+	// A fresh parser result must be able to supersede that observer's older,
+	// conservative classification immediately. Retaining MIN across every row
+	// in the window made one old incomplete row poison an item for ten minutes.
+	// Consensus is still fail-closed: the latest result from every observer that
+	// sampled the signature in the window must agree that it is complete.
+	completeRows, err := s.db.QueryContext(ctx, `WITH latest AS (
+		SELECT signature,observer_id,signature_complete,
+			ROW_NUMBER() OVER (PARTITION BY signature,observer_id ORDER BY observed_ms DESC,id DESC) AS sample_rank
+		FROM order_rows WHERE unit_reward_cents>0 AND observed_ms>=?)
+		SELECT signature,MIN(signature_complete) FROM latest WHERE sample_rank=1 GROUP BY signature`, signatureRecent)
 	if err != nil {
 		return err
 	}

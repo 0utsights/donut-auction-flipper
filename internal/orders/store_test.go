@@ -216,6 +216,49 @@ func TestStoreIndexesFreshnessWindows(t *testing.T) {
 	}
 }
 
+func TestLatestObserverClassificationSupersedesOlderRowsButPreservesConsensus(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, 8, 27, 20, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	if _, err := store.db.Exec(`INSERT INTO order_evidence_summary(signature,item_id,display_name,complete_scans,first_seen_ms,last_seen_ms,observed_quantity,max_stack_size,available_units)
+		VALUES('minecraft:stone','minecraft:stone','Stone',3,?,?,64,64,64)`, now.Add(-time.Minute).UnixMilli(), now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	insert := func(observer string, complete bool, observed time.Time) {
+		t.Helper()
+		result, err := store.db.Exec(`INSERT INTO scans(observer_id,task_id,session_id,content_hash,screen_title,page,complete,unknown_schema,schema_reason,observed_ms,received_ms)
+			VALUES(?,'',?,?, 'Orders (Page 1)',1,1,0,'',?,?)`, observer, observer+observed.String(), observer+observed.String(), observed.UnixMilli(), observed.UnixMilli())
+		if err != nil {
+			t.Fatal(err)
+		}
+		scanID, err := result.LastInsertId()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.Exec(`INSERT INTO order_rows(scan_id,observer_id,order_key,item_id,signature,display_name,quantity,max_stack_size,unit_reward,unit_reward_cents,requested_quantity,remaining_quantity,owner,expires_ms,price_position,slot,raw_field_hash,signature_complete,identity_verified,observed_ms)
+			VALUES(?,?,?,'minecraft:stone','minecraft:stone','Stone',64,64,0,100,64,64,'',0,1,0,?,?,1,?)`,
+			scanID, observer, observer+observed.String(), observer+observed.String(), boolInt(complete), observed.UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert("one", false, now.Add(-time.Minute))
+	insert("one", true, now.Add(-30*time.Second))
+	insert("two", true, now.Add(-20*time.Second))
+	evidence, err := store.Evidence(context.Background())
+	if err != nil || len(evidence) != 1 || !evidence[0].SignatureComplete {
+		t.Fatalf("fresh observer classifications did not replace an old incomplete row: evidence=%+v err=%v", evidence, err)
+	}
+	insert("two", false, now.Add(-10*time.Second))
+	evidence, err = store.Evidence(context.Background())
+	if err != nil || len(evidence) != 1 || evidence[0].SignatureComplete {
+		t.Fatalf("latest observer disagreement did not fail closed: evidence=%+v err=%v", evidence, err)
+	}
+}
+
 func TestEmptyCandidateFeedSerializesAsArray(t *testing.T) {
 	system, err := NewSystem(Config{})
 	if err != nil {
@@ -345,7 +388,7 @@ func TestAutomaticResearchWaitsForDiscoveryBreadthFloor(t *testing.T) {
 	}
 }
 
-func TestProfileRevalidationPreemptsDiscoveryBeforeBreadthFloor(t *testing.T) {
+func TestProfileRevalidationWaitsForEconomicallySortedBreadthFloor(t *testing.T) {
 	system, err := NewSystem(Config{})
 	if err != nil {
 		t.Fatal(err)
@@ -364,8 +407,12 @@ func TestProfileRevalidationPreemptsDiscoveryBeforeBreadthFloor(t *testing.T) {
 		t.Fatal(err)
 	}
 	heartbeat := Heartbeat{ObserverID: "one", State: "scanning", TaskID: discovery.ID, LeaseToken: discovery.LeaseToken, Page: 3}
+	if yield, yieldErr := system.ShouldYieldDiscovery(ctx, heartbeat); yieldErr != nil || yield {
+		t.Fatalf("profile revalidation starved the price-sorted discovery lane: yield=%v err=%v", yield, yieldErr)
+	}
+	heartbeat.Page = automaticFocusDiscoveryPage
 	if yield, yieldErr := system.ShouldYieldDiscovery(ctx, heartbeat); yieldErr != nil || !yield {
-		t.Fatalf("proven market did not enter fast revalidation: yield=%v err=%v", yield, yieldErr)
+		t.Fatalf("profile revalidation did not run after the breadth floor: yield=%v err=%v", yield, yieldErr)
 	}
 }
 
