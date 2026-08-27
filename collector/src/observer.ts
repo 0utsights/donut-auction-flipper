@@ -228,36 +228,39 @@ class ObserverRuntime {
       const parsed = listingViews.map(parseOrder).filter(value => value !== undefined)
       const complete = schema !== undefined && listingViews.every(view => parseOrder(view) !== undefined)
       const observedPage = parsePage(captured.title, pageIndex + 1)
-      const filteredMismatch = task.kind === 'focused_watch' && task.signature !== undefined && parsed.some(order => order.signature !== task.signature)
-      const filteredSortInvalid = task.kind === 'focused_watch' && listingViews.length > 0 && !isFilteredMostPerItemOrder(parsed, listingViews.length)
+      const submittedOrders = task.kind === 'focused_watch' && task.signature !== undefined
+        ? parsed.filter(order => order.signature === task.signature) : parsed
+      const filteredSortInvalid = task.kind === 'focused_watch' && submittedOrders.length > 0 && !isFilteredMostPerItemOrder(submittedOrders, submittedOrders.length)
       const filteredPageInvalid = task.kind === 'focused_watch' && observedPage !== 1
       const scan: ScanBatch = {
         schema_version: SCHEMA_VERSION, observer_id: this.config.account.id, task_id: task.id, lease_token: task.lease_token, session_id: sessionId,
         content_hash: captured.hash, screen_title: captured.title, page: observedPage, complete,
-        observed_at: new Date().toISOString(), orders: parsed,
+        observed_at: new Date().toISOString(), orders: submittedOrders,
         ...(!schema ? { unknown_schema: true, schema_reason: 'no verified menu schema; capture only and no clicks performed' } : {}),
         ...(schema && !complete ? { unknown_schema: true, schema_reason: 'verified layout contained an unparseable listing slot; navigation stopped' } : {}),
-        ...(filteredMismatch ? { unknown_schema: true, schema_reason: 'item-filtered result contained a different canonical item; observation rejected' } : {}),
         ...(filteredSortInvalid ? { unknown_schema: true, schema_reason: 'item-filtered result did not prove a descending unit-reward order; observation rejected' } : {}),
         ...(filteredPageInvalid ? { unknown_schema: true, schema_reason: 'item-filtered result did not open on its highest-reward page; observation rejected' } : {})
       }
       this.activePage = scan.page
       await this.backend.submitScan(scan)
       this.ensureConnected(bot)
-      this.log('page_submitted', `page=${scan.page} orders=${parsed.length} complete=${scan.complete}`)
+      this.log('page_submitted', `page=${scan.page} orders=${submittedOrders.length} complete=${scan.complete}`)
+      if (task.kind === 'focused_watch' && parsed.length !== submittedOrders.length) {
+        this.log('filtered_search_noise_ignored', `ignored=${parsed.length - submittedOrders.length}`)
+      }
       const yieldToFocus = await this.backend.heartbeat(schema && complete ? 'scanning' : 'schema_hold', task.id, task.lease_token, scan.page, bot.player?.ping ?? 0, this.reconnects)
       if (yieldToFocus && task.kind === 'discovery') {
         this.log('discovery_yielding_to_focus', `page=${scan.page}`)
         return
       }
-      if (!schema || !complete || filteredMismatch || filteredSortInvalid || filteredPageInvalid) {
+      if (!schema || !complete || filteredSortInvalid || filteredPageInvalid) {
         this.writeCapture(task.id, captured.hash, captured.title, captured.views)
         this.log('schema_hold', `content=${captured.hash.slice(0, 12)}`)
         if (task.kind === 'focused_watch' && bot.currentWindow) bot.closeWindow(bot.currentWindow)
         throw new SchemaHoldError(scan.schema_reason ?? 'order menu schema requires review')
       }
       if (task.kind === 'focused_watch') {
-        if (parsed.some(order => order.signature === task.signature)) {
+        if (submittedOrders.length > 0) {
           if (![...schema.controls.values()].some(rule => rule.kind === 'refresh')) throw new SchemaHoldError('focused-watch refresh control is unavailable')
           if (Date.now() >= taskDeadline) {
             if (bot.currentWindow) bot.closeWindow(bot.currentWindow)
