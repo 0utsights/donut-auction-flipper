@@ -28,7 +28,7 @@ const (
 	diagnosticRetention      = 14 * 24 * time.Hour
 	backupRetention          = 7 * 24 * time.Hour
 	orderObservationWindow   = time.Hour
-	signatureEvidenceWindow  = 10 * time.Minute
+	signatureEvidenceWindow  = orderObservationWindow
 	cleanupBatchSize         = 250
 	cleanupYield             = 5 * time.Millisecond
 	profileMinFillEvents     = 5
@@ -154,6 +154,9 @@ func (s *Store) migrate() error {
 	}
 	if _, err := s.db.Exec(`ALTER TABLE order_rows ADD COLUMN signature_complete INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 		return fmt.Errorf("migrate signature completeness: %w", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE order_rows ADD COLUMN parser_version TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return fmt.Errorf("migrate order parser version: %w", err)
 	}
 	if _, err := s.db.Exec(`ALTER TABLE order_rows ADD COLUMN identity_verified INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 		return fmt.Errorf("migrate order identity verification: %w", err)
@@ -448,12 +451,12 @@ func (s *Store) SaveScan(ctx context.Context, batch ScanBatch) (bool, error) {
 		return false, err
 	}
 	defer tx.Rollback()
-	var registered int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM observers WHERE observer_id=?`, batch.ObserverID).Scan(&registered); err != nil {
+	var parserVersion string
+	if err := tx.QueryRowContext(ctx, `SELECT parser_version FROM observers WHERE observer_id=?`, batch.ObserverID).Scan(&parserVersion); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, errors.New("observer is not registered")
+		}
 		return false, err
-	}
-	if registered != 1 {
-		return false, errors.New("observer is not registered")
 	}
 	taskKind, taskSignature := "", ""
 	if batch.TaskID != "" {
@@ -505,10 +508,10 @@ func (s *Store) SaveScan(ctx context.Context, batch ScanBatch) (bool, error) {
 			previousErr := tx.QueryRowContext(ctx, `SELECT r.remaining_quantity,r.observed_ms,r.identity_verified FROM order_rows r JOIN scans prior_scan ON prior_scan.id=r.scan_id
 				WHERE r.observer_id=? AND r.order_key=? AND r.unit_reward_cents=? AND prior_scan.page=? AND prior_scan.task_id=? AND r.observed_ms<?
 				ORDER BY r.observed_ms DESC LIMIT 1`, batch.ObserverID, order.OrderKey, order.UnitRewardCents, batch.Page, batch.TaskID, batch.ObservedAt.UnixMilli()).Scan(&previous, &previousObserved, &previousIdentity)
-			_, err = tx.ExecContext(ctx, `INSERT INTO order_rows(scan_id,observer_id,order_key,item_id,signature,display_name,quantity,max_stack_size,unit_reward,unit_reward_cents,requested_quantity,remaining_quantity,owner,expires_ms,price_position,slot,raw_field_hash,signature_complete,identity_verified,observed_ms)
-				VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, scanID, batch.ObserverID, order.OrderKey, order.ItemID, order.Signature,
+			_, err = tx.ExecContext(ctx, `INSERT INTO order_rows(scan_id,observer_id,order_key,item_id,signature,display_name,quantity,max_stack_size,unit_reward,unit_reward_cents,requested_quantity,remaining_quantity,owner,expires_ms,price_position,slot,raw_field_hash,signature_complete,parser_version,identity_verified,observed_ms)
+				VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, scanID, batch.ObserverID, order.OrderKey, order.ItemID, order.Signature,
 				order.DisplayName, order.Quantity, order.MaxStackSize, 0, order.UnitRewardCents, order.RequestedQuantity, order.RemainingQuantity,
-				order.Owner, timeMillis(order.ExpiresAt), order.PricePosition, order.Slot, order.RawFieldHash, boolInt(order.SignatureComplete), boolInt(order.IdentityVerified), batch.ObservedAt.UnixMilli())
+				order.Owner, timeMillis(order.ExpiresAt), order.PricePosition, order.Slot, order.RawFieldHash, boolInt(order.SignatureComplete), parserVersion, boolInt(order.IdentityVerified), batch.ObservedAt.UnixMilli())
 			if err != nil {
 				return false, err
 			}
@@ -877,14 +880,14 @@ func (s *Store) enrichEvidence(ctx context.Context, evidence []Evidence) error {
 	recent := s.now().Add(-orderObservationWindow).UnixMilli()
 	signatureRecent := s.now().Add(-signatureEvidenceWindow).UnixMilli()
 	// A fresh parser result must be able to supersede that observer's older,
-	// conservative classification immediately. Retaining MIN across every row
-	// in the window made one old incomplete row poison an item for ten minutes.
-	// Consensus is still fail-closed: the latest result from every observer that
-	// sampled the signature in the window must agree that it is complete.
+	// conservative classification immediately. Only the observer's currently
+	// registered parser version may prove completeness, while that proof lives as
+	// long as the underlying one-hour order observation.
 	completeRows, err := s.db.QueryContext(ctx, `WITH latest AS (
-		SELECT signature,observer_id,signature_complete,
-			ROW_NUMBER() OVER (PARTITION BY signature,observer_id ORDER BY observed_ms DESC,id DESC) AS sample_rank
-		FROM order_rows WHERE unit_reward_cents>0 AND observed_ms>=?)
+		SELECT r.signature,r.observer_id,r.signature_complete,
+			ROW_NUMBER() OVER (PARTITION BY r.signature,r.observer_id ORDER BY r.observed_ms DESC,r.id DESC) AS sample_rank
+		FROM order_rows r JOIN observers o ON o.observer_id=r.observer_id
+		WHERE r.unit_reward_cents>0 AND r.observed_ms>=? AND r.parser_version=o.parser_version)
 		SELECT signature,MIN(signature_complete) FROM latest WHERE sample_rank=1 GROUP BY signature`, signatureRecent)
 	if err != nil {
 		return err
@@ -1097,7 +1100,8 @@ func (s *Store) scanCoverage(ctx context.Context) (ScanCoverage, error) {
 	if err = s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(CASE WHEN confirmation_level>=1 THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN confirmation_level<1 THEN 1 ELSE 0 END),0) FROM fill_events WHERE unit_reward_cents>0`).Scan(&value.ConfirmedFills, &value.QuarantinedFills); err != nil {
 		return value, err
 	}
-	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT signature) FROM order_rows WHERE signature_complete=1 AND unit_reward_cents>0 AND observed_ms>=?`, s.now().Add(-signatureEvidenceWindow).UnixMilli()).Scan(&value.CompleteSignatures); err != nil {
+	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT r.signature) FROM order_rows r JOIN observers o ON o.observer_id=r.observer_id
+		WHERE r.signature_complete=1 AND r.unit_reward_cents>0 AND r.observed_ms>=? AND r.parser_version=o.parser_version`, s.now().Add(-signatureEvidenceWindow).UnixMilli()).Scan(&value.CompleteSignatures); err != nil {
 		return value, err
 	}
 	if last > 0 {

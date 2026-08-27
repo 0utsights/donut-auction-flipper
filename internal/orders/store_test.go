@@ -228,6 +228,11 @@ func TestLatestObserverClassificationSupersedesOlderRowsButPreservesConsensus(t 
 		VALUES('minecraft:stone','minecraft:stone','Stone',3,?,?,64,64,64)`, now.Add(-time.Minute).UnixMilli(), now.UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
+	for _, observer := range []string{"one", "two"} {
+		if _, err := store.db.Exec(`INSERT INTO observers(observer_id,parser_version,proxy_label,state,last_seen_ms) VALUES(?,'p1','test','online',?)`, observer, now.UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+	}
 	insert := func(observer string, complete bool, observed time.Time) {
 		t.Helper()
 		result, err := store.db.Exec(`INSERT INTO scans(observer_id,task_id,session_id,content_hash,screen_title,page,complete,unknown_schema,schema_reason,observed_ms,received_ms)
@@ -239,8 +244,8 @@ func TestLatestObserverClassificationSupersedesOlderRowsButPreservesConsensus(t 
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.db.Exec(`INSERT INTO order_rows(scan_id,observer_id,order_key,item_id,signature,display_name,quantity,max_stack_size,unit_reward,unit_reward_cents,requested_quantity,remaining_quantity,owner,expires_ms,price_position,slot,raw_field_hash,signature_complete,identity_verified,observed_ms)
-			VALUES(?,?,?,'minecraft:stone','minecraft:stone','Stone',64,64,0,100,64,64,'',0,1,0,?,?,1,?)`,
+		if _, err := store.db.Exec(`INSERT INTO order_rows(scan_id,observer_id,order_key,item_id,signature,display_name,quantity,max_stack_size,unit_reward,unit_reward_cents,requested_quantity,remaining_quantity,owner,expires_ms,price_position,slot,raw_field_hash,signature_complete,parser_version,identity_verified,observed_ms)
+			VALUES(?,?,?,'minecraft:stone','minecraft:stone','Stone',64,64,0,100,64,64,'',0,1,0,?,?,'p1',1,?)`,
 			scanID, observer, observer+observed.String(), observer+observed.String(), boolInt(complete), observed.UnixMilli()); err != nil {
 			t.Fatal(err)
 		}
@@ -256,6 +261,13 @@ func TestLatestObserverClassificationSupersedesOlderRowsButPreservesConsensus(t 
 	evidence, err = store.Evidence(context.Background())
 	if err != nil || len(evidence) != 1 || evidence[0].SignatureComplete {
 		t.Fatalf("latest observer disagreement did not fail closed: evidence=%+v err=%v", evidence, err)
+	}
+	if _, err := store.db.Exec(`UPDATE observers SET parser_version='p2'`); err != nil {
+		t.Fatal(err)
+	}
+	evidence, err = store.Evidence(context.Background())
+	if err != nil || len(evidence) != 1 || evidence[0].SignatureComplete {
+		t.Fatalf("old parser version retained completeness: evidence=%+v err=%v", evidence, err)
 	}
 }
 
