@@ -370,7 +370,7 @@ func TestAutomaticResearchYieldsAfterTopPage(t *testing.T) {
 	if err != nil || discovery == nil || discovery.Kind != "discovery" {
 		t.Fatalf("discovery=%+v err=%v", discovery, err)
 	}
-	if err := system.store.QueueAutomaticResearch(ctx, []string{"minecraft:diamond_block"}, nil, time.Minute, 5*time.Minute); err != nil {
+	if err := system.store.QueueAutomaticResearch(ctx, []string{"minecraft:diamond_block"}, nil, time.Minute, 5*time.Minute, 5*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	heartbeat := Heartbeat{ObserverID: "one", State: "scanning", TaskID: discovery.ID, LeaseToken: discovery.LeaseToken, Page: automaticFocusDiscoveryPage}
@@ -399,7 +399,7 @@ func TestProfileRevalidationYieldsAfterTopPage(t *testing.T) {
 		t.Fatalf("discovery=%+v err=%v", discovery, err)
 	}
 	priorities := map[string]int{"minecraft:diamond_block": 75}
-	if err = system.store.QueueAutomaticResearch(ctx, []string{"minecraft:diamond_block"}, priorities, time.Minute, 5*time.Minute); err != nil {
+	if err = system.store.QueueAutomaticResearch(ctx, []string{"minecraft:diamond_block"}, priorities, time.Minute, 5*time.Minute, 5*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	heartbeat := Heartbeat{ObserverID: "one", State: "scanning", TaskID: discovery.ID, LeaseToken: discovery.LeaseToken, Page: automaticFocusDiscoveryPage}
@@ -613,7 +613,7 @@ func TestManualWatchUpgradesAutomaticResearchTask(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = system.Close() })
 	ctx := context.Background()
-	if err = system.store.QueueAutomaticResearch(ctx, []string{"minecraft:diamond_block"}, nil, time.Minute, 5*time.Minute); err != nil {
+	if err = system.store.QueueAutomaticResearch(ctx, []string{"minecraft:diamond_block"}, nil, time.Minute, 5*time.Minute, 5*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = system.AddWatch(ctx, "minecraft:diamond_block"); err != nil {
@@ -1355,6 +1355,38 @@ func TestAuctionShortlistPrecedesReplaceableFillerRefresh(t *testing.T) {
 	task, err := system.LeaseTask(ctx, "observer")
 	if err != nil || task == nil || task.Signature != "minecraft:netherite_ingot" {
 		t.Fatalf("price-first task=%+v err=%v", task, err)
+	}
+}
+
+func TestExplorationCooldownIsLongerThanCoreRecheck(t *testing.T) {
+	system, err := NewSystem(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	ctx := context.Background()
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	system.store.now = func() time.Time { return now }
+	signature := "minecraft:netherite_ingot"
+	if err = system.store.QueueAutomaticResearch(ctx, []string{signature}, map[string]int{signature: 50}, 0, 5*time.Minute, 20*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = system.store.db.Exec(`UPDATE tasks SET state='completed'`); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(10 * time.Minute)
+	if err = system.store.QueueAutomaticResearch(ctx, []string{signature}, map[string]int{signature: 50}, 0, 5*time.Minute, 20*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err = system.store.db.QueryRow(`SELECT COUNT(*) FROM tasks`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("exploration cooldown count=%d err=%v", count, err)
+	}
+	if err = system.store.QueueAutomaticResearch(ctx, []string{signature}, map[string]int{signature: 75}, 0, 5*time.Minute, 20*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err = system.store.db.QueryRow(`SELECT COUNT(*) FROM tasks`).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("core cooldown count=%d err=%v", count, err)
 	}
 }
 

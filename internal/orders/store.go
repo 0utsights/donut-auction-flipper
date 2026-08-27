@@ -640,7 +640,7 @@ func (s *Store) LeasedTaskKind(ctx context.Context, result TaskResult) (string, 
 // QueueAutomaticResearch creates at most one short focused task. Callers pass
 // signatures in preferred order; recent automatic samples are skipped so the
 // collector rotates through valuable markets instead of fixating on one item.
-func (s *Store) QueueAutomaticResearch(ctx context.Context, signatures []string, priorities map[string]int, minimumInterval, cooldown time.Duration) error {
+func (s *Store) QueueAutomaticResearch(ctx context.Context, signatures []string, priorities map[string]int, minimumInterval, coreCooldown, explorationCooldown time.Duration) error {
 	if len(signatures) == 0 {
 		return nil
 	}
@@ -670,6 +670,14 @@ func (s *Store) QueueAutomaticResearch(ctx context.Context, signatures []string,
 		if signature == "" {
 			continue
 		}
+		priority := priorities[signature]
+		if priority < 50 || priority > 75 {
+			priority = 50
+		}
+		cooldown := coreCooldown
+		if priority == 50 {
+			cooldown = explorationCooldown
+		}
 		var sampled int
 		if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE kind='focused_watch' AND automatic=1 AND signature=? AND updated_ms>?`,
 			signature, now.Add(-cooldown).UnixMilli()).Scan(&sampled); err != nil {
@@ -677,10 +685,6 @@ func (s *Store) QueueAutomaticResearch(ctx context.Context, signatures []string,
 		}
 		if sampled > 0 {
 			continue
-		}
-		priority := priorities[signature]
-		if priority < 50 || priority > 75 {
-			priority = 50
 		}
 		if _, err = tx.ExecContext(ctx, `INSERT INTO tasks(id,kind,signature,priority,desired_freshness_ms,parser_schema,state,automatic,created_ms,updated_ms)
 			VALUES(?,'focused_watch',?,?,1000,?,'ready',1,?,?)`, newID("task"), signature, priority, SchemaVersion, now.UnixMilli(), now.Add(-time.Second).UnixMilli()); err != nil {

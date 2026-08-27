@@ -179,7 +179,7 @@ func (s *System) queueAutomaticResearch(ctx context.Context) error {
 		signatures = append(signatures, signature)
 		priorities[signature] = 75
 	}
-	return s.store.QueueAutomaticResearch(ctx, signatures, priorities, 2*time.Second, 5*time.Minute)
+	return s.store.QueueAutomaticResearch(ctx, signatures, priorities, 2*time.Second, 5*time.Minute, 20*time.Minute)
 }
 
 func researchSchedulingTier(candidate Candidate) int {
@@ -242,10 +242,10 @@ func (s *System) refreshLocked(ctx context.Context, engine *market.Engine) error
 	}
 	now := s.now()
 	marketSnapshot := engine.Snapshot()
-	// Twenty-four targets keep one complete rotation short while leaving enough
-	// breadth to fill the player's twenty order slots after unprofitable spreads
-	// and unavailable order markets are discarded.
-	targets := auctionResearchTargets(marketSnapshot.Valuations, now, 24)
+	// Sixty direct-search targets provide enough breadth to find twenty positions
+	// after unavailable and unprofitable spreads are discarded. CORE markets use
+	// a separate faster recheck cadence, so this exploration cannot age them out.
+	targets := auctionResearchTargets(marketSnapshot.Valuations, now, 60)
 	s.research.Store(&targets)
 	valuations := make(map[string]market.Valuation, len(evidence))
 	for _, item := range evidence {
