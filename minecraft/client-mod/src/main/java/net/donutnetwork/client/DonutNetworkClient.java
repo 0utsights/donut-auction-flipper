@@ -83,9 +83,9 @@ public final class DonutNetworkClient implements ClientModInitializer {
     private void observeSidebarBalance(MinecraftClient client) {
         if (++scoreboardPollTicks < 20) return;
         scoreboardPollTicks = 0;
-        if (client.world == null) return;
+        if (client.world == null || client.player == null) return;
         Scoreboard scoreboard = client.world.getScoreboard();
-        ScoreboardObjective objective = scoreboard.getObjectiveForSlot(ScoreboardDisplaySlot.SIDEBAR);
+        ScoreboardObjective objective = visibleSidebarObjective(scoreboard, client.player.getNameForScoreboard());
         if (objective == null) return;
         List<String> lines = new ArrayList<>();
         for (ScoreboardEntry entry : scoreboard.getScoreboardEntries(objective)) {
@@ -101,6 +101,17 @@ public final class DonutNetworkClient implements ClientModInitializer {
             lines.add(entry.owner());
         }
         candidates.observeSidebarBalance(lines);
+    }
+
+    /** Mirrors InGameHud's team-colored sidebar selection before its default fallback. */
+    static ScoreboardObjective visibleSidebarObjective(Scoreboard scoreboard, String playerName) {
+        ScoreboardObjective objective = null;
+        Team playerTeam = scoreboard.getScoreHolderTeam(playerName);
+        if (playerTeam != null) {
+            ScoreboardDisplaySlot teamSlot = ScoreboardDisplaySlot.fromFormatting(playerTeam.getColor());
+            if (teamSlot != null) objective = scoreboard.getObjectiveForSlot(teamSlot);
+        }
+        return objective != null ? objective : scoreboard.getObjectiveForSlot(ScoreboardDisplaySlot.SIDEBAR);
     }
 
     static String composeSidebarRow(String name, String score) {

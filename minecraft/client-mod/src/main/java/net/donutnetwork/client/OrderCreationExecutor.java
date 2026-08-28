@@ -59,6 +59,9 @@ final class OrderCreationExecutor {
     private static final Set<String> SEARCH_ACTIONS = Set.of("search");
     private static final Set<String> AMOUNT_ACTIONS = Set.of("next", "continue", "set amount");
     private static final Set<String> PRICE_ACTIONS = Set.of("review order");
+    private static final Set<String> CREATE_PANE_ITEMS = Set.of(
+            "minecraft:black_stained_glass_pane", "minecraft:gray_stained_glass_pane",
+            "minecraft:green_stained_glass_pane", "minecraft:lime_stained_glass_pane");
 
     private final CandidateFeedClient feed;
     private OrderPlan plan;
@@ -193,11 +196,19 @@ final class OrderCreationExecutor {
         if (Duration.between(armedAt, now).compareTo(WORKFLOW_TIMEOUT) > 0) { abort(client, "order workflow timed out"); return; }
         if (phase == Phase.WAIT_FRESH) {
             String error = liveError(plan, now, true);
+            if (autoEnabled && isRebasablePreTransactionChange(error) && tryRebaseCurrentAuto(now)) {
+                error = liveError(plan, now, true);
+            }
             if (error.isEmpty()) {
                 client.getNetworkHandler().sendChatCommand("orders");
                 transition(Phase.ORDER_BOARD, "opening verified order board");
                 delay();
-            } else if (Duration.between(phaseAt, now).compareTo(FRESH_WAIT) > 0) abort(client, error);
+            } else if (Duration.between(phaseAt, now).compareTo(FRESH_WAIT) > 0) {
+                if (autoEnabled && (error.equals(FOCUSED_STALE) || isSkippablePreTransactionChange(error))) {
+                    skipCurrentAuto(client, error);
+                }
+                else abort(client, error);
+            }
             return;
         }
         if (phase == Phase.PENDING_VERIFICATION) {
@@ -245,18 +256,64 @@ final class OrderCreationExecutor {
         Optional<PortfolioAllocator.Selection> current = feed.allocation().selections().stream()
                 .filter(selection -> selection.candidate().id().equals(candidateID)
                         && !feed.hasActiveOrder(selection.candidate().itemId())).findFirst();
-        if (current.isEmpty()) { stopAuto(client, "automatic order queue stopped because a reviewed allocation changed or disappeared"); return; }
+        if (current.isEmpty()) { skipCurrentAuto(client, "reviewed allocation changed or disappeared"); return; }
         long cap = autoEscrowCaps.getOrDefault(candidateID, 0L);
         int authorizedBatches = authorizedBatches(current.get().batches(), current.get().candidate().acquisitionCost(), cap);
-        if (authorizedBatches <= 0) { stopAuto(client, "automatic order queue stopped because the reviewed escrow no longer covers this item"); return; }
+        if (authorizedBatches <= 0) { skipCurrentAuto(client, "reviewed escrow no longer covers this item"); return; }
         PortfolioAllocator.Selection next = new PortfolioAllocator.Selection(current.get().candidate(), authorizedBatches);
         ArmResult result = arm(next);
-        if (!result.armed()) stopAuto(client, "automatic order queue stopped: " + result.message());
+        if (!result.armed()) skipCurrentAuto(client, result.message());
     }
 
     static int authorizedBatches(int currentBatches, long acquisitionCost, long escrowCap) {
         if (currentBatches <= 0 || acquisitionCost <= 0 || escrowCap <= 0) return 0;
         return (int) Math.min(currentBatches, escrowCap / acquisitionCost);
+    }
+
+    /**
+     * A focused watch can legitimately replace a candidate's economics while
+     * this workflow is waiting. Automatic consent authorizes the market and a
+     * maximum escrow, not stale price inputs, so adopt only the current READY
+     * allocation for the exact same canonical item and never exceed that cap.
+     */
+    private boolean tryRebaseCurrentAuto(Instant now) {
+        if (!autoEnabled || plan == null || autoQueue.isEmpty()) return false;
+        String queuedID = autoQueue.getFirst();
+        long escrowCap = autoEscrowCaps.getOrDefault(queuedID, 0L);
+        Optional<PortfolioAllocator.Selection> currentValue = feed.allocation().selections().stream()
+                .filter(selection -> selection.candidate().itemId().equals(plan.itemId())
+                        && selection.candidate().signature().equals(plan.signature())
+                        && !feed.hasActiveOrder(selection.candidate().itemId()))
+                .findFirst();
+        if (currentValue.isEmpty()) return false;
+        PortfolioAllocator.Selection current = currentValue.get();
+        CandidateFeedClient.Candidate candidate = current.candidate();
+        if (candidate.focusedFreshAt().isBefore(armedAt.minusSeconds(1))
+                || age(candidate.focusedFreshAt(), now).compareTo(ORDER_MAX_AGE) > 0) return false;
+        int batches = authorizedBatches(current.batches(), candidate.acquisitionCost(), escrowCap);
+        if (batches <= 0) return false;
+
+        OrderPlan refreshed;
+        try {
+            refreshed = OrderPlan.from(new PortfolioAllocator.Selection(candidate, batches));
+        } catch (IllegalArgumentException | ArithmeticException error) {
+            return false;
+        }
+        if (!liveError(refreshed, now, true).isEmpty()) return false;
+
+        plan = refreshed;
+        if (!queuedID.equals(refreshed.candidateId())) {
+            autoQueue.removeFirst();
+            autoEscrowCaps.remove(queuedID);
+            autoQueue.remove(refreshed.candidateId());
+            autoEscrowCaps.remove(refreshed.candidateId());
+            autoQueue.addFirst(refreshed.candidateId());
+            autoEscrowCaps.put(refreshed.candidateId(), escrowCap);
+        }
+        message = "focused market refresh accepted within the reviewed escrow cap";
+        feed.diagnostic("order_workflow", "auto_rebased", Map.of("candidate_state", candidate.state(),
+                "route", candidate.route(), "reason_code", "focused_refresh_within_escrow_cap"));
+        return true;
     }
 
     private void handleOrderBoard(MinecraftClient client, Screen screen) {
@@ -284,7 +341,10 @@ final class OrderCreationExecutor {
             return;
         }
         int createSlot = findCreateOrderSlot(client);
-        if (createSlot < 0) { abort(client, "no verified free order slot is available"); return; }
+        if (createSlot < 0) {
+            LOGGER.warn("Unrecognized or full Your Orders menu: {}", menuFingerprint(client));
+            abort(client, "no verified free order slot is available; local log contains the menu fingerprint"); return;
+        }
         clickSlot(client, createSlot);
         transition(Phase.ITEM_SEARCH, "entering exact item search"); delay();
     }
@@ -459,13 +519,38 @@ final class OrderCreationExecutor {
         tell(client, "Order creation stopped safely: " + safeReason);
     }
 
-    private void stopAuto(MinecraftClient client, String reason) {
-        autoEnabled = false;
-        autoQueue.clear();
-        autoEscrowCaps.clear();
-        phase = Phase.ABORTED;
-        message = safe(reason);
+    private void skipCurrentAuto(MinecraftClient client, String reason) {
+        String skipped = autoQueue.pollFirst();
+        if (skipped != null) autoEscrowCaps.remove(skipped);
+        plan = null;
+        phase = Phase.IDLE;
+        nextAutoAttempt = Instant.now().plusSeconds(1);
+        if (autoQueue.isEmpty()) {
+            autoEnabled = false;
+            message = "automatic queue exhausted after skipping changed pre-transaction candidates";
+        } else {
+            message = "skipped one changed candidate before any server action: " + safe(reason)
+                    + "; " + autoQueue.size() + " remain";
+        }
+        feed.diagnostic("order_workflow", "auto_skipped", Map.of("candidate_state", "pre_transaction",
+                "route", "ORDER_TO_AUCTION", "reason_code", "candidate_changed_before_navigation"));
         tell(client, message);
+    }
+
+    static boolean isSkippablePreTransactionChange(String error) {
+        return error != null && (error.equals("armed candidate changed or disappeared")
+                || error.equals("candidate no longer belongs to the local portfolio")
+                || error.equals("allocated stack count was reduced")
+                || error.equals("an order for this item is already active or pending")
+                || error.equals("order exceeds deployable balance after reserve")
+                || error.equals("auction exit is stale"));
+    }
+
+    static boolean isRebasablePreTransactionChange(String error) {
+        return error != null && (error.equals("armed candidate changed or disappeared")
+                || error.equals("candidate no longer belongs to the local portfolio")
+                || error.equals("allocated stack count was reduced")
+                || error.equals("order exceeds deployable balance after reserve"));
     }
 
     private void transition(Phase next, String detail) { phase = next; phaseAt = Instant.now(); message = detail; }
@@ -493,9 +578,30 @@ final class OrderCreationExecutor {
             if (stack.isEmpty()) continue;
             Identifier itemId = Registries.ITEM.getId(stack.getItem());
             String label = OrderPlan.normalizeLabel(stack.getName().getString());
-            if (itemId.toString().equals("minecraft:black_stained_glass_pane") && label.contains("create") && label.contains("order")) return index;
+            if (isCreateOrderControl(itemId.toString(), label)) return index;
         }
         return -1;
+    }
+
+    static boolean isCreateOrderControl(String itemId, String label) {
+        if (!CREATE_PANE_ITEMS.contains(itemId)) return false;
+        String normalized = OrderPlan.normalizeLabel(label);
+        return normalized.contains("order") && (normalized.contains("create") || normalized.contains("new")
+                || normalized.contains("empty") || normalized.contains("available"));
+    }
+
+    private static String menuFingerprint(MinecraftClient client) {
+        if (!(client.player.currentScreenHandler instanceof GenericContainerScreenHandler handler)) return "not-a-container";
+        int limit = Math.min(handler.getInventory().size(), handler.slots.size());
+        StringBuilder value = new StringBuilder("slots=").append(limit);
+        for (int index = 0; index < limit && value.length() < 1800; index++) {
+            ItemStack stack = handler.getSlot(index).getStack();
+            if (stack.isEmpty()) continue;
+            Identifier id = Registries.ITEM.getId(stack.getItem());
+            value.append(" | ").append(index).append('=').append(id).append('[')
+                    .append(safe(stack.getName().getString())).append(']');
+        }
+        return value.toString();
     }
 
     private static boolean personalOrdersContain(MinecraftClient client, String expectedItemId) {
