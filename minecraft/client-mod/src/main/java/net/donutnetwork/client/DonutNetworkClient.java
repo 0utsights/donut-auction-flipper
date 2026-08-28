@@ -14,6 +14,7 @@ import net.minecraft.scoreboard.ScoreboardDisplaySlot;
 import net.minecraft.scoreboard.ScoreboardEntry;
 import net.minecraft.scoreboard.ScoreboardObjective;
 import net.minecraft.scoreboard.Team;
+import net.minecraft.scoreboard.number.StyledNumberFormat;
 import net.minecraft.text.Text;
 import net.minecraft.util.Identifier;
 import org.lwjgl.glfw.GLFW;
@@ -92,11 +93,18 @@ public final class DonutNetworkClient implements ClientModInitializer {
             Text name = entry.name();
             Team team = scoreboard.getScoreHolderTeam(entry.owner());
             if (team != null) name = team.decorateName(name);
+            Text score = entry.formatted(objective.getNumberFormatOr(StyledNumberFormat.RED));
             lines.add(name.getString());
+            lines.add(composeSidebarRow(name.getString(), score.getString()));
+            lines.add(score.getString());
             if (entry.display() != null) lines.add(entry.display().getString());
             lines.add(entry.owner());
         }
         candidates.observeSidebarBalance(lines);
+    }
+
+    static String composeSidebarRow(String name, String score) {
+        return ((name == null ? "" : name) + " " + (score == null ? "" : score)).strip();
     }
 
     private void openScreen(MinecraftClient client) {

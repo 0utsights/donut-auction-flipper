@@ -55,6 +55,8 @@ final class FlipFeedClient implements AutoCloseable {
     private final AtomicReference<List<Flip>> flips = new AtomicReference<>(List.of());
     private final AtomicReference<Status> status = new AtomicReference<>(
             new Status("waiting", Instant.EPOCH, Instant.EPOCH, "not started", 0, 0));
+    private final AtomicReference<String> lastSuccessfulState = new AtomicReference<>("starting");
+    private final RepeatedFailureLimiter pollFailureLimiter = new RepeatedFailureLimiter(Duration.ofSeconds(30));
     private final LinkedHashMap<String, Boolean> seen = new LinkedHashMap<>();
     private String etag = "";
 
@@ -102,8 +104,7 @@ final class FlipFeedClient implements AutoCloseable {
         try (InputStream body = response.body()) {
             if (response.statusCode() == 304) {
                 Status previous = status.get();
-                status.set(new Status(previous.state(), attempted, Instant.now(), previous.message(),
-                        previous.version(), flips.get().size()));
+                status.set(connectedNotModified(previous, attempted, Instant.now(), lastSuccessfulState.get(), flips.get().size()));
                 return;
             }
             byte[] encoded = body.readNBytes(MAX_RESPONSE_BYTES + 1);
@@ -116,6 +117,7 @@ final class FlipFeedClient implements AutoCloseable {
             DecodedFeed feed = decode(encoded);
             flips.set(feed.flips());
             etag = response.headers().firstValue("ETag").orElse("");
+            lastSuccessfulState.set(feed.state());
             status.set(new Status(feed.state(), attempted, Instant.now(), "connected",
                     feed.version(), feed.flips().size()));
             if ("ready".equals(feed.state())) {
@@ -142,14 +144,26 @@ final class FlipFeedClient implements AutoCloseable {
     private void pollSafely() {
         try {
             pollNow();
+            RepeatedFailureLimiter.Recovery recovery = pollFailureLimiter.recover();
+            if (recovery.recovered()) LOGGER.info("Auction feed recovered after {} suppressed repeat failures", recovery.suppressed());
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
         } catch (Exception failure) {
+            String message = safeMessage(failure);
             Status previous = status.get();
-            status.set(new Status("error", Instant.now(), previous.lastSuccess(), safeMessage(failure),
+            status.set(new Status("error", Instant.now(), previous.lastSuccess(), message,
                     previous.version(), flips.get().size()));
-            LOGGER.warn("Flip feed refresh failed: {}", safeMessage(failure));
+            RepeatedFailureLimiter.Decision decision = pollFailureLimiter.record(message, System.nanoTime());
+            if (decision.emit()) {
+                if (decision.suppressed() > 0) LOGGER.warn("Auction feed refresh failed: {} ({} identical failures suppressed)", message, decision.suppressed());
+                else LOGGER.warn("Auction feed refresh failed: {}", message);
+            }
         }
+    }
+
+    static Status connectedNotModified(Status previous, Instant attempted, Instant succeeded, String successfulState, int flipCount) {
+        String restored = List.of("starting", "collecting", "ready", "error").contains(successfulState) ? successfulState : "starting";
+        return new Status(restored, attempted, succeeded, "connected", previous.version(), flipCount);
     }
 
     static DecodedFeed decode(byte[] encoded) {

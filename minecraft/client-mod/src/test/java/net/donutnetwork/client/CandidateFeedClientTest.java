@@ -3,6 +3,7 @@ package net.donutnetwork.client;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -25,11 +26,34 @@ class CandidateFeedClientTest {
         assertEquals(20_512_820, feed.candidates().getFirst().targetListPrice());
     }
 
-    @Test void rejectsImpossibleExitQuantityAndSlotSemantics() {
+    @Test void decodesExactSubstackExitQuantity() {
+        CandidateFeedClient.DecodedFeed feed = CandidateFeedClient.decode(
+                validFeed().replace("\"quantity\":64", "\"quantity\":32")
+                        .replace("\"acquisition_cost\":10000000", "\"acquisition_cost\":5000000")
+                        .getBytes(StandardCharsets.UTF_8));
+        assertEquals(32, feed.candidates().getFirst().quantity());
+        assertEquals(64, feed.candidates().getFirst().maxStackSize());
+    }
+
+    @Test void rejectsExitAboveStackCapacityAndInvalidSlotSemantics() {
         assertThrows(IllegalArgumentException.class, () -> CandidateFeedClient.decode(
-                validFeed().replace("\"quantity\":64", "\"quantity\":32").getBytes(StandardCharsets.UTF_8)));
+                validFeed().replace("\"max_stack_size\":64", "\"max_stack_size\":32").getBytes(StandardCharsets.UTF_8)));
         assertThrows(IllegalArgumentException.class, () -> CandidateFeedClient.decode(
                 validFeed().replace("\"order_slots\":1", "\"order_slots\":0").getBytes(StandardCharsets.UTF_8)));
+        assertThrows(IllegalArgumentException.class, () -> CandidateFeedClient.decode(
+                validFeed().replace("\"acquisition_cost\":10000000", "\"acquisition_cost\":9999999")
+                        .getBytes(StandardCharsets.UTF_8)));
+    }
+
+    @Test void notModifiedResponseRecoversAnErroredCandidateFeed() {
+        Instant now = Instant.parse("2026-08-27T20:00:00Z");
+        CandidateFeedClient.Status recovered = CandidateFeedClient.connectedNotModified(
+                new CandidateFeedClient.Status("error", Instant.EPOCH, "timeout", 17, 4), now);
+        assertEquals("ready", recovered.state());
+        assertEquals("connected", recovered.message());
+        assertEquals(now, recovered.lastSuccess());
+        assertEquals(17, recovered.version());
+        assertEquals(4, recovered.candidateCount());
     }
 
     private static String validFeed() {
@@ -64,6 +88,9 @@ class CandidateFeedClientTest {
     }
 
     @Test void parsesCompactDonutSidebarBalance() {
+        assertEquals("$ 134M", DonutNetworkClient.composeSidebarRow("$", "134M"));
+        assertEquals(134_000_000L, CandidateFeedClient.parseSidebarBalance(
+                DonutNetworkClient.composeSidebarRow("$", "134M")).orElseThrow());
         assertEquals(119_000_000L, CandidateFeedClient.parseSidebarBalance("$ 119M").orElseThrow());
         assertEquals(2_500_000L, CandidateFeedClient.parseSidebarBalance("§a$ 2.5M").orElseThrow());
         assertEquals(32_000L, CandidateFeedClient.parseSidebarBalance("$ 32K").orElseThrow());

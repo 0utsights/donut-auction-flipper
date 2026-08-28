@@ -116,7 +116,9 @@ final class AutoOrderConsentScreen extends Screen {
 
     private String readinessKey() {
         PortfolioAllocator.Allocation allocation = candidates.allocation();
-        return candidates.status().version() + ":" + candidates.balance() + ":" + candidates.balanceSource() + ":"
+        CandidateFeedClient.Status candidateStatus = candidates.status();
+        return candidateStatus.version() + ":" + candidateStatus.state() + ":" + candidateStatus.message() + ":"
+                + candidates.balance() + ":" + candidates.balanceSource() + ":"
                 + allocation.availableOrderSlots() + ":" + allocation.selectedCapital() + ":" + allocation.selections().size() + ":"
                 + executor.status().phase() + ":" + executor.status().message();
     }

@@ -78,6 +78,7 @@ final class CandidateFeedClient implements AutoCloseable {
     private final ConcurrentLinkedQueue<JsonObject> diagnosticQueue = new ConcurrentLinkedQueue<>();
     private final LinkedHashMap<String, Boolean> seen = new LinkedHashMap<>();
     private final PortfolioAllocator allocator = new PortfolioAllocator();
+    private final RepeatedFailureLimiter pollFailureLimiter = new RepeatedFailureLimiter(Duration.ofSeconds(30));
     private String etag = "";
 
     CandidateFeedClient(ClientConfig.Settings config, Consumer<PortfolioAllocator.Selection> alertSink) {
@@ -255,7 +256,10 @@ final class CandidateFeedClient implements AutoCloseable {
         if (!etag.isEmpty()) builder.header("If-None-Match", etag);
         HttpResponse<InputStream> response = http.send(builder.build(), HttpResponse.BodyHandlers.ofInputStream());
         try (InputStream body = response.body()) {
-            if (response.statusCode() == 304) { status.updateAndGet(previous -> new Status(previous.state(), Instant.now(), "connected", previous.version(), previous.candidateCount())); return; }
+            if (response.statusCode() == 304) {
+                status.updateAndGet(previous -> connectedNotModified(previous, Instant.now()));
+                return;
+            }
             byte[] encoded = body.readNBytes(MAX_RESPONSE_BYTES + 1);
             if (encoded.length > MAX_RESPONSE_BYTES) throw new IllegalStateException("candidate feed exceeds 1 MiB");
             if (response.statusCode() != 200) throw new IllegalStateException("backend returned HTTP " + response.statusCode());
@@ -282,12 +286,21 @@ final class CandidateFeedClient implements AutoCloseable {
     }
 
     private void pollSafely() {
-        try { pollNow(); }
+        try {
+            pollNow();
+            RepeatedFailureLimiter.Recovery recovery = pollFailureLimiter.recover();
+            if (recovery.recovered()) LOGGER.info("Candidate feed recovered after {} suppressed repeat failures", recovery.suppressed());
+        }
         catch (InterruptedException error) { Thread.currentThread().interrupt(); }
         catch (Exception error) {
-            status.set(new Status("error", status.get().lastSuccess(), safeMessage(error), status.get().version(), candidates.get().size()));
-            enqueueDiagnostic("error", "candidate_poll", 0, Map.of("exception_class", error.getClass().getSimpleName(), "endpoint", "/api/v1/candidates"));
-            LOGGER.warn("Candidate feed refresh failed: {}", safeMessage(error));
+            String message = safeMessage(error);
+            status.set(new Status("error", status.get().lastSuccess(), message, status.get().version(), candidates.get().size()));
+            RepeatedFailureLimiter.Decision decision = pollFailureLimiter.record(message, System.nanoTime());
+            if (decision.emit()) {
+                enqueueDiagnostic("error", "candidate_poll", 0, Map.of("exception_class", error.getClass().getSimpleName(), "endpoint", "/api/v1/candidates"));
+                if (decision.suppressed() > 0) LOGGER.warn("Candidate feed refresh failed: {} ({} identical failures suppressed)", message, decision.suppressed());
+                else LOGGER.warn("Candidate feed refresh failed: {}", message);
+            }
         }
     }
 
@@ -338,16 +351,21 @@ final class CandidateFeedClient implements AutoCloseable {
             String route = oneOf(value, "route", "ORDER_TO_AUCTION", "AUCTION_TO_ORDER");
             int quantity = boundedInt(value, "quantity", 1, 64), maxStackSize = boundedInt(value, "max_stack_size", 1, 64);
             int orderSlots = boundedInt(value, "order_slots", 0, 20), auctionSlots = boundedInt(value, "auction_slots", 0, 18);
-            if (quantity != maxStackSize) throw new IllegalArgumentException("candidate is not one exact maximum-stack exit");
+            long acquisitionCost = boundedLong(value, "acquisition_cost", 1, Long.MAX_VALUE);
+            long orderUnitRewardCents = boundedLong(value, "order_unit_reward_cents", 0, Long.MAX_VALUE);
+            if (quantity > maxStackSize) throw new IllegalArgumentException("candidate exit quantity exceeds its maximum stack size");
             if ((route.equals("ORDER_TO_AUCTION") && (orderSlots != 1 || auctionSlots != 1))
                     || (route.equals("AUCTION_TO_ORDER") && (orderSlots != 0 || auctionSlots != 0))) {
                 throw new IllegalArgumentException("candidate has invalid route slot semantics");
             }
+            if (route.equals("ORDER_TO_AUCTION") && acquisitionCost != orderEscrow(orderUnitRewardCents, quantity)) {
+                throw new IllegalArgumentException("candidate acquisition cost does not match its exact order quantity");
+            }
             result.add(new Candidate(required(value, "id", 128), route,
                     oneOf(value, "state", "READY", "RESEARCH", "CAPTURED", "HOLD", "STALE", "REJECTED"), optional(value, "reason", 200),
                     required(value, "signature", 2048), itemId, required(value, "item_name", 128), quantity,
-                    maxStackSize, boundedLong(value, "acquisition_cost", 1, Long.MAX_VALUE),
-                    boundedLong(value, "expected_proceeds", 0, Long.MAX_VALUE), boundedLong(value, "order_unit_reward_cents", 0, Long.MAX_VALUE),
+                    maxStackSize, acquisitionCost,
+                    boundedLong(value, "expected_proceeds", 0, Long.MAX_VALUE), orderUnitRewardCents,
                     boundedLong(value, "target_list_price", 0, Long.MAX_VALUE), boundedLong(value, "conservative_profit", Long.MIN_VALUE, Long.MAX_VALUE),
                     boundedInt(value, "margin_bps", 0, Integer.MAX_VALUE), boundedInt(value, "completion_bps", 0, 10_000),
                     boundedInt(value, "expected_cycle_minutes", 1, 1_000_000), boundedLong(value, "risk_adjusted_profit_day", 0, Long.MAX_VALUE),
@@ -357,6 +375,20 @@ final class CandidateFeedClient implements AutoCloseable {
                     instant(value, "focused_fresh_at"), instant(value, "auction_fresh_at"), orderCommand, auctionCommand));
         }
         return new DecodedFeed(version, generatedAt, List.copyOf(result));
+    }
+
+    static Status connectedNotModified(Status previous, Instant now) {
+        return new Status("ready", now, "connected", previous.version(), previous.candidateCount());
+    }
+
+    private static long orderEscrow(long unitRewardCents, int quantity) {
+        try {
+            long wholeDollars = Math.multiplyExact(unitRewardCents / 100, quantity);
+            long remainderCents = Math.multiplyExact(unitRewardCents % 100, quantity);
+            return Math.addExact(wholeDollars, (remainderCents + 99) / 100);
+        } catch (ArithmeticException error) {
+            throw new IllegalArgumentException("candidate order escrow overflows", error);
+        }
     }
 
     private static String oneOf(JsonObject value, String field, String... allowed) { String result = required(value, field, 32); for (String candidate : allowed) if (candidate.equals(result)) return result; throw new IllegalArgumentException("invalid " + field); }

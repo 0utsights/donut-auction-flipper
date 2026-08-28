@@ -16,6 +16,13 @@ class OrderPlanTest {
         assertEquals("diamond_block", plan.itemPathQuery());
     }
 
+    @Test void preservesAnExactSubstackExitWithoutInflatingItToTheStackCap() {
+        OrderPlan plan = OrderPlan.from(candidate(32, 500_001, 160_001));
+        assertEquals(32, plan.batchQuantity());
+        assertEquals(32, plan.quantity());
+        assertEquals(160_001, plan.escrowDollars());
+    }
+
     @Test void rejectsBackendEscrowThatDoesNotMatchQuantityAndUnitPrice() {
         assertThrows(IllegalArgumentException.class, () -> OrderPlan.from(candidate(64, 500_001, 320_000)));
     }

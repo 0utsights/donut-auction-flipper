@@ -3,6 +3,7 @@ package net.donutnetwork.client;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -63,5 +64,18 @@ class FlipFeedClientTest {
         FlipFeedClient.DecodedFeed feed = FlipFeedClient.decode(json.getBytes(StandardCharsets.UTF_8));
         assertTrue(feed.flips().isEmpty());
         assertEquals("collecting", feed.state());
+    }
+
+    @Test void notModifiedResponseRestoresLastSuccessfulBackendState() {
+        Instant attempted = Instant.parse("2026-08-27T20:00:00Z");
+        Instant succeeded = attempted.plusMillis(4);
+        FlipFeedClient.Status recovered = FlipFeedClient.connectedNotModified(
+                new FlipFeedClient.Status("error", Instant.EPOCH, Instant.EPOCH, "timeout", 9, 3),
+                attempted, succeeded, "collecting", 3);
+        assertEquals("collecting", recovered.state());
+        assertEquals("connected", recovered.message());
+        assertEquals(attempted, recovered.lastAttempt());
+        assertEquals(succeeded, recovered.lastSuccess());
+        assertEquals(9, recovered.version());
     }
 }

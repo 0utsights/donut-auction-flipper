@@ -201,7 +201,9 @@ final class DonutScreen extends Screen {
     }
 
     private String feedKey() {
-        StringBuilder key = new StringBuilder().append(candidates.status().version()).append(':').append(candidates.balance()).append(':')
+        CandidateFeedClient.Status candidateStatus = candidates.status();
+        StringBuilder key = new StringBuilder().append(candidateStatus.version()).append(':').append(candidateStatus.state()).append(':')
+                .append(candidateStatus.message()).append(':').append(candidates.balance()).append(':')
                 .append(candidates.balanceSource()).append(':').append(candidates.usedOrderSlots()).append(':').append(candidates.usedAuctionSlots()).append(':')
                 .append(auctions.status().version()).append(':').append(orderExecutor.status().phase()).append(':')
                 .append(orderExecutor.status().message()).append(':').append(orderExecutor.autoEnabled()).append(':').append(orderExecutor.autoRemaining());
