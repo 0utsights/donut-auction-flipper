@@ -85,13 +85,23 @@ final class OrderCreationExecutor {
     boolean autoEnabled() { return autoEnabled; }
     int autoRemaining() { return autoQueue.size(); }
 
-    ArmResult enableAuto(MinecraftClient client) {
+    ArmResult autoReadiness(MinecraftClient client) {
         if (status().active()) return new ArmResult(false, "an order workflow is already active");
         String error = serverError(client);
         if (!error.isEmpty()) return new ArmResult(false, error);
         if (!feed.balanceUsableForOrders()) return new ArmResult(false, "waiting for the live scoreboard balance or a manual override");
+        if (feed.allocation().availableOrderSlots() < 1) return new ArmResult(false, "all 20 local order slots are currently marked as used");
         List<PortfolioAllocator.Selection> selections = feed.allocation().selections();
         if (selections.isEmpty()) return new ArmResult(false, "the local portfolio has no eligible orders");
+        ArmResult first = canArm(selections.getFirst(), Instant.now());
+        if (!first.armed()) return first;
+        return new ArmResult(true, selections.size() + " reviewed orders are ready for session consent");
+    }
+
+    ArmResult enableAuto(MinecraftClient client) {
+        ArmResult readiness = autoReadiness(client);
+        if (!readiness.armed()) return readiness;
+        List<PortfolioAllocator.Selection> selections = feed.allocation().selections();
         if (phase == Phase.ABORTED) phase = Phase.IDLE;
         autoQueue.clear();
         autoEscrowCaps.clear();
