@@ -83,6 +83,16 @@ type Flip struct {
 	RiskFlags       []string  `json:"risk_flags,omitempty"`
 }
 
+type ShulkerSupply struct {
+	AuctionID string    `json:"auction_id,omitempty"`
+	Seller    string    `json:"seller"`
+	ItemID    string    `json:"item_id"`
+	Price     int64     `json:"price"`
+	LastSeen  time.Time `json:"last_seen"`
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
+	Page      int       `json:"page,omitempty"`
+}
+
 type Status struct {
 	State               string         `json:"state"`
 	CycleStartedAt      time.Time      `json:"cycle_started_at,omitempty"`
@@ -467,6 +477,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/observers/order-scans", s.authorizeWith(s.observerAuth, s.observerOrderScans))
 	mux.HandleFunc("POST /api/v1/observers/task-result", s.authorizeWith(s.observerAuth, s.observerTaskResult))
 	mux.HandleFunc("GET /api/v1/candidates", s.authorizeWith(s.fabricAuth, s.candidateFeed))
+	mux.HandleFunc("GET /api/v1/supplies/shulker-boxes", s.authorizeWith(s.fabricAuth, s.shulkerSupplies))
 	mux.HandleFunc("POST /api/v1/watches", s.authorizeWith(s.fabricAuth, s.addWatch))
 	mux.HandleFunc("DELETE /api/v1/watches/{id}", s.authorizeWith(s.fabricAuth, s.deleteWatch))
 	mux.HandleFunc("POST /api/v1/client/diagnostics", s.authorizeWith(s.fabricAuth, s.clientDiagnostics))
@@ -522,6 +533,37 @@ func (s *Server) debugValuation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, engine.Explain(signature))
+}
+
+func (s *Server) shulkerSupplies(w http.ResponseWriter, _ *http.Request) {
+	engine := s.engine.Load()
+	if engine == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "no completed market scan"})
+		return
+	}
+	supplies := make([]ShulkerSupply, 0, 20)
+	for _, listing := range engine.ActiveListings() {
+		if listing.Source != market.SourceDonutAPI || !plainEmptyShulker(listing.Item) ||
+			listing.TotalPrice <= 0 || listing.SellerName == "" {
+			continue
+		}
+		supplies = append(supplies, ShulkerSupply{AuctionID: listing.AuthoritativeID, Seller: listing.SellerName,
+			ItemID: listing.Item.ID, Price: listing.TotalPrice, LastSeen: listing.LastSeen,
+			ExpiresAt: listing.ExpiresAt, Page: listing.Page})
+		if len(supplies) == cap(supplies) {
+			break
+		}
+	}
+	w.Header().Set("Cache-Control", "private, no-cache")
+	writeJSON(w, http.StatusOK, map[string]any{"generated_at": s.now(), "supplies": supplies})
+}
+
+func plainEmptyShulker(item market.Item) bool {
+	return item.ID == "minecraft:shulker_box" && item.Quantity == 1 &&
+		len(item.Contents) == 0 && len(item.Enchantments) == 0 && len(item.Lore) == 0 &&
+		len(item.Components) == 0 && item.TrimPattern == "" && item.TrimMaterial == "" &&
+		item.Durability == 0 && item.MaxDurability == 0 &&
+		(item.DisplayName == "" || strings.EqualFold(strings.TrimSpace(item.DisplayName), "Shulker Box"))
 }
 
 func (s *Server) debugPage(w http.ResponseWriter, r *http.Request) {

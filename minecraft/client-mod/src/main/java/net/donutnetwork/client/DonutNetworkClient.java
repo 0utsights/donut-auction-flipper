@@ -32,6 +32,8 @@ public final class DonutNetworkClient implements ClientModInitializer {
     private FlipFeedClient feed;
 	private CandidateFeedClient candidates;
     private OrderCreationExecutor orderExecutor;
+    private AuctionExitExecutor exitExecutor;
+    private SafeMarketProbe marketProbe;
     private boolean startupHintShown;
     private int scoreboardPollTicks;
     private long nextSidebarDiagnosticAt;
@@ -44,12 +46,16 @@ public final class DonutNetworkClient implements ClientModInitializer {
 			candidates = new CandidateFeedClient(settings, selection -> MinecraftClient.getInstance().execute(() ->
 					CandidateNotifier.send(MinecraftClient.getInstance(), selection)));
             orderExecutor = new OrderCreationExecutor(candidates);
+            exitExecutor = new AuctionExitExecutor(candidates);
+            marketProbe = new SafeMarketProbe(settings.marketProbe());
             registerControls();
             feed.start();
 			candidates.start();
 			ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
-				candidates.observeBalance(message.getString());
-				orderExecutor.observeServerMessage(MinecraftClient.getInstance(), message.getString());
+				String text = message.getString();
+				candidates.observeBalance(text);
+				candidates.observeOrderMessage(text);
+				orderExecutor.observeServerMessage(MinecraftClient.getInstance(), text);
 			});
             ClientLifecycleEvents.CLIENT_STOPPING.register(client -> { candidates.close(); feed.close(); });
             LOGGER.info("Donut market client started; backend={}", settings.backend());
@@ -70,7 +76,14 @@ public final class DonutNetworkClient implements ClientModInitializer {
                 "key.donut-network.open", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_N, category));
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             while (open.wasPressed()) openScreen(client);
-            orderExecutor.tick(client);
+            if (marketProbe.exclusive()) {
+                marketProbe.tick(client);
+            } else if (orderExecutor.status().active()) {
+                orderExecutor.tick(client);
+            } else {
+                exitExecutor.tick(client);
+                if (!exitExecutor.blocksOrderCreation()) orderExecutor.tick(client);
+            }
             observeSidebarBalance(client);
             showStartupHint(client);
         });
@@ -150,7 +163,7 @@ public final class DonutNetworkClient implements ClientModInitializer {
     }
 
     private void openScreen(MinecraftClient client) {
-		client.setScreen(new DonutScreen(client.currentScreen, feed, candidates, orderExecutor));
+		client.setScreen(new DonutScreen(client.currentScreen, feed, candidates, orderExecutor, exitExecutor));
     }
 
     private void showStartupHint(MinecraftClient client) {

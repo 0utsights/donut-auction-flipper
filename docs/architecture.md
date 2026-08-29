@@ -17,7 +17,7 @@ Official Donut auction API -- fast + broad valuation ------+--> Go backend
 
 ## Permanent boundaries
 
-Mineflayer is the only in-game **market parser**. It reads order menus and never buys, fulfills, creates, confirms, cancels, claims, lists, or transfers inventory. The official API is the only auction-data source. Fabric does not upload market prices; it consumes candidates and keeps personal balance, reserve, slot allocation, session execution budget, and pending submissions local. A Fabric order requires a visible one-order arm and fail-closed validation; claiming and auction relisting are deferred until their live workflows are captured.
+Mineflayer is the only in-game **market parser**. It reads order menus and never buys, fulfills, creates, confirms, cancels, claims, lists, or transfers inventory. The official API is the only auction-data source. Fabric does not upload market prices; it consumes candidates and keeps personal balance, reserve, slot allocation, session execution budget, durable order positions, and exit progress local. Fabric order creation and auction exits have separate visible session consent and fail-closed validation. Shulker acquisition, physical packaging, and listing are permanently Fabric-only; a future Mineflayer adapter must reject orders needing that workflow.
 
 The backend and collector run together on the private host. Fabric connects over authenticated HTTPS. There are no WebSockets.
 
@@ -92,6 +92,8 @@ Constraints:
 Profit per inventory slot is a tie-breaker, not a hard capacity constraint. The valuable market valuation stays on the backend; only resource allocation is local.
 
 For a selected `ORDER_TO_AUCTION` candidate, the Fabric executor may create exactly one order after a separate local arm screen. The captured candidate must remain stable on item signature, quantity, cent-precise reward, escrow, and auction target; the feed, order observation, and auction exit must remain fresh. The executor identifies the two chest menus by title and slot label, then uses the 1.21.11 server-dialog model for item search, amount, price, review, and final action. Unknown or ambiguous state closes the workflow without clicking. The final review must contain the expected item, quantity, rounded-or-exact unit reward, and total before `Create Order` is invoked once.
+
+Completed tracked orders enter a separate exit state machine. It verifies the exact personal-order identity before `Collect`, advances durable claimed/packaged/listed counters only after observable inventory or personal-auction receipts, and serializes against order creation so two transactional workflows cannot overlap. Positions below 27 physical inventory slots use sequential exact candidate batches. Larger positions are packaged into generic shulkers containing at most 27 physical stacks. Empty-box supply is official-API sourced through `GET /api/v1/supplies/shulker-boxes` and reverified in the live lowest-price menu. Modifier-bearing positions remain `HOLD` until a component-complete Fabric matcher exists.
 
 ## Trust boundaries
 

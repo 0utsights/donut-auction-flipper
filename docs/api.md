@@ -87,11 +87,13 @@ Completes or rejects the current lease and may attach a sanitized schema diagnos
 
 These endpoints require the Fabric installation credential.
 
+- `GET /api/v1/supplies/shulker-boxes` — up to 20 fresh, price-sorted official-API listings for one plain generic empty shulker. Filled, named, modified, stale, and expired listings are omitted. This is only a supply quote; Fabric independently verifies the live market row before any purchase.
+
 ### `GET /api/v1/candidates`
 
 Returns a bounded, ETag-enabled candidate pool. Every record includes direction, exact item signature and quantity, the visible order reward in `observed_order_unit_reward_cents`, the fully repriced first-place target in `order_unit_reward_cents`, conservative buy/sell economics, fees, completion probability, cycle time, executable volume, order/auction slot use, inventory-slot efficiency, evidence tier, state (`READY`, `HOLD`, `STALE`, or `RESEARCH`), rejection code, and safe manual commands.
 
-The backend does not personalize this feed. Balance, cash reserve, available slots, and final allocation remain in the Fabric installation. Position inference is disabled until real message fixtures are verified.
+The backend does not personalize this feed. Balance, cash reserve, available slots, final allocation, and durable personal position progress remain in the Fabric installation. The client advances position state only from exact personal-order rows, bounded delivery/completion messages, inventory receipts, and verified personal-auction rows.
 
 ### `POST /api/v1/watches`
 

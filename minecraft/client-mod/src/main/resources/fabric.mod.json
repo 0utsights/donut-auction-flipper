@@ -3,7 +3,7 @@
   "id": "donut-network-client",
   "version": "${version}",
   "name": "Donut Market Flips",
-  "description": "Player-facing DonutSMP auction/order client with local allocation and opt-in verified order creation.",
+  "description": "Player-facing DonutSMP auction/order client with local allocation and separately consented order creation and auction exits.",
   "authors": ["Donut Network contributors"],
   "environment": "client",
   "entrypoints": { "client": ["net.donutnetwork.client.DonutNetworkClient"] },

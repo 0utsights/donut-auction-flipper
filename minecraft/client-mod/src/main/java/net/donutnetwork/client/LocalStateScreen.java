@@ -49,6 +49,9 @@ final class LocalStateScreen extends Screen {
         addDrawableChild(MarketUi.button("Diagnostics " + (candidates.diagnosticsEnabled() ? "ON" : "OFF"), contentLeft + 134, top + 188, 136, 22,
                 candidates.diagnosticsEnabled() ? MarketUi.ButtonStyle.PRIMARY : MarketUi.ButtonStyle.SECONDARY,
                 () -> { candidates.setDiagnostics(!candidates.diagnosticsEnabled()); clearAndInit(); }, "Toggle sanitized diagnostics."));
+        addDrawableChild(MarketUi.button("RECHECK LOCKS", contentLeft + 278, top + 188, 114, 22, MarketUi.ButtonStyle.SECONDARY,
+                () -> { candidates.recheckTrackedOrders(); clearAndInit(); },
+                "Clear candidate locks only after manually reconciling Your Orders."));
         addDrawableChild(MarketUi.button("BACK", left + panelWidth - 116, top + panelHeight - 36, 100, 22,
                 MarketUi.ButtonStyle.SECONDARY, this::close, "Return to the market dashboard."));
     }

@@ -8,6 +8,25 @@ import java.time.Instant;
 import static org.junit.jupiter.api.Assertions.*;
 
 class CandidateFeedClientTest {
+    @Test
+    void decodesOnlyFreshSortedUniqueShulkerSupply() {
+        Instant now = Instant.parse("2026-08-29T17:00:00Z");
+        String valid = """
+                {"generated_at":"2026-08-29T16:59:59Z","supplies":[
+                  {"auction_id":"a","seller":"SafeSeller","item_id":"minecraft:shulker_box","price":4800,
+                   "last_seen":"2026-08-29T16:59:58Z","expires_at":"2026-08-29T18:00:00Z"},
+                  {"auction_id":"b","seller":"SafeSeller2","item_id":"minecraft:shulker_box","price":5000,
+                   "last_seen":"2026-08-29T16:59:58Z","expires_at":"2026-08-29T18:00:00Z"}]}
+                """;
+        assertEquals(2, CandidateFeedClient.decodeShulkerSupplies(valid.getBytes(StandardCharsets.UTF_8), now).size());
+
+        assertThrows(IllegalArgumentException.class, () -> CandidateFeedClient.decodeShulkerSupplies(
+                valid.replace("4800", "5800").getBytes(StandardCharsets.UTF_8), now));
+        assertThrows(IllegalArgumentException.class, () -> CandidateFeedClient.decodeShulkerSupplies(
+                valid.replace("16:59:58Z", "16:40:00Z").getBytes(StandardCharsets.UTF_8), now));
+        assertThrows(IllegalArgumentException.class, () -> CandidateFeedClient.decodeShulkerSupplies(
+                valid.replace("\"b\"", "\"a\"").getBytes(StandardCharsets.UTF_8), now));
+    }
     @Test void decodesEmptyCandidateFeed() {
         String json = """
                 {"version":0,"generated_at":"2026-08-23T20:00:00Z","candidates":[]}

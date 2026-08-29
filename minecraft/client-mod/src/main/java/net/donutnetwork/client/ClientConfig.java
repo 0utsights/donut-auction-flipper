@@ -25,7 +25,7 @@ final class ClientConfig {
 
     record Settings(URI backend, String token, Duration pollInterval, boolean chatAlerts,
                     long balance, int usedOrderSlots, int usedAuctionSlots, boolean diagnostics, String installId,
-                    Set<String> orderServerHosts, Set<String> activeOrderItems) {}
+                    Set<String> orderServerHosts, Set<String> activeOrderItems, boolean marketProbe) {}
 
     private ClientConfig() {}
 
@@ -79,7 +79,7 @@ final class ClientConfig {
         return new Settings(backend, token, Duration.ofMillis(milliseconds),
                 Boolean.parseBoolean(properties.getProperty("chat_alerts", "true")), balance,
                 usedOrderSlots, usedAuctionSlots, Boolean.parseBoolean(properties.getProperty("diagnostics", "true")), installId,
-                orderServerHosts, activeOrderItems);
+                orderServerHosts, activeOrderItems, Boolean.parseBoolean(properties.getProperty("market_probe", "false")));
     }
 
     static void saveChatAlerts(boolean enabled) {
@@ -129,6 +129,7 @@ final class ClientConfig {
 		properties.setProperty("install_id", "");
 		properties.setProperty("order_server_hosts", "play.donutsmp.net,donutsmp.net");
 		properties.setProperty("active_order_items", "");
+		properties.setProperty("market_probe", "false");
         return properties;
     }
 

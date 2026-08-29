@@ -441,6 +441,30 @@ func (e *Engine) Valuation(signature string) (Valuation, bool) {
 	return v, ok
 }
 
+// ActiveListings returns a detached, deterministic view of listings that are
+// still live according to the same expiry rules used by valuation. Callers may
+// filter this for narrowly scoped supply lookups without exposing engine maps.
+func (e *Engine) ActiveListings() []Listing {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	now := e.now()
+	e.expireLocked(now)
+	out := make([]Listing, 0, len(e.listings))
+	for _, listing := range e.listings {
+		out = append(out, listing)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TotalPrice != out[j].TotalPrice {
+			return out[i].TotalPrice < out[j].TotalPrice
+		}
+		if !out[i].LastSeen.Equal(out[j].LastSeen) {
+			return out[i].LastSeen.After(out[j].LastSeen)
+		}
+		return out[i].Fingerprint < out[j].Fingerprint
+	})
+	return out
+}
+
 // QuantityValuation returns the same singular-ceiling plus exact-batch model
 // used by auction opportunities. Combined order/auction candidates must use
 // this instead of the generic per-item snapshot valuation.

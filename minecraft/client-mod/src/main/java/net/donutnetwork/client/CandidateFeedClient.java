@@ -47,6 +47,8 @@ final class CandidateFeedClient implements AutoCloseable {
     private static final Pattern AUCTION_COMMAND = Pattern.compile("/ah(?: [a-z0-9_-]{1,64})?");
     private static final Pattern LABELED_BALANCE = Pattern.compile("(?i)\\b(?:balance|money|cash)\\b[^$0-9]{0,20}\\$?\\s*([0-9][0-9,]*(?:\\.[0-9]+)?)([KMBT]?)\\b");
     private static final Pattern SIDEBAR_BALANCE = Pattern.compile("(?i)^\\s*\\$\\s*([0-9][0-9,]*(?:\\.[0-9]+)?)([KMBT]?)\\s*$");
+    private static final Pattern COMPLETE_ORDER = Pattern.compile("(?i)^Your (.{1,128}?) order is complete!{0,3}$");
+    private static final Pattern ITEM_DELIVERY = Pattern.compile("(?i)^.{1,64}? delivered you ([0-9][0-9,]*) (.{1,128})$");
     private static final String MOD_VERSION = FabricLoader.getInstance().getModContainer("donut-network-client")
             .map(container -> container.getMetadata().getVersion().getFriendlyString()).orElse("unknown");
 
@@ -59,6 +61,7 @@ final class CandidateFeedClient implements AutoCloseable {
                      Instant orderFreshAt, Instant focusedFreshAt, Instant auctionFreshAt, String orderCommand, String auctionCommand) {}
     record Status(String state, Instant lastSuccess, String message, long version, int candidateCount) {}
     record DecodedFeed(long version, Instant generatedAt, List<Candidate> candidates) {}
+    record ShulkerSupply(String auctionId, String seller, String itemId, long price, Instant lastSeen, Instant expiresAt) {}
 
     private final ClientConfig.Settings config;
     private final Consumer<PortfolioAllocator.Selection> alertSink;
@@ -68,6 +71,8 @@ final class CandidateFeedClient implements AutoCloseable {
     private final AtomicReference<PortfolioAllocator.Allocation> allocation;
     private final AtomicReference<Status> status = new AtomicReference<>(new Status("waiting", Instant.EPOCH, "not started", 0, 0));
     private final AtomicReference<Instant> generatedAt = new AtomicReference<>(Instant.EPOCH);
+    private final AtomicReference<List<ShulkerSupply>> shulkerSupplies = new AtomicReference<>(List.of());
+    private final AtomicReference<Instant> shulkerSupplySuccess = new AtomicReference<>(Instant.EPOCH);
     private final AtomicLong balance;
     private final AtomicReference<String> balanceSource = new AtomicReference<>("saved fallback");
     private final AtomicLong pendingBalanceCeiling = new AtomicLong(Long.MAX_VALUE);
@@ -75,6 +80,8 @@ final class CandidateFeedClient implements AutoCloseable {
     private final AtomicLong pendingRefundFloor = new AtomicLong(-1);
     private final AtomicLong usedSlots;
     private final Set<String> activeOrderItems = ConcurrentHashMap.newKeySet();
+    private final ConcurrentHashMap<String, LocalOrderPosition> orderPositions = new ConcurrentHashMap<>();
+    private final OrderPositionStore positionStore;
     private final AtomicBoolean diagnostics;
     private final ConcurrentLinkedQueue<JsonObject> diagnosticQueue = new ConcurrentLinkedQueue<>();
     private final LinkedHashMap<String, Boolean> seen = new LinkedHashMap<>();
@@ -87,9 +94,17 @@ final class CandidateFeedClient implements AutoCloseable {
     }
 
     CandidateFeedClient(ClientConfig.Settings config, Consumer<PortfolioAllocator.Selection> alertSink, HttpClient http) {
+        this(config, alertSink, http, OrderPositionStore.inConfigDirectory());
+    }
+
+    CandidateFeedClient(ClientConfig.Settings config, Consumer<PortfolioAllocator.Selection> alertSink, HttpClient http,
+                        OrderPositionStore positionStore) {
         this.config = Objects.requireNonNull(config); this.alertSink = Objects.requireNonNull(alertSink); this.http = Objects.requireNonNull(http);
+        this.positionStore = Objects.requireNonNull(positionStore);
         balance = new AtomicLong(config.balance());
         activeOrderItems.addAll(config.activeOrderItems());
+        orderPositions.putAll(positionStore.load());
+        activeOrderItems.addAll(orderPositions.keySet());
         usedSlots = new AtomicLong(packSlots(Math.max(config.usedOrderSlots(), activeOrderItems.size()), config.usedAuctionSlots()));
         diagnostics = new AtomicBoolean(config.diagnostics());
         allocation = new AtomicReference<>(allocator.allocate(List.of(), config.balance(),
@@ -100,6 +115,7 @@ final class CandidateFeedClient implements AutoCloseable {
     void start() {
         enqueueDiagnostic("startup", "", 0, Map.of("state", "started"));
         scheduler.scheduleWithFixedDelay(this::pollSafely, 0, config.pollInterval().toMillis(), TimeUnit.MILLISECONDS);
+        scheduler.scheduleWithFixedDelay(this::pollShulkerSuppliesSafely, 0, 2, TimeUnit.SECONDS);
         scheduler.scheduleWithFixedDelay(this::flushDiagnosticsSafely, 5, 5, TimeUnit.SECONDS);
     }
 
@@ -117,6 +133,8 @@ final class CandidateFeedClient implements AutoCloseable {
     boolean diagnosticsEnabled() { return diagnostics.get(); }
     Instant generatedAt() { return generatedAt.get(); }
     Set<String> orderServerHosts() { return config.orderServerHosts(); }
+    List<ShulkerSupply> shulkerSupplies() { return shulkerSupplies.get(); }
+    Instant shulkerSupplySuccess() { return shulkerSupplySuccess.get(); }
 
     Optional<Candidate> candidate(String id) {
         return candidates.get().stream().filter(value -> value.id().equals(id)).findFirst();
@@ -131,8 +149,79 @@ final class CandidateFeedClient implements AutoCloseable {
                 .mapToInt(PortfolioAllocator.Selection::batches).findFirst().orElse(0);
     }
 
-    boolean hasActiveOrder(String itemId) { return activeOrderItems.contains(itemId); }
-    int activeOrderCount() { return activeOrderItems.size(); }
+    boolean hasActiveOrder(String itemId) { return activeOrderItems.contains(itemId) || orderPositions.containsKey(itemId); }
+    int activeOrderCount() { return (int) java.util.stream.Stream.concat(activeOrderItems.stream(), orderPositions.keySet().stream()).distinct().count(); }
+    List<LocalOrderPosition> orderPositions() {
+        return orderPositions.values().stream().sorted(java.util.Comparator.comparing(LocalOrderPosition::createdAt)).toList();
+    }
+    Optional<LocalOrderPosition> orderPosition(String itemId) { return Optional.ofNullable(orderPositions.get(itemId)); }
+    List<AuctionExitPlan> readyExitPlans() {
+        return orderPositions().stream().filter(position -> position.deliveredQuantity() == position.totalQuantity()
+                        && position.state() != LocalOrderPosition.State.HOLD && position.state() != LocalOrderPosition.State.EXITED)
+                .map(position -> {
+                    try { return AuctionExitPlan.from(position); }
+                    catch (IllegalArgumentException | ArithmeticException ignored) { return null; }
+                }).filter(Objects::nonNull).toList();
+    }
+
+    int exitReadyCount() {
+        return (int) orderPositions.values().stream().filter(position -> position.state() == LocalOrderPosition.State.CLAIM_READY
+                || position.state() == LocalOrderPosition.State.CLAIM_PENDING || position.state() == LocalOrderPosition.State.CLAIMING
+                || position.state() == LocalOrderPosition.State.CLAIMED || position.state() == LocalOrderPosition.State.PACKAGE_PENDING
+                || position.state() == LocalOrderPosition.State.PACKAGING || position.state() == LocalOrderPosition.State.LISTING_PENDING
+                || position.state() == LocalOrderPosition.State.LISTING).count();
+    }
+
+    void recordExitState(String itemId, LocalOrderPosition.State state) {
+        if (itemId == null || state == null) return;
+        orderPositions.computeIfPresent(itemId, (ignored, position) -> position.withState(state, Instant.now()));
+        requirePositionPersistence();
+    }
+
+    void recordClaimed(String itemId, int totalClaimed, boolean direct) {
+        if (itemId == null) return;
+        AtomicBoolean freedOrderSlot = new AtomicBoolean();
+        orderPositions.computeIfPresent(itemId, (ignored, position) -> {
+            LocalOrderPosition next = position.claimed(totalClaimed, direct, Instant.now());
+            if (position.claimedQuantity() < position.totalQuantity() && next.claimedQuantity() == next.totalQuantity()) {
+                freedOrderSlot.set(true);
+            }
+            return next;
+        });
+        if (freedOrderSlot.get()) {
+            usedSlots.updateAndGet(value -> packSlots(Math.max(0, unpackOrder(value) - 1), unpackAuction(value)));
+        }
+        requirePositionPersistence();
+    }
+
+    void recordPackaged(String itemId, int totalPackaged) {
+        if (itemId == null) return;
+        orderPositions.computeIfPresent(itemId, (ignored, position) -> position.packaged(totalPackaged, Instant.now()));
+        requirePositionPersistence();
+    }
+
+    void recordListed(String itemId, int totalListed) {
+        if (itemId == null) return;
+        AtomicBoolean exited = new AtomicBoolean();
+        AtomicBoolean advanced = new AtomicBoolean();
+        orderPositions.computeIfPresent(itemId, (ignored, position) -> {
+            LocalOrderPosition next = position.listed(totalListed, Instant.now());
+            advanced.set(next.listedQuantity() > position.listedQuantity());
+            exited.set(next.state() == LocalOrderPosition.State.EXITED);
+            return next;
+        });
+        if (advanced.get()) {
+            usedSlots.updateAndGet(value -> packSlots(unpackOrder(value), Math.min(18, unpackAuction(value) + 1)));
+        }
+        // Persist EXITED before removing the row. If cleanup persistence fails,
+        // the durable state is still terminal and a restart cannot relist it.
+        requirePositionPersistence();
+        if (exited.get()) {
+            orderPositions.remove(itemId);
+            activeOrderItems.remove(itemId);
+            requirePositionPersistence();
+        }
+    }
 
     void markActiveOrder(String itemId) {
         if (itemId != null && ITEM_ID.matcher(itemId).matches() && activeOrderItems.add(itemId)) {
@@ -144,6 +233,7 @@ final class CandidateFeedClient implements AutoCloseable {
     void recordOrderCancelled(String itemId) {
         if (itemId == null || !ITEM_ID.matcher(itemId).matches()) return;
         activeOrderItems.remove(itemId);
+        orderPositions.remove(itemId);
         usedSlots.updateAndGet(value -> packSlots(Math.max(activeOrderItems.size(), unpackOrder(value) - 1), unpackAuction(value)));
         // Do not invent a refund amount. The scoreboard is authoritative and
         // will restore the balance after Donut confirms the cancellation.
@@ -161,6 +251,7 @@ final class CandidateFeedClient implements AutoCloseable {
         // opens the verified personal-order menu and blocks an exact item match
         // before any transactional control is used.
         activeOrderItems.clear();
+        activeOrderItems.addAll(orderPositions.keySet());
         persistAndAllocate();
         // Recheck only the strongest newly available item. Enqueuing all twenty
         // as manual watches would starve market discovery; opening or arming any
@@ -261,6 +352,8 @@ final class CandidateFeedClient implements AutoCloseable {
     }
 
     void recordOrderSubmitted(Candidate candidate, OrderPlan plan) {
+        LocalOrderPosition position = LocalOrderPosition.submitted(candidate, plan, Instant.now());
+        orderPositions.put(position.itemId(), position);
         long afterEscrow = balance.updateAndGet(value -> Math.max(0, value - plan.escrowDollars()));
         pendingBalanceCeiling.set(afterEscrow);
         pendingBalanceUntilMillis.set(System.currentTimeMillis() + 10_000);
@@ -268,9 +361,54 @@ final class CandidateFeedClient implements AutoCloseable {
         usedSlots.updateAndGet(value -> packSlots(Math.min(20, unpackOrder(value) + 1), unpackAuction(value)));
         activeOrderItems.add(candidate.itemId());
         balanceSource.set("local pending order");
-        persistAndAllocate();
+        requirePositionPersistence();
         enqueueDiagnostic("order_workflow", "submitted", 0, Map.of("candidate_state", candidate.state(),
                 "route", candidate.route(), "reason_code", "explicit_local_arm"));
+    }
+
+    void recordOrderVerified(OrderPlan plan, int deliveredQuantity) {
+        if (plan == null) return;
+        orderPositions.computeIfPresent(plan.itemId(), (ignored, position) -> position.verified(deliveredQuantity, Instant.now()));
+        activeOrderItems.add(plan.itemId());
+        requirePositionPersistence();
+    }
+
+    void observeOrderMessage(String raw) {
+        String text = raw == null ? "" : raw.replaceAll("§[0-9A-FK-ORa-fk-or]", "")
+                .replace('\r', ' ').replace('\n', ' ').strip();
+        Matcher complete = COMPLETE_ORDER.matcher(text);
+        if (complete.matches()) {
+            matchingPosition(complete.group(1)).ifPresent(position -> {
+                orderPositions.computeIfPresent(position.itemId(), (ignored, current) -> current.completed(Instant.now()));
+                activeOrderItems.add(position.itemId());
+                persistAndAllocate();
+                enqueueDiagnostic("order_position", "complete", 0, Map.of("item_id", position.itemId(),
+                        "route", "ORDER_TO_AUCTION", "reason_code", "server_completion_message"));
+            });
+            return;
+        }
+        Matcher delivery = ITEM_DELIVERY.matcher(text);
+        if (!delivery.matches()) return;
+        try {
+            int quantity = Integer.parseInt(delivery.group(1).replace(",", ""));
+            if (quantity <= 0) return;
+            matchingPosition(delivery.group(2)).ifPresent(position -> {
+                int delivered = Math.min(position.totalQuantity(), Math.addExact(position.deliveredQuantity(), quantity));
+                orderPositions.computeIfPresent(position.itemId(), (ignored, current) -> current.verified(delivered, Instant.now()));
+                persistAndAllocate();
+            });
+        } catch (ArithmeticException | NumberFormatException ignored) { }
+    }
+
+    static boolean isCompleteOrderMessage(String text, String expectedItemName) {
+        Matcher matcher = COMPLETE_ORDER.matcher(text == null ? "" : text.strip());
+        return matcher.matches() && OrderPlan.equivalentItemLabel(matcher.group(1), expectedItemName, expectedItemName);
+    }
+
+    private Optional<LocalOrderPosition> matchingPosition(String itemLabel) {
+        List<LocalOrderPosition> matches = orderPositions.values().stream()
+                .filter(position -> OrderPlan.equivalentItemLabel(itemLabel, position.itemName(), position.itemName())).toList();
+        return matches.size() == 1 ? Optional.of(matches.getFirst()) : Optional.empty();
     }
 
     void focus(Candidate candidate) {
@@ -338,9 +476,72 @@ final class CandidateFeedClient implements AutoCloseable {
         }
     }
 
-    private void persistAndAllocate() {
-        ClientConfig.saveLocalState(balance(), usedOrderSlots(), usedAuctionSlots(), Set.copyOf(activeOrderItems));
-        allocation.set(allocator.allocate(candidates(), balance(), usedOrderSlots(), usedAuctionSlots(), activeOrderItems));
+    void pollShulkerSuppliesNow() throws Exception {
+        HttpResponse<InputStream> response = http.send(request(config.backend().resolve("/api/v1/supplies/shulker-boxes")).GET().build(),
+                HttpResponse.BodyHandlers.ofInputStream());
+        try (InputStream body = response.body()) {
+            byte[] encoded = body.readNBytes(MAX_RESPONSE_BYTES + 1);
+            if (encoded.length > MAX_RESPONSE_BYTES) throw new IllegalStateException("shulker supply feed exceeds 1 MiB");
+            if (response.statusCode() != 200) throw new IllegalStateException("backend returned HTTP " + response.statusCode());
+            shulkerSupplies.set(decodeShulkerSupplies(encoded, Instant.now()));
+            shulkerSupplySuccess.set(Instant.now());
+        }
+    }
+
+    static List<ShulkerSupply> decodeShulkerSupplies(byte[] encoded, Instant now) {
+        JsonObject root = JsonParser.parseString(new String(encoded, StandardCharsets.UTF_8)).getAsJsonObject();
+        Instant generated = instant(root, "generated_at");
+        if (generated.isAfter(now.plusSeconds(5)) || generated.isBefore(now.minusSeconds(20))) {
+            throw new IllegalArgumentException("stale shulker supply response");
+        }
+        JsonArray raw = root.getAsJsonArray("supplies");
+        if (raw == null || raw.size() > 20) throw new IllegalArgumentException("invalid shulker supply count");
+        List<ShulkerSupply> decoded = new ArrayList<>(raw.size());
+        Set<String> identities = new java.util.HashSet<>();
+        long previousPrice = -1;
+        for (JsonElement element : raw) {
+            JsonObject value = element.getAsJsonObject();
+            String itemId = required(value, "item_id", 128).toLowerCase(Locale.ROOT);
+            String seller = required(value, "seller", 16);
+            String auctionId = optional(value, "auction_id", 128);
+            long price = boundedLong(value, "price", 1, Long.MAX_VALUE);
+            Instant lastSeen = instant(value, "last_seen");
+            Instant expires = value.has("expires_at") && !value.get("expires_at").getAsString().isBlank()
+                    ? instant(value, "expires_at") : Instant.EPOCH;
+            String identity = auctionId.isBlank() ? seller + ':' + price + ':' + lastSeen : auctionId;
+            if (!itemId.equals("minecraft:shulker_box") || !seller.matches("[A-Za-z0-9_]{1,16}")
+                    || (previousPrice >= 0 && price < previousPrice) || !identities.add(identity)
+                    || lastSeen.isAfter(now.plusSeconds(5)) || lastSeen.isBefore(now.minusSeconds(20))
+                    || (!expires.equals(Instant.EPOCH) && !expires.isAfter(now))) {
+                throw new IllegalArgumentException("unsafe, stale, duplicated, or unsorted shulker supply");
+            }
+            previousPrice = price;
+            decoded.add(new ShulkerSupply(auctionId, seller, itemId, price, lastSeen, expires));
+        }
+        return List.copyOf(decoded);
+    }
+
+    private void pollShulkerSuppliesSafely() {
+        try {
+            pollShulkerSuppliesNow();
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+        } catch (Exception error) {
+            LOGGER.debug("Shulker supply refresh failed: {}", safeMessage(error));
+        }
+    }
+
+    private boolean persistAndAllocate() {
+        Set<String> tracked = java.util.stream.Stream.concat(activeOrderItems.stream(), orderPositions.keySet().stream())
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        boolean saved = positionStore.save(orderPositions.values());
+        ClientConfig.saveLocalState(balance(), usedOrderSlots(), usedAuctionSlots(), tracked);
+        allocation.set(allocator.allocate(candidates(), balance(), usedOrderSlots(), usedAuctionSlots(), tracked));
+        return saved;
+    }
+
+    private void requirePositionPersistence() {
+        if (!persistAndAllocate()) throw new IllegalStateException("local order position could not be persisted");
     }
 
     private void enqueueDiagnostic(String event, String code, long duration, Map<String, String> fields) {

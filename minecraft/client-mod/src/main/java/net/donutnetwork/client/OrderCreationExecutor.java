@@ -7,6 +7,7 @@ import net.minecraft.client.gui.ParentElement;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.screen.dialog.DialogScreen;
 import net.minecraft.client.gui.screen.ingame.GenericContainerScreen;
+import net.minecraft.client.gui.screen.ingame.HandledScreen;
 import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.client.gui.widget.EditBoxWidget;
 import net.minecraft.client.gui.widget.TextFieldWidget;
@@ -203,11 +204,17 @@ final class OrderCreationExecutor {
     }
 
     void observeServerMessage(MinecraftClient client, String raw) {
-        if (phase == Phase.IDLE || phase == Phase.ABORTED) return;
         String text = raw == null ? "" : raw.replaceAll("§[0-9A-FK-ORa-fk-or]", "")
                 .replace('\r', ' ').replace('\n', ' ').strip();
-        if (!isDuplicateOrderMessage(text)) return;
         OrderPlan affected = plan != null ? plan : lastSubmittedPlan;
+        if (affected != null && CandidateFeedClient.isCompleteOrderMessage(text, affected.itemName())
+                && feed.orderPosition(affected.itemId())
+                .filter(position -> position.state() == LocalOrderPosition.State.CLAIM_READY).isPresent()) {
+            finishCompletedOrder(client, affected);
+            return;
+        }
+        if (phase == Phase.IDLE || phase == Phase.ABORTED) return;
+        if (!isDuplicateOrderMessage(text)) return;
         if (affected != null) {
             feed.markActiveOrder(affected.itemId());
         }
@@ -217,7 +224,7 @@ final class OrderCreationExecutor {
         autoEnabled = false;
         clearAutoQueueState();
         feed.diagnostic("order_workflow", "duplicate_reported", Map.of("candidate_state", "unknown", "route", "ORDER_TO_AUCTION", "reason_code", "server_duplicate_message"));
-        if (client.currentScreen != null) client.setScreen(null);
+        closeScreen(client);
         tell(client, "Duplicate-order response detected. This item is blocked locally; open Your Orders before retrying it.");
     }
 
@@ -560,17 +567,23 @@ final class OrderCreationExecutor {
         if (!(screen instanceof GenericContainerScreen) || !title.equals("Orders -> Your Orders")) {
             abort(client, "unexpected personal-orders verification screen: " + title); return;
         }
-        int matches = personalOrderCountExact(client, lastSubmittedPlan, true);
-        if (matches == 1) {
-            feed.markActiveOrder(lastSubmittedPlan.itemId());
-            if (client.currentScreen != null) client.setScreen(null);
+        List<Integer> exactMatches = personalOrderSlotsExact(client, lastSubmittedPlan, false);
+        if (exactMatches.size() == 1) {
+            OrderPlan.OrderProgress progress = OrderPlan.firstOrderProgress(stackText(containerSlot(client, exactMatches.getFirst())))
+                    .orElseThrow(() -> new IllegalStateException("exact personal order has no parseable progress"));
+            feed.recordOrderVerified(lastSubmittedPlan, progress.delivered());
+            if (progress.delivered() > 0) {
+                finishPartiallyFilledOrder(client, progress);
+                return;
+            }
+            closeScreen(client);
             client.getNetworkHandler().sendChatCommand("orders");
             rankSortAttempts = 0;
             transition(Phase.RANK_BOARD, "verifying Most Per Item before checking public rank");
             delay();
             return;
         }
-        if (matches > 1) { abort(client, "multiple exact personal orders matched the submitted values; automatic orders stopped"); return; }
+        if (exactMatches.size() > 1) { abort(client, "multiple exact personal orders matched the submitted values; automatic orders stopped"); return; }
         if (personalOrderCount(client, lastSubmittedPlan.itemId()) > 0) {
             abort(client, "personal order item exists but its price or quantity is ambiguous; automatic orders stopped"); return;
         }
@@ -594,7 +607,7 @@ final class OrderCreationExecutor {
             delay();
             return;
         }
-        client.setScreen(null);
+        closeScreen(client);
         client.getNetworkHandler().sendChatCommand("order " + lastSubmittedPlan.itemPathQuery());
         transition(Phase.RANK_SEARCH, "searching the exact item to locate the new order");
         delay();
@@ -617,7 +630,7 @@ final class OrderCreationExecutor {
                 "reason_code", pendingRepriceUnitCents > 0 ? "not_first_reprice" : "not_first_drop"));
         tell(client, lastSubmittedPlan.itemName() + " placed #" + result.rank() + ". Cancelling it "
                 + (pendingRepriceUnitCents > 0 ? "before the bounded higher bid." : "because the next bid fails the reviewed profit/escrow limit."));
-        client.setScreen(null);
+        closeScreen(client);
         client.getNetworkHandler().sendChatCommand("orders");
         transition(Phase.CANCEL_BOARD, "opening Your Orders for a verified rank replacement");
         delay();
@@ -698,7 +711,7 @@ final class OrderCreationExecutor {
             }
         }
         if (screen instanceof DialogScreen<?> && cancelConfirmationSent) return;
-        if (client.currentScreen != null) client.setScreen(null);
+        closeScreen(client);
         client.getNetworkHandler().sendChatCommand("orders");
         transition(Phase.CANCEL_VERIFY_BOARD, "verifying that the cancelled order is absent");
         delay();
@@ -744,7 +757,7 @@ final class OrderCreationExecutor {
         retrying = true;
         armedAt = Instant.now();
         feed.candidate(plan.candidateId()).ifPresent(feed::focus);
-        if (client.currentScreen != null) client.setScreen(null);
+        closeScreen(client);
         transition(Phase.WAIT_FRESH, "waiting for refund, fresh auction exit, and the bounded replacement bid");
         tell(client, "Cancellation verified. Rechecking before recreating " + plan.itemName() + " at $" + plan.priceInput()
                 + " each; projected conservative profit is $" + FlipNotifier.format(plan.conservativeProfitDollars()) + ".");
@@ -763,9 +776,43 @@ final class OrderCreationExecutor {
         pendingRepriceUnitCents = 0;
         completeQueueItem(candidateID);
         nextAutoAttempt = Instant.now().plusSeconds(2);
-        if (client.currentScreen != null) client.setScreen(null);
+        closeScreen(client);
         tell(client, "Order verified at public rank #1: " + itemName + (autoEnabled
                 ? ". " + autoQueue.size() + " reviewed orders remain." : "."));
+    }
+
+    private void finishPartiallyFilledOrder(MinecraftClient client, OrderPlan.OrderProgress progress) {
+        OrderPlan accepted = lastSubmittedPlan;
+        String candidateID = accepted.candidateId();
+        feed.diagnostic("order_workflow", "verified", Map.of("candidate_state", "active", "route", "ORDER_TO_AUCTION",
+                "reason_code", "partial_fill_before_rank_check"));
+        phase = Phase.IDLE;
+        message = "verified " + accepted.itemName() + " after an immediate fill of " + progress.delivered()
+                + "/" + progress.total() + "; repricing was disabled";
+        lastSubmittedPlan = null;
+        retrying = false;
+        pendingRepriceUnitCents = 0;
+        completeQueueItem(candidateID);
+        nextAutoAttempt = Instant.now().plusSeconds(2);
+        closeScreen(client);
+        tell(client, "Order accepted and already filling: " + accepted.itemName() + " (" + progress.delivered()
+                + "/" + progress.total() + "). It was kept safely; partial orders are never cancelled for repricing.");
+    }
+
+    private void finishCompletedOrder(MinecraftClient client, OrderPlan completed) {
+        String candidateID = completed.candidateId();
+        feed.diagnostic("order_workflow", "complete", Map.of("candidate_state", "claim_ready", "route", "ORDER_TO_AUCTION",
+                "reason_code", "filled_before_rank_check"));
+        phase = Phase.IDLE;
+        message = "order filled completely and is ready for the claim/exit workflow: " + completed.itemName();
+        plan = null;
+        lastSubmittedPlan = null;
+        retrying = false;
+        pendingRepriceUnitCents = 0;
+        completeQueueItem(candidateID);
+        nextAutoAttempt = Instant.now().plusSeconds(2);
+        closeScreen(client);
+        tell(client, "Order filled completely: " + completed.itemName() + ". It is now queued for the verified claim and auction exit workflow.");
     }
 
     private void finishDroppedOrder(MinecraftClient client, OrderPlan dropped, String reason) {
@@ -775,7 +822,7 @@ final class OrderCreationExecutor {
         retrying = false;
         message = "dropped " + dropped.itemName() + ": " + reason;
         nextAutoAttempt = Instant.now().plusSeconds(1);
-        if (client.currentScreen != null) client.setScreen(null);
+        closeScreen(client);
         tell(client, message + (autoEnabled ? ". " + autoQueue.size() + " reviewed orders remain." : "."));
     }
 
@@ -845,7 +892,7 @@ final class OrderCreationExecutor {
         LOGGER.warn("Order workflow aborted in {}: {}; screen={}", phase, safeReason, describeScreen(client.currentScreen));
         feed.diagnostic("order_workflow", "aborted", Map.of("candidate_state", phase.name(), "route", "ORDER_TO_AUCTION", "reason_code", "workflow_abort"));
         phase = Phase.ABORTED; message = safeReason; plan = null; autoEnabled = false; clearAutoQueueState();
-        if (client.currentScreen != null) client.setScreen(null);
+        closeScreen(client);
         tell(client, "Order creation stopped safely: " + safeReason);
     }
 
@@ -1189,6 +1236,11 @@ final class OrderCreationExecutor {
     private static String safe(String value) {
         String result = value == null ? "unknown failure" : value.replace('\r', ' ').replace('\n', ' ').strip();
         return result.substring(0, Math.min(160, result.length()));
+    }
+    private static void closeScreen(MinecraftClient client) {
+        if (client.currentScreen == null) return;
+        if (client.currentScreen instanceof HandledScreen<?> && client.player != null) client.player.closeHandledScreen();
+        else client.setScreen(null);
     }
     private static void tell(MinecraftClient client, String value) {
         if (client.player != null) client.player.sendMessage(Text.literal("[DN] " + value), false);

@@ -63,6 +63,24 @@ func TestEngineFallbackTTLExpiresListingsWithoutDeadline(t *testing.T) {
 	}
 }
 
+func TestActiveListingsAreDetachedSortedAndExpiryAware(t *testing.T) {
+	e := NewEngine()
+	now := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	e.now = func() time.Time { return now }
+	e.Observe(Listing{Fingerprint: "higher", SellerName: "b", Item: Item{ID: "minecraft:shulker_box", Quantity: 1}, TotalPrice: 13_000, ExpiresAt: now.Add(time.Minute)})
+	e.Observe(Listing{Fingerprint: "lower", SellerName: "a", Item: Item{ID: "minecraft:shulker_box", Quantity: 1}, TotalPrice: 12_000, ExpiresAt: now.Add(time.Minute)})
+	e.Observe(Listing{Fingerprint: "expired", SellerName: "c", Item: Item{ID: "minecraft:shulker_box", Quantity: 1}, TotalPrice: 1, ExpiresAt: now.Add(-time.Second)})
+	listings := e.ActiveListings()
+	if len(listings) != 2 || listings[0].Fingerprint != "lower" || listings[1].Fingerprint != "higher" {
+		t.Fatalf("unexpected active listing view: %+v", listings)
+	}
+	listings[0].SellerName = "mutated"
+	again := e.ActiveListings()
+	if again[0].SellerName != "a" {
+		t.Fatalf("caller mutated engine state: %+v", again[0])
+	}
+}
+
 func TestEngineBuildsConfidencePenalizedBaseFallback(t *testing.T) {
 	e := NewEngine()
 	now := time.Now().UTC()

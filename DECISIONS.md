@@ -124,6 +124,20 @@ Legacy SQLite `unit_reward` values remain quarantined as whole-dollar developmen
 
 The mod targets Minecraft 1.21.11, Java 21, Fabric API 0.141.6, and Fabric Loader 0.19.2 or newer to match the current Prism instance. Fabric Loom 1.17.19 requires Gradle 9.5 or newer for builds; Gradle 9.7 is used in CI.
 
+## 2026-08-29 — Fabric-only order claims and auction exits
+
+Fabric may run a second, explicitly authorized session that claims completed tracked orders and creates their auction exits. Claim, packaging, purchase, confirmation, inventory transfer, block placement/breaking, and listing actions remain absent from Mineflayer. The collector boundary is permanent: if a future Fabric workflow is adapted to Mineflayer, any order that needs shulker acquisition or packaging must be rejected before acquisition because that physical inventory workflow cannot be made reliable in the observer. Mineflayer never buys such an order and remains observation-only.
+
+The durable client position records delivered, claimed, packaged, and listed quantities independently. Progress is monotonic and persisted after each verified server-side result. A resumed session may continue only from those verified boundaries; ambiguous state transitions put the item in `HOLD` and require manual reconciliation. Claiming a full order frees its local order slot, and only a listing proven exactly once in `Your Items` consumes a local auction slot.
+
+`CLAIM_PENDING`, `PACKAGE_PENDING`, and `LISTING_PENDING` are persisted before their corresponding irreversible action. If the process stops before the observable receipt advances that marker, restart cannot determine whether the action reached the server and therefore converts the position to `HOLD` instead of replaying it.
+
+Exit packaging uses physical inventory slots, `ceil(total quantity / maximum stack size)`. Fewer than 27 physical slots produce sequential unchanged-quantity listings. At 27 or more slots, Fabric divides the position into shulkers of at most 27 physical stacks, preserving the exact total quantity. Each package derives its gross target proportionally from the API-proven candidate exit and undercuts that target by $1,000. The player still needs enough free inventory for one package at a time and must look at a solid block with an empty adjacent space.
+
+Empty shulker supply comes from a Fabric-scoped backend endpoint built only from current official-API listings for one plain, generic, empty shulker. Fabric accepts only fresh, price-sorted, unique quotes, then independently verifies the live `Lowest Price` auction row, its generic registry ID, empty container component, price, and a balance-scaled spend cap before buying one box at a time. Named, colored, filled, enchanted, or otherwise modified containers do not qualify.
+
+Live capture established `Orders -> Your Orders`, an exact completed row, `Orders -> Edit Order`, the completed identity at slot 10, and `Collect` at slot 13. The exit executor requires that exact item, requested quantity, completion progress, and rounded unit-price bucket in both screens. Automatic exit is initially restricted to vanilla signatures; enchanted, trimmed, named, damaged, container-bearing, or otherwise modifier-sensitive positions stop in `HOLD` rather than relying on item ID alone.
+
 ## 2026-08-22 — Open-source reuse policy
 
 The official Donut API schema remains the primary contract, and the retained in-repository API client is more defensive than the surveyed community clients. `cancel-cloud/Donuts-Auctions` is MIT-licensed and useful as a parser/reference implementation, but its automation features are not imported. GPL code from `RubyImpala/Glaze` is not copied into this differently licensed codebase. Projects without an explicit license are reference-only. See `docs/open-source-review.md`.
@@ -249,5 +263,5 @@ Explicit automatic-order consent enables a continuous in-memory session, not a o
 - `/ah <item>` remains a supported manual search command; there is no relied-upon direct-auction-ID command.
 - The project operator explicitly confirmed on 2026-08-26 that DonutSMP staff authorize and lead this work. That authorization covers authenticated Mineflayer observers collecting order-market data and the Fabric client assisting with and executing explicitly armed player-side order creation. Mineflayer remains permanently observation-only and must never create, fulfill, cancel, claim, buy, list, transfer, or confirm an economic action.
 - The live order menu may continue omitting owner/order IDs; bounded same-page focused reductions are therefore the strongest available volume signal unless the server exposes a stable identity later.
-- The current combined-product execution goal is the explicitly authorized, session-scoped Fabric order queue with fail-closed screen verification and final freshness/budget checks. Claiming and auction relisting remain deferred until their live workflows and failure states are captured and separately implemented.
+- The current combined-product execution goal is explicitly authorized, session-scoped Fabric order creation plus the separately authorized completed-order exit session. The 2026-08-29 capture and implementation supersede the former assumption that claiming and relisting were deferred; modifier-sensitive exits and legacy pre-alpha28 positions remain manual.
 - Loopback is the default deployment. Public binding without a downstream client token is rejected at startup.

@@ -16,15 +16,18 @@ final class DonutScreen extends Screen {
     private final FlipFeedClient auctions;
     private final CandidateFeedClient candidates;
     private final OrderCreationExecutor orderExecutor;
+    private final AuctionExitExecutor exitExecutor;
     private String renderedKey = "";
     private int portfolioPage;
 
-    DonutScreen(Screen parent, FlipFeedClient auctions, CandidateFeedClient candidates, OrderCreationExecutor orderExecutor) {
+    DonutScreen(Screen parent, FlipFeedClient auctions, CandidateFeedClient candidates, OrderCreationExecutor orderExecutor,
+                AuctionExitExecutor exitExecutor) {
         super(Text.literal("Donut market flipper"));
         this.parent = parent;
         this.auctions = auctions;
         this.candidates = candidates;
         this.orderExecutor = orderExecutor;
+        this.exitExecutor = exitExecutor;
     }
 
     @Override protected void init() {
@@ -73,9 +76,10 @@ final class DonutScreen extends Screen {
                 () -> { portfolioPage++; clearAndInit(); }, "Next portfolio page.");
         next.active = portfolioPage + 1 < pageCount;
         addDrawableChild(next);
-        addDrawableChild(MarketUi.button("RECHECK LOCKS", layout.left + 328, footer, 110, 22, MarketUi.ButtonStyle.SECONDARY,
-                () -> { candidates.recheckTrackedOrders(); clearAndInit(); },
-                "Clear local tracked-item locks after manually reconciling Your Orders. Server duplicate checks still apply."));
+        addDrawableChild(MarketUi.button("EXITS " + candidates.exitReadyCount(), layout.left + 328, footer, 110, 22,
+                exitExecutor.enabled() ? MarketUi.ButtonStyle.PRIMARY : MarketUi.ButtonStyle.SECONDARY,
+                () -> client.setScreen(new AuctionExitScreen(this, candidates, exitExecutor)),
+                "Review completed tracked orders and the guarded auction-listing session."));
         addDrawableChild(MarketUi.button("CLOSE", layout.left + layout.panelWidth - 86, footer, 70, 22,
                 MarketUi.ButtonStyle.GHOST, this::close, "Close the dashboard."));
         renderedKey = feedKey();
@@ -169,6 +173,15 @@ final class DonutScreen extends Screen {
 
     private void drawExecutor(DrawContext context, Layout layout) {
         int top = layout.top + layout.panelHeight - 57;
+        AuctionExitExecutor.Status exitStatus = exitExecutor.status();
+        if (exitExecutor.enabled() || exitStatus.phase() == AuctionExitExecutor.Phase.ABORTED) {
+            String prefix = exitStatus.phase() == AuctionExitExecutor.Phase.ABORTED ? "EXIT STOPPED" : "AUTO EXITS";
+            int color = exitStatus.phase() == AuctionExitExecutor.Phase.ABORTED ? MarketUi.BAD
+                    : exitStatus.active() ? MarketUi.WARN : MarketUi.GOOD;
+            context.drawTextWithShadow(textRenderer, Text.literal(MarketUi.trim(prefix + "  •  " + exitStatus.message(), 82)),
+                    layout.left + 18, top, color);
+            return;
+        }
         OrderCreationExecutor.Status status = orderExecutor.status();
         OrderCreationExecutor.ArmResult readiness = orderExecutor.autoReadiness(client);
         String text;
@@ -211,6 +224,13 @@ final class DonutScreen extends Screen {
                 .append(candidates.balanceSource()).append(':').append(candidates.usedOrderSlots()).append(':').append(candidates.usedAuctionSlots()).append(':')
                 .append(auctions.status().version()).append(':').append(orderExecutor.status().phase()).append(':')
                 .append(orderExecutor.status().message()).append(':').append(orderExecutor.autoEnabled()).append(':').append(orderExecutor.autoRemaining());
+        key.append(':').append(exitExecutor.status().phase()).append(':').append(exitExecutor.status().message())
+                .append(':').append(exitExecutor.enabled()).append(':').append(candidates.exitReadyCount());
+        for (LocalOrderPosition position : candidates.orderPositions()) {
+            key.append(':').append(position.itemId()).append('=').append(position.deliveredQuantity()).append('/')
+                    .append(position.claimedQuantity()).append('/').append(position.packagedQuantity()).append('/')
+                    .append(position.listedQuantity()).append('/').append(position.state());
+        }
         for (PortfolioAllocator.Selection selection : candidates.allocation().selections()) key.append(':').append(selection.candidate().id()).append('=').append(selection.batches());
         return key.toString();
     }

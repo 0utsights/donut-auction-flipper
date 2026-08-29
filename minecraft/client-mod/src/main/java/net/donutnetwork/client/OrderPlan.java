@@ -4,6 +4,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.text.Normalizer;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -13,6 +14,7 @@ record OrderPlan(String candidateId, String signature, String itemId, String ite
                  int quantity, long observedUnitRewardCents, long unitRewardCents, long competitiveUnitRewardCents,
                  long bidStepCents, long totalCents, long escrowDollars, long targetListPrice,
                  long expectedProceedsPerBatch) {
+    record OrderProgress(int delivered, int total) {}
     private static final Pattern MONEY = Pattern.compile("(?i)\\$?\\s*([0-9][0-9,]*(?:\\.[0-9]+)?)\\s*([KMBT]?)(?![A-Za-z])");
     private static final Pattern UNIT_MONEY = Pattern.compile("(?i)\\$\\s*([0-9][0-9,]*(?:\\.[0-9]+)?)\\s*([KMBT]?)\\s*(?:each|per item|chacun|par (?:objet|article))\\b");
     private static final Pattern LABELED_QUANTITY = Pattern.compile("(?i)\\b(?:amount|quantity|quantit[eé])\\s*:?\\s*([0-9][0-9,]*)\\b");
@@ -184,15 +186,23 @@ record OrderPlan(String candidateId, String signature, String itemId, String ite
     }
 
     static boolean textContainsOrderProgress(String text, int expectedTotal, boolean requireZeroDelivered) {
+        Optional<OrderProgress> progress = firstOrderProgress(text);
+        return progress.isPresent() && progress.get().total() == expectedTotal
+                && (!requireZeroDelivered || progress.get().delivered() == 0);
+    }
+
+    static Optional<OrderProgress> firstOrderProgress(String text) {
         Matcher matcher = DELIVERED.matcher(clean(text));
         while (matcher.find()) {
             try {
                 long delivered = scaledWhole(matcher.group(1), matcher.group(2));
                 long total = scaledWhole(matcher.group(3), matcher.group(4));
-                if (total == expectedTotal && (!requireZeroDelivered || delivered == 0)) return true;
+                if (delivered >= 0 && delivered <= total && total > 0 && total <= Integer.MAX_VALUE) {
+                    return Optional.of(new OrderProgress(Math.toIntExact(delivered), Math.toIntExact(total)));
+                }
             } catch (ArithmeticException | NumberFormatException ignored) { }
         }
-        return false;
+        return Optional.empty();
     }
 
     private static long scaledWhole(String raw, String suffix) {
