@@ -270,6 +270,8 @@ Completed-sale/deep-book rebuilding is evidence maintenance, not the latency-sen
 
 Current signature completeness is stored incrementally as one row per canonical signature and observer, including parser version, conservative completeness, and timestamp. Refresh and debug queries use that compact table rather than window-sorting raw order rows from the last hour. A parser-version mismatch or any same-scan disagreement still fails closed; raw rows remain available for the 24-hour audit window.
 
+The newest-page auction lane scores every supplied listing immediately against the live active book and completed-sale evidence. Rebuilding the shared debug/research valuation map for repeated undercuts is separately bounded to once per item per five seconds; this does not delay a flip decision because `AnalyzeListings` performs the decision-time calculation directly. Broad scans still replace the complete shared model, and order-candidate refreshes calculate their exact quantities from the current engine rather than trusting the debug snapshot.
+
 ## Assumptions made without operator input
 
 - The official API retains its bearer-authenticated listing and transaction endpoints and 250 requests/minute published limit.

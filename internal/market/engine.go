@@ -321,19 +321,18 @@ func (e *Engine) refreshActiveValuationMaybeLocked(signature Signature, unitPric
 	e.refreshActiveValuationLocked(signature.Exact)
 }
 
-func (e *Engine) activeValuationRefreshDueLocked(signature Signature, unitPrice int64, now time.Time) bool {
+func (e *Engine) activeValuationRefreshDueLocked(signature Signature, _ int64, now time.Time) bool {
 	hasExactEvidence := len(e.transactions[signature.Exact]) >= 3
 	hasBaseEvidence := signature.Base != signature.Exact && len(e.baseTransactions[signature.Base]) >= 3
 	if !hasExactEvidence && !hasBaseEvidence {
 		return false
 	}
-	urgent := false
-	if valuation, ok := e.valuations[signature.Exact]; !ok {
-		urgent = hasExactEvidence
-	} else {
-		urgent = valuation.ActiveReferenceAsk == 0 || (unitPrice > 0 && unitPrice <= valuation.ActiveReferenceAsk)
-	}
-	if !urgent && now.Sub(e.lastActiveRecalc[signature.Exact]) < activeValuationRefreshInterval {
+	// The fast lane evaluates the supplied newest page directly against the live
+	// active book, so rebuilding the shared debug/research valuation for every
+	// newly undercutting listing adds no detection safety. Bound those shared-map
+	// rebuilds as well; a market-moving listing is still scored immediately by
+	// AnalyzeListings and becomes visible to other consumers within five seconds.
+	if last := e.lastActiveRecalc[signature.Exact]; !last.IsZero() && now.Sub(last) < activeValuationRefreshInterval {
 		return false
 	}
 	e.lastActiveRecalc[signature.Exact] = now

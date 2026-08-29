@@ -9,12 +9,14 @@ import (
 func TestEngineMaintainsActiveDepthAndBestAsk(t *testing.T) {
 	e := NewEngine()
 	now := time.Now().UTC()
+	e.now = func() time.Time { return now }
 	ts := make([]Transaction, 10)
 	for i := range ts {
 		ts[i] = Transaction{SellerName: fmt.Sprint(i), Item: Item{ID: "elytra", Quantity: 1}, TotalPrice: 300_000_000, SoldAt: now.Add(-time.Duration(i) * time.Minute)}
 	}
 	e.AddTransactions(ts)
 	a, _ := e.Observe(Listing{SellerName: "a", Item: Item{ID: "elytra", Quantity: 1}, TotalPrice: 290_000_000})
+	now = now.Add(activeValuationRefreshInterval)
 	b, _ := e.Observe(Listing{SellerName: "b", Item: Item{ID: "elytra", Quantity: 1}, TotalPrice: 280_000_000})
 	v, ok := e.Valuation("minecraft:elytra")
 	if !ok || v.ActiveDepth != 2 || v.ActiveBestAsk != 280_000_000 {
@@ -173,7 +175,7 @@ func TestObserveBatchDoesNotRevalueUnchangedListings(t *testing.T) {
 	}
 }
 
-func TestObserveBatchImmediatelyRevaluesMarketMovingAsk(t *testing.T) {
+func TestObserveBatchScoresMarketMovingAskBeforeBoundedSharedRevalue(t *testing.T) {
 	e := NewEngine()
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 	e.now = func() time.Time { return now }
@@ -194,9 +196,18 @@ func TestObserveBatchImmediatelyRevaluesMarketMovingAsk(t *testing.T) {
 	if after := e.Version(); after != version {
 		t.Fatalf("non-moving ask bypassed the refresh interval: before=%d after=%d", version, after)
 	}
-	e.ObserveBatch([]Listing{{AuthoritativeID: "market-moving", SellerName: "low", Item: Item{ID: "diamond", Quantity: 1}, TotalPrice: 3_000_000}})
+	observed, _ := e.ObserveBatch([]Listing{{AuthoritativeID: "market-moving", SellerName: "low", Item: Item{ID: "diamond", Quantity: 1}, TotalPrice: 2_000_000}})
+	if after := e.Version(); after != version {
+		t.Fatalf("market-moving ask bypassed the bounded shared refresh: before=%d after=%d", version, after)
+	}
+	_, report := e.AnalyzeListings(observed, Thresholds{MinProfit: 1, MinMarginBPS: 1, MinConfidenceBPS: 1, MinVolume24h: 1}, 10)
+	if report.Listings != 1 || report.NoValuation != 0 || report.NoQuantityEvidence != 0 {
+		t.Fatalf("newest-page scoring did not evaluate the market-moving ask: %+v", report)
+	}
+	now = now.Add(activeValuationRefreshInterval)
+	e.ObserveBatch([]Listing{{AuthoritativeID: "later-market-moving", SellerName: "later-low", Item: Item{ID: "diamond", Quantity: 1}, TotalPrice: 1_900_000}})
 	if after := e.Version(); after <= version {
-		t.Fatalf("market-moving ask was not applied immediately: before=%d after=%d", version, after)
+		t.Fatalf("shared valuation was not refreshed at its deadline: before=%d after=%d", version, after)
 	}
 }
 
