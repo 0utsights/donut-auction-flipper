@@ -76,6 +76,9 @@ func (s *System) LeaseTask(ctx context.Context, observerID string) (*Task, error
 func (s *System) SaveScan(ctx context.Context, value ScanBatch) (bool, error) {
 	return s.store.SaveScan(ctx, value)
 }
+func (s *System) AcceptedScanTaskKind(ctx context.Context, observerID, taskID string) (string, error) {
+	return s.store.AcceptedScanTaskKind(ctx, observerID, taskID)
+}
 func (s *System) CompleteTask(ctx context.Context, value TaskResult) error {
 	kind, err := s.store.LeasedTaskKind(ctx, value)
 	if err != nil {

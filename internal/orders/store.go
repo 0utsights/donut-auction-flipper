@@ -724,6 +724,16 @@ func (s *Store) LeasedTaskKind(ctx context.Context, result TaskResult) (string, 
 	return kind, err
 }
 
+// AcceptedScanTaskKind is called only after SaveScan has authenticated and
+// committed the task lease. Do not recheck the wall-clock lease here: it can
+// expire between that commit and refresh scheduling even though the accepted
+// observation remains valid.
+func (s *Store) AcceptedScanTaskKind(ctx context.Context, observerID, taskID string) (string, error) {
+	var kind string
+	err := s.db.QueryRowContext(ctx, `SELECT kind FROM tasks WHERE id=? AND assigned_observer=?`, taskID, observerID).Scan(&kind)
+	return kind, err
+}
+
 // QueueAutomaticResearch creates at most one short focused task. Callers pass
 // signatures in preferred order; recent automatic samples are skipped so the
 // collector rotates through valuable markets instead of fixating on one item.

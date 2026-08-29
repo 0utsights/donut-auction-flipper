@@ -206,6 +206,18 @@ func TestFailurePreservesPreviousFeed(t *testing.T) {
 	}
 }
 
+func TestFocusedScansKeepFastCandidateRefresh(t *testing.T) {
+	if got := scanCandidateRefreshInterval("discovery", 5*time.Second); got != 5*time.Second {
+		t.Fatalf("discovery interval=%s", got)
+	}
+	if got := scanCandidateRefreshInterval("focused_watch", 5*time.Second); got != 750*time.Millisecond {
+		t.Fatalf("focused interval=%s", got)
+	}
+	if got := scanCandidateRefreshInterval("focused_watch", 500*time.Millisecond); got != 500*time.Millisecond {
+		t.Fatalf("configured faster interval was slowed to %s", got)
+	}
+}
+
 func TestFastCollectionPublishesNewestPageFromStoredHistory(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	item := market.Item{ID: "minecraft:diamond", Quantity: 1, DisplayName: "Diamond"}

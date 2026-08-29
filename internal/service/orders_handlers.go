@@ -126,9 +126,25 @@ func (s *Server) observerOrderScans(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if inserted {
-		s.refreshOrderCandidatesIfDue(r.Context())
+		kind := ""
+		if value.TaskID != "" {
+			var kindErr error
+			kind, kindErr = s.orders.AcceptedScanTaskKind(r.Context(), value.ObserverID, value.TaskID)
+			if kindErr != nil {
+				s.orderError(w, "resolve order scan task", kindErr)
+				return
+			}
+		}
+		s.refreshOrderCandidatesIfDue(r.Context(), scanCandidateRefreshInterval(kind, s.cfg.CandidateRefresh))
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"accepted": true, "duplicate": !inserted})
+}
+
+func scanCandidateRefreshInterval(taskKind string, ordinary time.Duration) time.Duration {
+	if taskKind == "focused_watch" && ordinary > 750*time.Millisecond {
+		return 750 * time.Millisecond
+	}
+	return ordinary
 }
 
 func (s *Server) observerTaskResult(w http.ResponseWriter, r *http.Request) {
@@ -259,12 +275,12 @@ func (s *Server) clientDiagnostics(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) refreshOrderCandidatesIfDue(ctx context.Context) {
+func (s *Server) refreshOrderCandidatesIfDue(ctx context.Context, interval time.Duration) {
 	engine := s.engine.Load()
 	if engine == nil {
 		return
 	}
-	if _, err := s.orders.RefreshIfDue(ctx, engine, 750*time.Millisecond); err != nil {
+	if _, err := s.orders.RefreshIfDue(ctx, engine, interval); err != nil {
 		s.logger.Warn("refresh order candidates", "error", err)
 	}
 }
