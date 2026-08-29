@@ -45,11 +45,15 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	pause, err := envDuration("DN_COLLECTION_PAUSE", 5*time.Second, time.Second, 10*time.Minute)
+	pause, err := envDuration("DN_COLLECTION_PAUSE", 5*time.Minute, 30*time.Second, 30*time.Minute)
 	if err != nil {
 		return err
 	}
-	fastInterval, err := envDuration("DN_FAST_INTERVAL", 250*time.Millisecond, 250*time.Millisecond, 10*time.Second)
+	fastInterval, err := envDuration("DN_FAST_INTERVAL", 500*time.Millisecond, 250*time.Millisecond, 10*time.Second)
+	if err != nil {
+		return err
+	}
+	candidateRefresh, err := envDuration("DN_CANDIDATE_REFRESH_INTERVAL", 5*time.Second, time.Second, time.Minute)
 	if err != nil {
 		return err
 	}
@@ -94,7 +98,7 @@ func run(logger *slog.Logger) error {
 	application, err := service.New(service.Config{
 		Address: address, ClientToken: clientToken, ObserverToken: observerToken, FabricToken: fabricToken,
 		DatabasePath: env("DN_DATABASE_FILE", "data/market.db"), AuctionFeeBPS: auctionFeeBPS, OrderFeeBPS: orderFeeBPS,
-		ListingPages: listingPages, CollectionPause: pause, FastInterval: fastInterval, ShulkerInterval: shulkerInterval,
+		ListingPages: listingPages, CollectionPause: pause, FastInterval: fastInterval, CandidateRefresh: candidateRefresh, ShulkerInterval: shulkerInterval,
 		OpportunityLimit: 100, Thresholds: thresholds,
 	}, upstream, history, logger)
 	if err != nil {

@@ -120,6 +120,11 @@ func (s *Store) migrate() error {
 			observed_ms INTEGER NOT NULL,focused INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY(signature,observer_id,session_id))`,
 		`CREATE INDEX IF NOT EXISTS order_price_samples_recent ON order_price_samples(observed_ms DESC)`,
+		`CREATE TABLE IF NOT EXISTS order_signature_samples (
+			signature TEXT NOT NULL,observer_id TEXT NOT NULL,parser_version TEXT NOT NULL,
+			signature_complete INTEGER NOT NULL DEFAULT 0,observed_ms INTEGER NOT NULL,
+			PRIMARY KEY(signature,observer_id))`,
+		`CREATE INDEX IF NOT EXISTS order_signature_samples_recent ON order_signature_samples(observed_ms DESC)`,
 		`CREATE TABLE IF NOT EXISTS fill_events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, signature TEXT NOT NULL, order_key TEXT NOT NULL,
 			observer_id TEXT NOT NULL, units INTEGER NOT NULL, unit_reward INTEGER NOT NULL DEFAULT 0,
@@ -299,6 +304,26 @@ func (s *Store) migrate() error {
 			SELECT signature,observer_id,session_id,unit_reward_cents,competitive_unit_reward_cents,price_position,latest_ms,any_focused
 			FROM ranked WHERE sample_rank=1`, s.now().Add(-orderObservationWindow).UnixMilli()); err != nil {
 			return fmt.Errorf("backfill recent order price samples: %w", err)
+		}
+	}
+	// Completeness is a current parser/observer classification, not a property
+	// that needs millions of raw menu rows. Backfill the latest classification
+	// once, then maintain one compact row per signature and observer. Candidate
+	// refreshes can consequently fail closed on parser changes without repeatedly
+	// window-sorting the retained raw observation table.
+	var signatureSampleCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM order_signature_samples`).Scan(&signatureSampleCount); err != nil {
+		return fmt.Errorf("count order signature samples: %w", err)
+	}
+	if signatureSampleCount == 0 {
+		if _, err := s.db.Exec(`WITH latest AS (
+			SELECT signature,observer_id,parser_version,signature_complete,observed_ms,
+				ROW_NUMBER() OVER (PARTITION BY signature,observer_id ORDER BY observed_ms DESC,id DESC) AS sample_rank
+			FROM order_rows WHERE unit_reward_cents>0 AND observed_ms>=?)
+			INSERT OR IGNORE INTO order_signature_samples(signature,observer_id,parser_version,signature_complete,observed_ms)
+			SELECT signature,observer_id,parser_version,signature_complete,observed_ms FROM latest WHERE sample_rank=1`,
+			s.now().Add(-signatureEvidenceWindow).UnixMilli()); err != nil {
+			return fmt.Errorf("backfill order signature samples: %w", err)
 		}
 	}
 	return nil
@@ -522,6 +547,7 @@ func (s *Store) SaveScan(ctx context.Context, batch ScanBatch) (bool, error) {
 			bestReward            int64
 			bestCompetitiveReward int64
 			bestPosition          int
+			signatureComplete     bool
 		}
 		summaries := make(map[string]summaryObservation, len(batch.Orders))
 		for _, order := range batch.Orders {
@@ -529,12 +555,18 @@ func (s *Store) SaveScan(ctx context.Context, batch ScanBatch) (bool, error) {
 				continue
 			}
 			summary := summaries[order.Signature]
+			firstForSignature := summary.order.Signature == ""
 			if summary.order.Signature == "" || order.UnitRewardCents > summary.bestReward ||
 				(order.UnitRewardCents == summary.bestReward && order.CompetitiveUnitRewardCents > summary.bestCompetitiveReward) {
 				summary.order = order
 				summary.bestReward = order.UnitRewardCents
 				summary.bestCompetitiveReward = order.CompetitiveUnitRewardCents
 				summary.bestPosition = order.PricePosition
+			}
+			if firstForSignature {
+				summary.signatureComplete = order.SignatureComplete
+			} else {
+				summary.signatureComplete = summary.signatureComplete && order.SignatureComplete
 			}
 			summary.availableUnits += order.RemainingQuantity
 			summaries[order.Signature] = summary
@@ -604,6 +636,13 @@ func (s *Store) SaveScan(ctx context.Context, batch ScanBatch) (bool, error) {
 			// diagnostics, but only the assigned signature may update evidence.
 			if taskKind == "focused_watch" && taskSignature != order.Signature {
 				continue
+			}
+			if _, err = tx.ExecContext(ctx, `INSERT INTO order_signature_samples(signature,observer_id,parser_version,signature_complete,observed_ms)
+				VALUES(?,?,?,?,?) ON CONFLICT(signature,observer_id) DO UPDATE SET
+				parser_version=excluded.parser_version,signature_complete=excluded.signature_complete,
+				observed_ms=excluded.observed_ms WHERE excluded.observed_ms>=order_signature_samples.observed_ms`,
+				order.Signature, batch.ObserverID, parserVersion, boolInt(summary.signatureComplete), batch.ObservedAt.UnixMilli()); err != nil {
+				return false, err
 			}
 			sampleResult, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO order_evidence_sessions(signature,observer_id,session_id,first_seen_ms,last_seen_ms)
 				VALUES(?,?,?,?,?)`, order.Signature, batch.ObserverID, batch.SessionID, batch.ObservedAt.UnixMilli(), batch.ObservedAt.UnixMilli())
@@ -930,12 +969,9 @@ func (s *Store) enrichEvidence(ctx context.Context, evidence []Evidence) error {
 	// conservative classification immediately. Only the observer's currently
 	// registered parser version may prove completeness, while that proof lives as
 	// long as the underlying one-hour order observation.
-	completeRows, err := s.db.QueryContext(ctx, `WITH latest AS (
-		SELECT r.signature,r.observer_id,r.signature_complete,
-			ROW_NUMBER() OVER (PARTITION BY r.signature,r.observer_id ORDER BY r.observed_ms DESC,r.id DESC) AS sample_rank
-		FROM order_rows r JOIN observers o ON o.observer_id=r.observer_id
-		WHERE r.unit_reward_cents>0 AND r.observed_ms>=? AND r.parser_version=o.parser_version)
-		SELECT signature,MIN(signature_complete) FROM latest WHERE sample_rank=1 GROUP BY signature`, signatureRecent)
+	completeRows, err := s.db.QueryContext(ctx, `SELECT samples.signature,MIN(samples.signature_complete)
+		FROM order_signature_samples samples JOIN observers o ON o.observer_id=samples.observer_id
+		WHERE samples.observed_ms>=? AND samples.parser_version=o.parser_version GROUP BY samples.signature`, signatureRecent)
 	if err != nil {
 		return err
 	}
@@ -1152,8 +1188,10 @@ func (s *Store) scanCoverage(ctx context.Context) (ScanCoverage, error) {
 	if err = s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(CASE WHEN confirmation_level>=1 THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN confirmation_level<1 THEN 1 ELSE 0 END),0) FROM fill_events WHERE unit_reward_cents>0`).Scan(&value.ConfirmedFills, &value.QuarantinedFills); err != nil {
 		return value, err
 	}
-	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT r.signature) FROM order_rows r JOIN observers o ON o.observer_id=r.observer_id
-		WHERE r.signature_complete=1 AND r.unit_reward_cents>0 AND r.observed_ms>=? AND r.parser_version=o.parser_version`, s.now().Add(-signatureEvidenceWindow).UnixMilli()).Scan(&value.CompleteSignatures); err != nil {
+	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT samples.signature) FROM order_signature_samples samples
+		JOIN observers o ON o.observer_id=samples.observer_id
+		WHERE samples.signature_complete=1 AND samples.observed_ms>=? AND samples.parser_version=o.parser_version`,
+		s.now().Add(-signatureEvidenceWindow).UnixMilli()).Scan(&value.CompleteSignatures); err != nil {
 		return value, err
 	}
 	if last > 0 {
@@ -1232,6 +1270,7 @@ func (s *Store) Cleanup(ctx context.Context) error {
 		{`DELETE FROM scans WHERE id IN (SELECT id FROM scans WHERE observed_ms<? ORDER BY observed_ms LIMIT ?)`, now.Add(-rawObservationRetention).UnixMilli()},
 		{`DELETE FROM fill_events WHERE id IN (SELECT id FROM fill_events WHERE observed_ms<? ORDER BY observed_ms LIMIT ?)`, now.Add(-fillRetention).UnixMilli()},
 		{`DELETE FROM order_price_samples WHERE rowid IN (SELECT rowid FROM order_price_samples WHERE observed_ms<? ORDER BY observed_ms LIMIT ?)`, now.Add(-rawObservationRetention).UnixMilli()},
+		{`DELETE FROM order_signature_samples WHERE rowid IN (SELECT rowid FROM order_signature_samples WHERE observed_ms<? ORDER BY observed_ms LIMIT ?)`, now.Add(-rawObservationRetention).UnixMilli()},
 		{`DELETE FROM diagnostics WHERE id IN (SELECT id FROM diagnostics WHERE created_ms<? ORDER BY created_ms LIMIT ?)`, now.Add(-diagnosticRetention).UnixMilli()},
 		{`DELETE FROM watches WHERE id IN (SELECT id FROM watches WHERE expires_ms<? ORDER BY expires_ms LIMIT ?)`, now.UnixMilli()},
 		{`DELETE FROM tasks WHERE id IN (SELECT id FROM tasks WHERE automatic=1 AND state='completed' AND updated_ms<? ORDER BY updated_ms LIMIT ?)`, now.Add(-7 * 24 * time.Hour).UnixMilli()},

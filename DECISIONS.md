@@ -264,6 +264,12 @@ Fabric item creation accepts Donut's fuzzy multi-result chooser only when exactl
 
 Explicit automatic-order consent enables a continuous in-memory session, not a one-time candidate snapshot. The session may start with zero READY allocations and waits without turning itself off; whenever Fabric is idle it reconciles the latest local portfolio and queues newly eligible canonical items up to the currently free order slots. Every new queue entry freezes its own current allocation capital as the maximum escrow, then runs the complete fresh-market, duplicate, exact-item, rank, cancellation, and refund checks. A changed, unprofitable, explicitly rejected, or pre-submit schema-failing canonical item is stored in an in-memory session quarantine. Replacement candidate IDs for that same item cannot re-enter until the player stops and explicitly starts a new session; unrelated candidates continue after one second. The session still ends on player Stop, disconnect, shared navigation/schema failure, or an ambiguous post-submit/cancellation outcome.
 
+## 2026-08-29 — API lane capacity and compact signature evidence
+
+Completed-sale/deep-book rebuilding is evidence maintenance, not the latency-sensitive auction lane. A 220-page scan takes roughly 83–87 seconds under the shared upstream limit and now rests for five minutes before rebuilding again; the newest-page lane remains at 500ms and the dedicated shulker quote at five seconds. Order candidates recompute from auction changes at most every five seconds, while newly inserted Mineflayer order observations retain the separate 750ms coalescing path. This preserves subsecond auction discovery and near-live order decisions without continuously spending the full API budget or half a CPU core rebuilding unchanged evidence.
+
+Current signature completeness is stored incrementally as one row per canonical signature and observer, including parser version, conservative completeness, and timestamp. Refresh and debug queries use that compact table rather than window-sorting raw order rows from the last hour. A parser-version mismatch or any same-scan disagreement still fails closed; raw rows remain available for the 24-hour audit window.
+
 ## Assumptions made without operator input
 
 - The official API retains its bearer-authenticated listing and transaction endpoints and 250 requests/minute published limit.

@@ -49,6 +49,7 @@ type Config struct {
 	ListingPages     int
 	CollectionPause  time.Duration
 	FastInterval     time.Duration
+	CandidateRefresh time.Duration
 	ShulkerInterval  time.Duration
 	OpportunityLimit int
 	Thresholds       market.Thresholds
@@ -168,10 +169,13 @@ func New(cfg Config, upstream Upstream, history History, logger *slog.Logger) (*
 		return nil, errors.New("listing pages must be between 1 and 220")
 	}
 	if cfg.CollectionPause <= 0 {
-		cfg.CollectionPause = 5 * time.Second
+		cfg.CollectionPause = 5 * time.Minute
 	}
 	if cfg.FastInterval <= 0 {
-		cfg.FastInterval = 250 * time.Millisecond
+		cfg.FastInterval = 500 * time.Millisecond
+	}
+	if cfg.CandidateRefresh <= 0 {
+		cfg.CandidateRefresh = 5 * time.Second
 	}
 	if cfg.ShulkerInterval <= 0 {
 		cfg.ShulkerInterval = 5 * time.Second
@@ -479,7 +483,7 @@ func (s *Server) CollectFastOnce(ctx context.Context) error {
 	if s.engine.Load() != engine {
 		return nil
 	}
-	if _, err := s.orders.RefreshIfDue(ctx, engine, 750*time.Millisecond); err != nil {
+	if _, err := s.orders.RefreshIfDue(ctx, engine, s.cfg.CandidateRefresh); err != nil {
 		s.logger.Warn("fast order candidates refresh failed", "error", err)
 	}
 	status := Status{ValuationCount: valuationCount, FlipCount: len(flips), API: s.upstream.Stats()}

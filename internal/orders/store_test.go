@@ -196,6 +196,35 @@ func TestCleanupPrunesExpiredCompactPriceSamples(t *testing.T) {
 	}
 }
 
+func TestCleanupPrunesExpiredCompactSignatureSamples(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	for _, value := range []struct {
+		observer string
+		seen     time.Time
+	}{{"expired", now.Add(-25 * time.Hour)}, {"current", now.Add(-23 * time.Hour)}} {
+		if _, err := store.db.Exec(`INSERT INTO order_signature_samples(signature,observer_id,parser_version,signature_complete,observed_ms)
+			VALUES('minecraft:stone',?,'p1',1,?)`, value.observer, value.seen.UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM order_signature_samples`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("retained compact signature samples=%d, want 1", count)
+	}
+}
+
 func TestStoreIndexesFreshnessWindows(t *testing.T) {
 	store, err := OpenStore("")
 	if err != nil {
@@ -203,8 +232,9 @@ func TestStoreIndexesFreshnessWindows(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	for table, name := range map[string]string{
-		"order_rows":  "order_rows_observed_time",
-		"fill_events": "fill_observed_time",
+		"order_rows":              "order_rows_observed_time",
+		"fill_events":             "fill_observed_time",
+		"order_signature_samples": "order_signature_samples_recent",
 	} {
 		var count int
 		if err := store.db.QueryRow(`SELECT COUNT(*) FROM pragma_index_list(?) WHERE name=?`, table, name).Scan(&count); err != nil {
@@ -247,6 +277,12 @@ func TestLatestObserverClassificationSupersedesOlderRowsButPreservesConsensus(t 
 		if _, err := store.db.Exec(`INSERT INTO order_rows(scan_id,observer_id,order_key,item_id,signature,display_name,quantity,max_stack_size,unit_reward,unit_reward_cents,requested_quantity,remaining_quantity,owner,expires_ms,price_position,slot,raw_field_hash,signature_complete,parser_version,identity_verified,observed_ms)
 			VALUES(?,?,?,'minecraft:stone','minecraft:stone','Stone',64,64,0,100,64,64,'',0,1,0,?,?,'p1',1,?)`,
 			scanID, observer, observer+observed.String(), observer+observed.String(), boolInt(complete), observed.UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.Exec(`INSERT INTO order_signature_samples(signature,observer_id,parser_version,signature_complete,observed_ms)
+			VALUES('minecraft:stone',?,'p1',?,?) ON CONFLICT(signature,observer_id) DO UPDATE SET
+			parser_version=excluded.parser_version,signature_complete=excluded.signature_complete,observed_ms=excluded.observed_ms`,
+			observer, boolInt(complete), observed.UnixMilli()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -323,6 +359,38 @@ func TestObserverLeaseAndIdempotentScan(t *testing.T) {
 	inserted, err = system.SaveScan(ctx, batch)
 	if err != nil || inserted {
 		t.Fatalf("duplicate inserted=%v err=%v", inserted, err)
+	}
+}
+
+func TestScanCompletenessFailsClosedWhenSameSignatureRowsDisagree(t *testing.T) {
+	system, err := NewSystem(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	ctx := context.Background()
+	if _, err := system.Register(ctx, ObserverRegistration{ObserverID: "one", ParserVersion: "p1", ProxyLabel: "proxy"}); err != nil {
+		t.Fatal(err)
+	}
+	task, err := system.LeaseTask(ctx, "one")
+	if err != nil || task == nil {
+		t.Fatalf("task=%+v err=%v", task, err)
+	}
+	complete := order("order-complete", 100)
+	incomplete := order("order-incomplete", 100)
+	incomplete.SignatureComplete = false
+	batch := scan("one", task.ID, "mixed-completeness", 0, time.Now().UTC(), complete, incomplete)
+	batch.LeaseToken = task.LeaseToken
+	if inserted, err := system.SaveScan(ctx, batch); err != nil || !inserted {
+		t.Fatalf("inserted=%v err=%v", inserted, err)
+	}
+	var compactComplete bool
+	if err := system.store.db.QueryRow(`SELECT signature_complete FROM order_signature_samples
+		WHERE signature='minecraft:diamond' AND observer_id='one'`).Scan(&compactComplete); err != nil {
+		t.Fatal(err)
+	}
+	if compactComplete {
+		t.Fatal("mixed canonical classifications were promoted to complete")
 	}
 }
 
