@@ -4,7 +4,6 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -81,30 +80,42 @@ class OrderCreationExecutorTest {
     }
 
     @Test void continuousSessionCanWaitEmptyThenQueueANewDistinctCandidate() {
-        Instant now = Instant.parse("2026-08-29T19:00:00Z");
         PortfolioAllocator.Selection ice = selection("ice-one", "ice");
         assertTrue(OrderCreationExecutor.autoQueueAdditions(
-                List.of(), 20, Set.of(), Set.of(), Map.of(), now).isEmpty());
+                List.of(), 20, Set.of(), Set.of(), Set.of()).isEmpty());
         assertEquals(List.of(ice), OrderCreationExecutor.autoQueueAdditions(
-                List.of(ice), 20, Set.of(), Set.of(), Map.of(), now));
+                List.of(ice), 20, Set.of(), Set.of(), Set.of()));
 
         PortfolioAllocator.Selection replacement = selection("ice-two", "ice");
         assertEquals(List.of(ice), OrderCreationExecutor.autoQueueAdditions(
-                List.of(ice, replacement), 20, Set.of(), Set.of(), Map.of(), now));
+                List.of(ice, replacement), 20, Set.of(), Set.of(), Set.of()));
         assertTrue(OrderCreationExecutor.autoQueueAdditions(
-                List.of(ice), 20, Set.of(), Set.of("minecraft:ice"), Map.of(), now).isEmpty());
+                List.of(ice), 20, Set.of(), Set.of("minecraft:ice"), Set.of()).isEmpty());
     }
 
-    @Test void continuousSessionBoundsSlotsAndCoolsDownAnUnchangedFailure() {
-        Instant now = Instant.parse("2026-08-29T19:00:00Z");
+    @Test void continuousSessionBoundsQueuedItemsToAvailableSlots() {
         PortfolioAllocator.Selection ice = selection("ice-one", "ice");
         PortfolioAllocator.Selection sponge = selection("sponge-one", "sponge");
         assertEquals(List.of(ice), OrderCreationExecutor.autoQueueAdditions(
-                List.of(ice, sponge), 1, Set.of(), Set.of(), Map.of(), now));
-        assertTrue(OrderCreationExecutor.autoQueueAdditions(
-                List.of(ice), 20, Set.of(), Set.of(), Map.of("ice-one", now.plusSeconds(60)), now).isEmpty());
-        assertEquals(List.of(ice), OrderCreationExecutor.autoQueueAdditions(
-                List.of(ice), 20, Set.of(), Set.of(), Map.of("ice-one", now.minusSeconds(1)), now));
+                List.of(ice, sponge), 1, Set.of(), Set.of(), Set.of()));
+    }
+
+    @Test void sessionQuarantineRejectsReplacementCandidatesForTheSameItemButKeepsOthers() {
+        PortfolioAllocator.Selection replacementIce = selection("ice-two", "ice");
+        PortfolioAllocator.Selection sponge = selection("sponge-one", "sponge");
+        assertEquals(List.of(sponge), OrderCreationExecutor.autoQueueAdditions(
+                List.of(replacementIce, sponge), 20, Set.of(), Set.of(), Set.of("minecraft:ice")));
+    }
+
+    @Test void onlyItemInputPhasesCanBeQuarantinedBeforeSubmission() {
+        assertTrue(OrderCreationExecutor.isPreSubmitItemPhase(OrderCreationExecutor.Phase.ITEM_SEARCH));
+        assertTrue(OrderCreationExecutor.isPreSubmitItemPhase(OrderCreationExecutor.Phase.ITEM_RESULT));
+        assertTrue(OrderCreationExecutor.isPreSubmitItemPhase(OrderCreationExecutor.Phase.AMOUNT));
+        assertTrue(OrderCreationExecutor.isPreSubmitItemPhase(OrderCreationExecutor.Phase.PRICE));
+        assertTrue(OrderCreationExecutor.isPreSubmitItemPhase(OrderCreationExecutor.Phase.REVIEW));
+        assertFalse(OrderCreationExecutor.isPreSubmitItemPhase(OrderCreationExecutor.Phase.ORDER_BOARD));
+        assertFalse(OrderCreationExecutor.isPreSubmitItemPhase(OrderCreationExecutor.Phase.PENDING_VERIFICATION));
+        assertFalse(OrderCreationExecutor.isPreSubmitItemPhase(OrderCreationExecutor.Phase.VERIFY_YOUR_ORDERS));
     }
 
     private static PortfolioAllocator.Selection selection(String id, String itemPath) {

@@ -123,10 +123,20 @@ record OrderPlan(String candidateId, String signature, String itemId, String ite
         if (!donut.matches()) return equivalentItemLabel(actual, expectedRegistryName, fallbackName);
         int separator = expectedItemId == null ? -1 : expectedItemId.indexOf(':');
         String expectedPath = separator < 0 ? expectedItemId : expectedItemId.substring(separator + 1);
-        // Donut's bracketed metadata is the canonical registry path. The
-        // trailing human label is localized independently by the server and
-        // cannot safely be compared to the client's registry translation.
-        return expectedPath != null && donut.group(1).equalsIgnoreCase(expectedPath);
+        if (expectedPath == null) return false;
+        String displayedPath = donut.group(1);
+        if (displayedPath.equalsIgnoreCase(expectedPath)) return true;
+
+        // Captured 1.21.11 Donut fixture:
+        // [item/golden_apple@items] Enchanted Golden Apple
+        // The bracket path selects the button's icon in this one menu and is
+        // not the semantic item ID. Accept the alias only when the complete
+        // visible label independently proves the expected item. Do not make
+        // this a generic path-mismatch fallback: that would reintroduce fuzzy
+        // selection bugs such as Ice versus Packed Ice.
+        return expectedPath.equals("enchanted_golden_apple")
+                && displayedPath.equalsIgnoreCase("golden_apple")
+                && equivalentItemLabel(donut.group(2), expectedRegistryName, fallbackName);
     }
 
     private static String normalizedTokenSet(String value) {

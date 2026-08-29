@@ -27,6 +27,15 @@ class OrderPlanTest {
                 "minecraft:ice", "Ice", "Ice"));
     }
 
+    @Test void acceptsCapturedEnchantedGoldenAppleIconAliasOnlyWithAnExactVisibleName() {
+        assertTrue(OrderPlan.exactItemResultLabel("[item/golden_apple@items] Enchanted Golden Apple",
+                "minecraft:enchanted_golden_apple", "Enchanted Golden Apple", "Enchanted Golden Apple"));
+        assertFalse(OrderPlan.exactItemResultLabel("[item/golden_apple@items] Golden Apple",
+                "minecraft:enchanted_golden_apple", "Enchanted Golden Apple", "Enchanted Golden Apple"));
+        assertFalse(OrderPlan.exactItemResultLabel("[item/apple@items] Enchanted Golden Apple",
+                "minecraft:enchanted_golden_apple", "Enchanted Golden Apple", "Enchanted Golden Apple"));
+    }
+
     @Test void preservesCentPreciseRewardAndCheckedStackEscrow() {
         CandidateFeedClient.Candidate candidate = candidate(64, 500_001, 320_001);
         OrderPlan plan = OrderPlan.from(candidate);

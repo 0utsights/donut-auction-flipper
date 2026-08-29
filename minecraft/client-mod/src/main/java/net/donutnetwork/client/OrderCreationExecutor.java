@@ -36,6 +36,7 @@ import java.util.ArrayDeque;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -76,7 +77,6 @@ final class OrderCreationExecutor {
     private static final Duration FRESH_WAIT = Duration.ofSeconds(20);
     private static final Duration WORKFLOW_TIMEOUT = Duration.ofMinutes(3);
     private static final Duration SCREEN_TIMEOUT = Duration.ofSeconds(8);
-    private static final Duration AUTO_RETRY_DELAY = Duration.ofMinutes(1);
     private static final String FOCUSED_STALE = "focused order observation is not fresh yet";
     private static final long ACTION_DELAY_NANOS = Duration.ofMillis(350).toNanos();
     private static final Pattern ORDERS_TITLE = Pattern.compile("Orders \\(Page [0-9]+\\)");
@@ -113,7 +113,7 @@ final class OrderCreationExecutor {
     private final ArrayDeque<String> autoQueue = new ArrayDeque<>();
     private final Map<String, Long> autoEscrowCaps = new LinkedHashMap<>();
     private final Map<String, String> autoItemIds = new LinkedHashMap<>();
-    private final Map<String, Instant> autoRetryAfter = new LinkedHashMap<>();
+    private final Set<String> autoSessionRejectedItems = new LinkedHashSet<>();
     private long currentEscrowCap;
     private long minimumProfitDollars;
     private long pendingRepriceUnitCents;
@@ -152,7 +152,7 @@ final class OrderCreationExecutor {
         sessionSpent = 0;
         lastSubmittedPlan = null;
         autoEnabled = true;
-        refreshAutoQueue(Instant.now());
+        refreshAutoQueue();
         message = autoQueue.isEmpty()
                 ? "automatic order session active; waiting for reviewed candidates"
                 : "automatic order session active with " + autoQueue.size() + " reviewed candidates queued";
@@ -218,6 +218,15 @@ final class OrderCreationExecutor {
         if (affected != null) {
             feed.markActiveOrder(affected.itemId());
         }
+        if (autoEnabled) {
+            if (lastSubmittedPlan != null) {
+                sessionSpent = Math.max(0, sessionSpent - lastSubmittedPlan.escrowDollars());
+            }
+            feed.diagnostic("order_workflow", "duplicate_reported", Map.of("candidate_state", phase.name(),
+                    "route", "ORDER_TO_AUCTION", "reason_code", "server_duplicate_message_item_quarantined"));
+            quarantineCurrentAuto(client, "server reported an existing order for this item");
+            return;
+        }
         phase = Phase.ABORTED;
         message = "server reported a duplicate order; item was locked until Your Orders is reviewed";
         plan = null;
@@ -246,7 +255,10 @@ final class OrderCreationExecutor {
         Instant now = Instant.now();
         String serverError = serverError(client);
         if (!serverError.isEmpty()) { abort(client, serverError); return; }
-        if (Duration.between(armedAt, now).compareTo(WORKFLOW_TIMEOUT) > 0) { abort(client, "order workflow timed out"); return; }
+        if (Duration.between(armedAt, now).compareTo(WORKFLOW_TIMEOUT) > 0) {
+            failCandidate(client, "order workflow timed out");
+            return;
+        }
         if (phase == Phase.WAIT_FRESH) {
             String error = liveError(plan, now, true);
             if (autoEnabled && !retrying && isRebasablePreTransactionChange(error) && tryRebaseCurrentAuto(now)) {
@@ -258,7 +270,7 @@ final class OrderCreationExecutor {
                 delay();
             } else if (Duration.between(phaseAt, now).compareTo(FRESH_WAIT) > 0) {
                 if (autoEnabled && (error.equals(FOCUSED_STALE) || isSkippablePreTransactionChange(error))) {
-                    skipCurrentAuto(client, error);
+                    quarantineCurrentAuto(client, error);
                 }
                 else abort(client, error);
             }
@@ -279,10 +291,20 @@ final class OrderCreationExecutor {
         };
         if (!verifying) {
             String error = liveError(currentPlan, now, true);
-            if (!error.isEmpty()) { abort(client, error); return; }
+            if (!error.isEmpty()) {
+                if (autoEnabled && (error.equals(FOCUSED_STALE) || isSkippablePreTransactionChange(error))) {
+                    quarantineCurrentAuto(client, error);
+                } else {
+                    abort(client, error);
+                }
+                return;
+            }
         }
         if (System.nanoTime() < nextActionAt) return;
-        if (Duration.between(phaseAt, now).compareTo(SCREEN_TIMEOUT) > 0) { abort(client, "server screen did not advance before its deadline"); return; }
+        if (Duration.between(phaseAt, now).compareTo(SCREEN_TIMEOUT) > 0) {
+            failCandidate(client, "server screen did not advance before its deadline");
+            return;
+        }
         Screen screen = client.currentScreen;
         try {
             switch (phase) {
@@ -306,7 +328,7 @@ final class OrderCreationExecutor {
                 default -> { }
             }
         } catch (RuntimeException errorValue) {
-            abort(client, "screen verification failed: " + safe(errorValue.getMessage()));
+            failCandidate(client, "screen verification failed: " + safe(errorValue.getMessage()));
         }
     }
 
@@ -314,9 +336,13 @@ final class OrderCreationExecutor {
         Instant now = Instant.now();
         if (!autoEnabled || now.isBefore(nextAutoAttempt) || client.currentScreen != null) return;
         boolean wasEmpty = autoQueue.isEmpty();
-        int added = refreshAutoQueue(now);
+        int added = refreshAutoQueue();
         if (autoQueue.isEmpty()) {
-            message = "automatic order session active; waiting for reviewed candidates";
+            message = autoSessionRejectedItems.isEmpty()
+                    ? "automatic order session active; waiting for reviewed candidates"
+                    : "automatic order session active; " + autoSessionRejectedItems.size()
+                            + " item" + (autoSessionRejectedItems.size() == 1 ? " is" : "s are")
+                            + " ignored until this session ends";
             nextAutoAttempt = now.plusSeconds(1);
             return;
         }
@@ -327,22 +353,21 @@ final class OrderCreationExecutor {
         Optional<PortfolioAllocator.Selection> current = feed.allocation().selections().stream()
                 .filter(selection -> selection.candidate().id().equals(candidateID)
                         && !feed.hasActiveOrder(selection.candidate().itemId())).findFirst();
-        if (current.isEmpty()) { skipCurrentAuto(client, "reviewed allocation changed or disappeared"); return; }
+        if (current.isEmpty()) { quarantineCurrentAuto(client, "reviewed allocation changed or disappeared"); return; }
         long cap = autoEscrowCaps.getOrDefault(candidateID, 0L);
         int authorizedBatches = authorizedBatches(current.get().batches(), current.get().candidate().acquisitionCost(), cap);
-        if (authorizedBatches <= 0) { skipCurrentAuto(client, "reviewed escrow no longer covers this item"); return; }
+        if (authorizedBatches <= 0) { quarantineCurrentAuto(client, "reviewed escrow no longer covers this item"); return; }
         PortfolioAllocator.Selection next = new PortfolioAllocator.Selection(current.get().candidate(), authorizedBatches);
         ArmResult result = arm(next);
-        if (!result.armed()) skipCurrentAuto(client, result.message());
+        if (!result.armed()) quarantineCurrentAuto(client, result.message());
     }
 
-    private int refreshAutoQueue(Instant now) {
-        autoRetryAfter.entrySet().removeIf(entry -> !now.isBefore(entry.getValue()));
+    private int refreshAutoQueue() {
         List<PortfolioAllocator.Selection> eligible = feed.allocation().selections().stream()
                 .filter(selection -> !feed.hasActiveOrder(selection.candidate().itemId())).toList();
         List<PortfolioAllocator.Selection> additions = autoQueueAdditions(eligible,
                 feed.allocation().availableOrderSlots(), Set.copyOf(autoQueue), new HashSet<>(autoItemIds.values()),
-                autoRetryAfter, now);
+                autoSessionRejectedItems);
         for (PortfolioAllocator.Selection selection : additions) {
             String candidateID = selection.candidate().id();
             autoQueue.addLast(candidateID);
@@ -354,10 +379,9 @@ final class OrderCreationExecutor {
 
     static List<PortfolioAllocator.Selection> autoQueueAdditions(List<PortfolioAllocator.Selection> selections,
                                                                   int availableOrderSlots,
-                                                                  Set<String> queuedCandidateIds,
-                                                                  Set<String> queuedItemIds,
-                                                                  Map<String, Instant> retryAfter,
-                                                                  Instant now) {
+                                                                   Set<String> queuedCandidateIds,
+                                                                   Set<String> queuedItemIds,
+                                                                   Set<String> rejectedItemIds) {
         int capacity = Math.max(0, availableOrderSlots - queuedCandidateIds.size());
         if (capacity == 0 || selections == null || selections.isEmpty()) return List.of();
         List<PortfolioAllocator.Selection> result = new ArrayList<>();
@@ -368,9 +392,8 @@ final class OrderCreationExecutor {
             if (selection == null || selection.candidate() == null) continue;
             String candidateID = selection.candidate().id();
             String itemID = selection.candidate().itemId();
-            Instant retryAt = retryAfter.get(candidateID);
             if (candidateID == null || itemID == null || candidateIds.contains(candidateID) || itemIds.contains(itemID)
-                    || (retryAt != null && now.isBefore(retryAt))) continue;
+                    || rejectedItemIds.contains(itemID)) continue;
             result.add(selection);
             candidateIds.add(candidateID);
             itemIds.add(itemID);
@@ -454,7 +477,7 @@ final class OrderCreationExecutor {
         }
         if (personalOrdersContain(client, plan.itemId())) {
             feed.markActiveOrder(plan.itemId());
-            abort(client, "an existing personal order for this item was found; duplicate creation was blocked");
+            failKnownCandidate(client, "an existing personal order for this item was found; duplicate creation was blocked");
             return;
         }
         int createSlot = findCreateOrderSlot(client);
@@ -482,13 +505,13 @@ final class OrderCreationExecutor {
         String title = title(screen);
         if (localizedTitleEquals(title, ITEM_DIALOG_TITLES)) return;
         requireDialog(screen, ITEM_DIALOG_TITLES, true);
-        if (!isItemResultTitle(title)) { abort(client, "unexpected item-result dialog: " + title); return; }
+        if (!isItemResultTitle(title)) { failCandidate(client, "unexpected item-result dialog: " + title); return; }
         String registryName = expectedRegistryName();
         List<ButtonWidget> matches = buttons(screen).stream()
                 .filter(button -> button.active && button.visible)
                 .filter(button -> OrderPlan.exactItemResultLabel(button.getMessage().getString(), plan.itemId(), registryName, plan.itemName())).toList();
         if (matches.size() != 1) {
-            abort(client, "expected one exact canonical item result, found " + matches.size() + " in " + title); return;
+            failCandidate(client, "expected one exact canonical item result, found " + matches.size() + " in " + title); return;
         }
         matches.getFirst().onPress(new MouseInput(0, 0));
         transition(Phase.AMOUNT, "entering exact batch quantity"); delay();
@@ -501,7 +524,7 @@ final class OrderCreationExecutor {
         Dialog dialog = requireDialog(screen, AMOUNT_DIALOG_TITLES, false);
         DialogTextInput field = requireSingleTextInput(screen, dialog, Set.of("amount", "quantity", "how many", "quantité", "combien"));
         field.setText(Integer.toString(plan.quantity()));
-        if (!field.getText().equals(Integer.toString(plan.quantity()))) { abort(client, "amount field rejected the exact quantity"); return; }
+        if (!field.getText().equals(Integer.toString(plan.quantity()))) { failCandidate(client, "amount field rejected the exact quantity"); return; }
         requireButton(screen, AMOUNT_ACTIONS).onPress(new MouseInput(0, 0));
         transition(Phase.PRICE, "entering exact unit reward"); delay();
     }
@@ -513,7 +536,7 @@ final class OrderCreationExecutor {
         Dialog dialog = requireDialog(screen, PRICE_DIALOG_TITLES, false);
         DialogTextInput field = requireSingleTextInput(screen, dialog, Set.of("price", "reward", "prix", "récompense"));
         field.setText(plan.priceInput());
-        if (!field.getText().equals(plan.priceInput())) { abort(client, "price field rejected the exact cent value"); return; }
+        if (!field.getText().equals(plan.priceInput())) { failCandidate(client, "price field rejected the exact cent value"); return; }
         requireButton(screen, PRICE_ACTIONS).onPress(new MouseInput(0, 0));
         transition(Phase.REVIEW, "performing final server-review validation"); delay();
     }
@@ -526,17 +549,24 @@ final class OrderCreationExecutor {
         String corpus = dialogText(dialog) + " " + buttons(screen).stream().map(button -> button.getMessage().getString()).reduce("", (a, b) -> a + " " + b);
         String registryName = expectedRegistryName();
         if (!reviewContainsExactItem(dialog, plan.itemId())) {
-            abort(client, "review item does not match the armed item"); return;
+            failCandidate(client, "review item does not match the armed item"); return;
         }
         if (!OrderPlan.textContainsQuantity(corpus, plan.quantity())) {
-            abort(client, "review amount does not match the armed quantity"); return;
+            failCandidate(client, "review amount does not match the armed quantity"); return;
         }
         if (!OrderPlan.textContainsMoney(corpus, plan.unitRewardCents()) || !OrderPlan.textContainsMoney(corpus, plan.totalCents())) {
-            abort(client, "review price or total does not match the armed economics"); return;
+            failCandidate(client, "review price or total does not match the armed economics"); return;
         }
         CandidateFeedClient.Candidate current = feed.candidate(plan.candidateId()).orElseThrow(() -> new IllegalStateException("candidate disappeared"));
         String liveError = liveError(plan, Instant.now(), true);
-        if (!liveError.isEmpty()) { abort(client, liveError); return; }
+        if (!liveError.isEmpty()) {
+            if (autoEnabled && (liveError.equals(FOCUSED_STALE) || isSkippablePreTransactionChange(liveError))) {
+                quarantineCurrentAuto(client, liveError);
+            } else {
+                abort(client, liveError);
+            }
+            return;
+        }
         requireButton(screen, CREATE_ACTIONS).onPress(new MouseInput(0, 0));
         sessionSpent = Math.addExact(sessionSpent, plan.escrowDollars());
         lastSubmittedPlan = plan;
@@ -816,7 +846,7 @@ final class OrderCreationExecutor {
     }
 
     private void finishDroppedOrder(MinecraftClient client, OrderPlan dropped, String reason) {
-        deferAutoCandidate(dropped.candidateId());
+        if (autoEnabled) autoSessionRejectedItems.add(dropped.itemId());
         completeQueueItem(dropped.candidateId());
         phase = Phase.IDLE;
         retrying = false;
@@ -832,17 +862,11 @@ final class OrderCreationExecutor {
         autoItemIds.remove(candidateID);
     }
 
-    private void deferAutoCandidate(String candidateID) {
-        if (autoEnabled && candidateID != null && !candidateID.isBlank()) {
-            autoRetryAfter.put(candidateID, Instant.now().plus(AUTO_RETRY_DELAY));
-        }
-    }
-
     private void clearAutoQueueState() {
         autoQueue.clear();
         autoEscrowCaps.clear();
         autoItemIds.clear();
-        autoRetryAfter.clear();
+        autoSessionRejectedItems.clear();
     }
 
     private String liveError(OrderPlan expected, Instant now, boolean requireAllocation) {
@@ -896,25 +920,55 @@ final class OrderCreationExecutor {
         tell(client, "Order creation stopped safely: " + safeReason);
     }
 
-    private void skipCurrentAuto(MinecraftClient client, String reason) {
-        String skipped = autoQueue.pollFirst();
-        if (skipped != null) {
-            deferAutoCandidate(skipped);
-            autoEscrowCaps.remove(skipped);
-            autoItemIds.remove(skipped);
+    private void quarantineCurrentAuto(MinecraftClient client, String reason) {
+        Phase failedPhase = phase;
+        String skipped = autoQueue.peekFirst();
+        String itemID = plan != null ? plan.itemId() : autoItemIds.get(skipped);
+        if (itemID != null && !itemID.isBlank()) autoSessionRejectedItems.add(itemID);
+        List<String> removed = autoItemIds.entrySet().stream()
+                .filter(entry -> itemID != null && itemID.equals(entry.getValue()))
+                .map(Map.Entry::getKey).toList();
+        if (removed.isEmpty() && skipped != null) removed = List.of(skipped);
+        for (String candidateID : removed) {
+            autoQueue.remove(candidateID);
+            autoEscrowCaps.remove(candidateID);
+            autoItemIds.remove(candidateID);
         }
         plan = null;
+        lastSubmittedPlan = null;
+        retrying = false;
+        pendingRepriceUnitCents = 0;
+        cancelConfirmationSent = false;
         phase = Phase.IDLE;
         nextAutoAttempt = Instant.now().plusSeconds(1);
+        closeScreen(client);
+        String ignored = itemID == null || itemID.isBlank() ? "one item" : itemID;
         if (autoQueue.isEmpty()) {
-            message = "skipped one changed candidate before any server action; session is waiting for reviewed candidates";
+            message = "ignored " + ignored + " for this session; waiting for other reviewed candidates";
         } else {
-            message = "skipped one changed candidate before any server action: " + safe(reason)
+            message = "ignored " + ignored + " for this session: " + safe(reason)
                     + "; " + autoQueue.size() + " remain";
         }
-        feed.diagnostic("order_workflow", "auto_skipped", Map.of("candidate_state", "pre_transaction",
-                "route", "ORDER_TO_AUCTION", "reason_code", "candidate_changed_before_navigation"));
+        feed.diagnostic("order_workflow", "auto_item_quarantined", Map.of("candidate_state", failedPhase.name(),
+                "route", "ORDER_TO_AUCTION", "reason_code", "item_failed_for_session"));
         tell(client, message);
+    }
+
+    private void failCandidate(MinecraftClient client, String reason) {
+        if (autoEnabled && isPreSubmitItemPhase(phase)) quarantineCurrentAuto(client, reason);
+        else abort(client, reason);
+    }
+
+    private void failKnownCandidate(MinecraftClient client, String reason) {
+        if (autoEnabled) quarantineCurrentAuto(client, reason);
+        else abort(client, reason);
+    }
+
+    static boolean isPreSubmitItemPhase(Phase value) {
+        return switch (value) {
+            case ITEM_SEARCH, ITEM_RESULT, AMOUNT, PRICE, REVIEW -> true;
+            default -> false;
+        };
     }
 
     static boolean isSkippablePreTransactionChange(String error) {
