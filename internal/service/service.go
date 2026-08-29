@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"sort"
 	"strings"
 	"sync"
@@ -552,6 +553,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/flips", s.authorize(s.flips))
 	mux.HandleFunc("GET /api/v1/debug", s.authorize(s.debugJSON))
 	mux.HandleFunc("GET /api/v1/debug/valuation", s.authorize(s.debugValuation))
+	mux.HandleFunc("GET /debug/pprof/profile", s.authorize(pprof.Profile))
 	mux.HandleFunc("POST /api/v1/observers/register", s.authorizeWith(s.observerAuth, s.observerRegister))
 	mux.HandleFunc("GET /api/v1/observers/tasks", s.authorizeWith(s.observerAuth, s.observerTasks))
 	mux.HandleFunc("POST /api/v1/observers/heartbeat", s.authorizeWith(s.observerAuth, s.observerHeartbeat))
