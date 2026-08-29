@@ -14,6 +14,7 @@ import (
 
 	"donut-network/internal/donutapi"
 	"donut-network/internal/market"
+	"donut-network/internal/orders"
 )
 
 type fakeUpstream struct {
@@ -295,6 +296,17 @@ func TestOrderAuctionPageReportsRealObserverStateWithoutFakeRows(t *testing.T) {
 	server.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Order → auction priority queue") || !strings.Contains(response.Body.String(), "No observer registered.") {
 		t.Fatalf("order debug page code=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestFirstOrderBidSeparatesObservedBucketFromReservedCap(t *testing.T) {
+	value := orders.Candidate{ObservedOrderUnitRewardCents: 130_000_000, OrderUnitRewardCents: 140_000_000}
+	if got := firstOrderBidCents(value); got != 130_000_001 {
+		t.Fatalf("first bid=%d", got)
+	}
+	value.ObservedOrderUnitRewardCents = value.OrderUnitRewardCents
+	if got := firstOrderBidCents(value); got != 140_000_000 {
+		t.Fatalf("exact first bid=%d", got)
 	}
 }
 

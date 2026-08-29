@@ -189,7 +189,7 @@ final class DonutScreen extends Screen {
         if (!candidates.balanceUsableForOrders()) return "Waiting for a live scoreboard balance or manual override.";
         if (!"ready".equals(candidates.status().state())) return "Candidate feed is " + candidates.status().state() + ": " + candidates.status().message();
         if (candidates.allocation().availableOrderSlots() < 1) return "All local order slots are marked as used.";
-        return "No current candidate clears the local balance, reserve, profit, and evidence gates.";
+        return "No positive READY candidate fits the local balance, reserve, slots, and exposure limits.";
     }
 
     private Layout layout() {

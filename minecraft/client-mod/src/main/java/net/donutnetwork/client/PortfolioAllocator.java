@@ -46,15 +46,15 @@ final class PortfolioAllocator {
         int orderSlots = Math.max(0, 20 - usedOrderSlots);
         int auctionSlots = Math.max(0, 18 - usedAuctionSlots);
 
-        // Every candidate is one exact exit listing (at most 64 items). Require
-        // that listing to earn at least 1% of the capital budget represented by
-        // one currently available auction slot. The dollar floor therefore
-        // rises with the player's balance and with slot scarcity instead of
-        // being a fixed server-wide constant.
+        // Every candidate is one exact exit listing (at most 64 items). Keep a
+        // balance-scaled 1% per-slot target for UI explanation and ranking
+        // context, but do not use it as a hard gate while order slots are idle.
+        // The optimizer already prefers the strongest opportunity frontier;
+        // weaker positive trades are useful temporary fillers and can later be
+        // cancelled when better markets qualify.
         int planningAuctionSlots = Math.max(1, auctionSlots);
         long minimumProfitPerExit = safeMultiply(deployable / planningAuctionSlots, 100) / 10_000;
         List<CandidateFeedClient.Candidate> ranked = eligible.stream()
-                .filter(candidate -> candidate.conservativeProfit() >= minimumProfitPerExit)
                 .sorted(Comparator.comparingLong(PortfolioAllocator::marketOpportunity).reversed()
                         .thenComparing(Comparator.comparingLong(CandidateFeedClient.Candidate::riskAdjustedProfitDay).reversed())
                         .thenComparing(Comparator.comparingLong(CandidateFeedClient.Candidate::conservativeProfit).reversed())

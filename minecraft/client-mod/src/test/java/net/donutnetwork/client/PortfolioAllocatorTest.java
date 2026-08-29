@@ -38,7 +38,7 @@ class PortfolioAllocatorTest {
         assertTrue(new PortfolioAllocator().allocate(List.of(research), 10_000_000, 0, 0).selections().isEmpty());
     }
 
-    @Test void minimumExitProfitScalesWithBalanceAndFreeAuctionSlots() {
+    @Test void preferredExitProfitScalesWithoutBlockingProfitableSlotFillers() {
         CandidateFeedClient.Candidate tiny = candidate("tiny", 100_000, 1_000, 1, 1, 1);
         CandidateFeedClient.Candidate useful = candidate("useful", 100_000, 10_000, 1, 1, 1);
         PortfolioAllocator allocator = new PortfolioAllocator();
@@ -46,10 +46,20 @@ class PortfolioAllocatorTest {
         PortfolioAllocator.Allocation progressed = allocator.allocate(List.of(tiny, useful), 100_000_000, 0, 0);
         assertTrue(starter.minimumProfitPerExit() < progressed.minimumProfitPerExit());
         assertTrue(starter.selections().stream().anyMatch(selection -> selection.candidate().id().equals("useful")));
-        assertTrue(progressed.selections().stream().noneMatch(selection -> selection.candidate().id().equals("tiny")));
+        assertTrue(progressed.selections().stream().anyMatch(selection -> selection.candidate().id().equals("tiny")));
 
         PortfolioAllocator.Allocation scarce = allocator.allocate(List.of(useful), 10_000_000, 0, 17);
         assertTrue(scarce.minimumProfitPerExit() > allocator.allocate(List.of(useful), 10_000_000, 0, 0).minimumProfitPerExit());
+    }
+
+    @Test void fillsUnusedOrderSlotsBelowThePreferredExitProfitWhenStillPositive() {
+        List<CandidateFeedClient.Candidate> candidates = new ArrayList<>();
+        for (int index = 0; index < 9; index++) {
+            candidates.add(candidate("positive_" + index, 100_000 + index, 1_000 + index, 1, 1, 1));
+        }
+        PortfolioAllocator.Allocation allocation = new PortfolioAllocator().allocate(candidates, 181_000_000, 1, 0);
+        assertTrue(allocation.minimumProfitPerExit() > 1_000);
+        assertEquals(9, allocation.selections().size());
     }
 
     @Test void multipleBatchesFromOneBuyOrderUseOneOrderSlot() {

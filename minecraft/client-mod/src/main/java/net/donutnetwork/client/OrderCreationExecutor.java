@@ -80,9 +80,18 @@ final class OrderCreationExecutor {
     private static final Pattern DUPLICATE_ORDER = Pattern.compile("(?i)\\b(?:you already have (?:an? )?(?:active )?order|"
             + "an? order (?:for|of) .{1,80} already exists|(?:cannot|can't) create (?:another|a duplicate) order|"
             + "only (?:have|create) one order per item|duplicate order (?:is )?(?:not allowed|blocked))\\b");
-    private static final Set<String> SEARCH_ACTIONS = Set.of("search");
-    private static final Set<String> AMOUNT_ACTIONS = Set.of("next", "continue", "set amount");
-    private static final Set<String> PRICE_ACTIONS = Set.of("review order");
+    private static final Set<String> ITEM_DIALOG_TITLES = Set.of("Choose Item", "Choisir un objet");
+    private static final Set<String> AMOUNT_DIALOG_TITLES = Set.of("How many?", "Combien ?", "Combien?");
+    private static final Set<String> PRICE_DIALOG_TITLES = Set.of(
+            "Price per item?", "Prix par objet ?", "Prix par objet?", "Prix par article ?", "Prix unitaire ?");
+    private static final Set<String> REVIEW_DIALOG_TITLES = Set.of(
+            "Review Order", "Vérifier la commande", "Réviser la commande", "Récapitulatif de la commande");
+    private static final Set<String> SEARCH_ACTIONS = Set.of("search", "rechercher");
+    private static final Set<String> AMOUNT_ACTIONS = Set.of(
+            "next", "continue", "set amount", "suivant", "continuer", "définir la quantité");
+    private static final Set<String> PRICE_ACTIONS = Set.of(
+            "review order", "vérifier la commande", "réviser la commande", "récapitulatif de la commande");
+    private static final Set<String> CREATE_ACTIONS = Set.of("create order", "créer la commande", "créer une commande");
     private static final Set<String> CREATE_PANE_ITEMS = Set.of(
             "minecraft:black_stained_glass_pane", "minecraft:gray_stained_glass_pane",
             "minecraft:green_stained_glass_pane", "minecraft:lime_stained_glass_pane");
@@ -404,9 +413,8 @@ final class OrderCreationExecutor {
         if (screen == null) return;
         String title = title(screen);
         if (title.equals("Orders -> Your Orders")) return;
-        Dialog dialog = requireDialog(screen, "Choose Item");
-        if (!title.equals("Choose Item")) { abort(client, "unexpected item-search screen: " + title); return; }
-        DialogTextInput field = requireSingleTextInput(screen, dialog, Set.of("search"));
+        Dialog dialog = requireDialog(screen, ITEM_DIALOG_TITLES, false);
+        DialogTextInput field = requireSingleTextInput(screen, dialog, Set.of("search", "recherche", "item", "objet"));
         field.setText(plan.itemPathQuery());
         requireButton(screen, SEARCH_ACTIONS).onPress(new MouseInput(0, 0));
         transition(Phase.ITEM_RESULT, "waiting for one exact item result"); delay();
@@ -415,9 +423,9 @@ final class OrderCreationExecutor {
     private void handleItemResult(MinecraftClient client, Screen screen) {
         if (screen == null) return;
         String title = title(screen);
-        if (title.equals("Choose Item")) return;
-        requireDialog(screen, "Choose Item");
-        if (!title.matches("Choose Item \\(1 results?\\)")) { abort(client, "item search was not uniquely resolved: " + title); return; }
+        if (localizedTitleEquals(title, ITEM_DIALOG_TITLES)) return;
+        requireDialog(screen, ITEM_DIALOG_TITLES, true);
+        if (!isSingleItemResultTitle(title)) { abort(client, "item search was not uniquely resolved: " + title); return; }
         String registryName = expectedRegistryName();
         List<ButtonWidget> matches = buttons(screen).stream()
                 .filter(button -> OrderPlan.exactItemResultLabel(button.getMessage().getString(), plan.itemId(), registryName, plan.itemName())).toList();
@@ -429,9 +437,9 @@ final class OrderCreationExecutor {
     private void handleAmount(MinecraftClient client, Screen screen) {
         if (screen == null) return;
         String title = title(screen);
-        if (title.startsWith("Choose Item")) return;
-        Dialog dialog = requireDialog(screen, "How many?");
-        DialogTextInput field = requireSingleTextInput(screen, dialog, Set.of("amount", "quantity", "how many"));
+        if (localizedTitleStartsWith(title, ITEM_DIALOG_TITLES)) return;
+        Dialog dialog = requireDialog(screen, AMOUNT_DIALOG_TITLES, false);
+        DialogTextInput field = requireSingleTextInput(screen, dialog, Set.of("amount", "quantity", "how many", "quantité", "combien"));
         field.setText(Integer.toString(plan.quantity()));
         if (!field.getText().equals(Integer.toString(plan.quantity()))) { abort(client, "amount field rejected the exact quantity"); return; }
         requireButton(screen, AMOUNT_ACTIONS).onPress(new MouseInput(0, 0));
@@ -441,9 +449,9 @@ final class OrderCreationExecutor {
     private void handlePrice(MinecraftClient client, Screen screen) {
         if (screen == null) return;
         String title = title(screen);
-        if (title.equals("How many?")) return;
-        Dialog dialog = requireDialog(screen, "Price per item?");
-        DialogTextInput field = requireSingleTextInput(screen, dialog, Set.of("price", "reward"));
+        if (localizedTitleEquals(title, AMOUNT_DIALOG_TITLES)) return;
+        Dialog dialog = requireDialog(screen, PRICE_DIALOG_TITLES, false);
+        DialogTextInput field = requireSingleTextInput(screen, dialog, Set.of("price", "reward", "prix", "récompense"));
         field.setText(plan.priceInput());
         if (!field.getText().equals(plan.priceInput())) { abort(client, "price field rejected the exact cent value"); return; }
         requireButton(screen, PRICE_ACTIONS).onPress(new MouseInput(0, 0));
@@ -453,8 +461,8 @@ final class OrderCreationExecutor {
     private void handleReview(MinecraftClient client, Screen screen) {
         if (screen == null) return;
         String title = title(screen);
-        if (title.equals("Price per item?")) return;
-        Dialog dialog = requireDialog(screen, "Review Order");
+        if (localizedTitleEquals(title, PRICE_DIALOG_TITLES)) return;
+        Dialog dialog = requireDialog(screen, REVIEW_DIALOG_TITLES, false);
         String corpus = dialogText(dialog) + " " + buttons(screen).stream().map(button -> button.getMessage().getString()).reduce("", (a, b) -> a + " " + b);
         String registryName = expectedRegistryName();
         if (!reviewContainsExactItem(dialog, plan.itemId())) {
@@ -469,7 +477,7 @@ final class OrderCreationExecutor {
         CandidateFeedClient.Candidate current = feed.candidate(plan.candidateId()).orElseThrow(() -> new IllegalStateException("candidate disappeared"));
         String liveError = liveError(plan, Instant.now(), true);
         if (!liveError.isEmpty()) { abort(client, liveError); return; }
-        requireButton(screen, Set.of("create order")).onPress(new MouseInput(0, 0));
+        requireButton(screen, CREATE_ACTIONS).onPress(new MouseInput(0, 0));
         sessionSpent = Math.addExact(sessionSpent, plan.escrowDollars());
         lastSubmittedPlan = plan;
         feed.recordOrderSubmitted(current, plan);
@@ -725,7 +733,11 @@ final class OrderCreationExecutor {
     private String liveError(OrderPlan expected, Instant now, boolean requireAllocation) {
         if (!feed.balanceUsableForOrders()) return "waiting for the live scoreboard balance or a manual override";
         if (!"ready".equals(feed.status().state())) return "backend candidate feed is not ready";
-        if (age(feed.generatedAt(), now).compareTo(FEED_MAX_AGE) > 0) return "candidate feed is stale";
+        // A successful conditional poll can legitimately return 304 while the
+        // candidate payload's generated_at remains unchanged. Transport
+        // freshness comes from lastSuccess; evidence freshness is checked
+        // independently below for the focused order and auction observations.
+        if (age(feed.status().lastSuccess(), now).compareTo(FEED_MAX_AGE) > 0) return "candidate feed is stale";
         Optional<CandidateFeedClient.Candidate> currentValue = feed.candidate(expected.candidateId());
         if (currentValue.isEmpty() || !expected.matches(currentValue.get())) return "armed candidate changed or disappeared";
         CandidateFeedClient.Candidate current = currentValue.get();
@@ -969,14 +981,36 @@ final class OrderCreationExecutor {
         return value.toString();
     }
 
-    private static Dialog requireDialog(Screen screen, String exactTitle) {
+    private static Dialog requireDialog(Screen screen, Set<String> titles, boolean allowSuffix) {
         if (!(screen instanceof DialogScreen<?> dialogScreen) || !(screen instanceof DialogScreenAccessor accessor)) {
             throw new IllegalStateException("expected a server dialog");
         }
-        if (!title(dialogScreen).equals(exactTitle) && !title(dialogScreen).startsWith(exactTitle + " (")) {
+        String actual = title(dialogScreen);
+        boolean matches = allowSuffix ? localizedTitleStartsWith(actual, titles) : localizedTitleEquals(actual, titles);
+        if (!matches) {
             throw new IllegalStateException("unexpected dialog title " + title(dialogScreen));
         }
         return accessor.donut$getDialog();
+    }
+
+    static boolean localizedTitleEquals(String actual, Set<String> expected) {
+        String normalized = OrderPlan.normalizeLabel(actual);
+        return expected != null && expected.stream().map(OrderPlan::normalizeLabel).anyMatch(normalized::equals);
+    }
+
+    static boolean localizedTitleStartsWith(String actual, Set<String> expected) {
+        String normalized = OrderPlan.normalizeLabel(actual);
+        return expected != null && expected.stream().map(OrderPlan::normalizeLabel)
+                .anyMatch(root -> normalized.equals(root) || normalized.startsWith(root + " "));
+    }
+
+    static boolean isSingleItemResultTitle(String actual) {
+        String normalized = OrderPlan.normalizeLabel(actual);
+        for (String title : ITEM_DIALOG_TITLES) {
+            String root = OrderPlan.normalizeLabel(title);
+            if (normalized.matches(Pattern.quote(root) + " 1 (?:result|results|resultat|resultats)")) return true;
+        }
+        return false;
     }
 
     private static DialogTextInput requireSingleTextInput(Screen screen, Dialog dialog, Set<String> expectedLabels) {
@@ -1007,8 +1041,10 @@ final class OrderCreationExecutor {
     }
 
     private static ButtonWidget requireButton(Screen screen, Set<String> exactLabels) {
+        Set<String> expected = exactLabels.stream().map(OrderPlan::normalizeLabel)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
         List<ButtonWidget> matches = buttons(screen).stream().filter(button -> button.active && button.visible)
-                .filter(button -> exactLabels.contains(OrderPlan.normalizeLabel(button.getMessage().getString()))).toList();
+                .filter(button -> expected.contains(OrderPlan.normalizeLabel(button.getMessage().getString()))).toList();
         if (matches.size() != 1) throw new IllegalStateException("required action button is missing or ambiguous");
         return matches.getFirst();
     }

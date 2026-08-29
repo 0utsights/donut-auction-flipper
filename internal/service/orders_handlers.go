@@ -414,7 +414,8 @@ var orderAuctionSimpleTemplate = template.Must(template.New("order-auction-simpl
 		}
 		return value.Local().Format("15:04:05")
 	},
-	"filler": func(value orders.Candidate) bool { return value.State == "READY" && value.OrderTier != "actionable" },
+	"filler":        func(value orders.Candidate) bool { return value.State == "READY" && value.OrderTier != "actionable" },
+	"firstBidCents": firstOrderBidCents,
 }).Parse(orderAuctionSimpleHTML))
 
 const orderAuctionSimpleHTML = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Order flips</title>
@@ -425,7 +426,7 @@ const orderAuctionSimpleHTML = `<!doctype html><html><head><meta charset="utf-8"
 <div id="live" data-version="{{.Version}}"><div class="status"><strong>{{.ReadyCount}} ready</strong> · {{.CoreCount}} core · {{.FillerCount}} filler · full market frontier; Fabric applies your live balance and slots · updated {{clock .GeneratedAt}} · live</div>
 <main id="good-orders">
 {{range .Ready}}<article class="flip"><div class="top"><div><span class="rank">#{{.PriorityRank}}</span> <span class="name">{{.Quantity}}× {{.ItemName}}</span><div class="muted"><code>{{.ItemID}}</code></div></div><div><strong>{{if filler .}}FILLER READY{{else}}CORE READY{{end}}</strong><div class="muted">{{if filler .}}one-stack starter; cancel when displaced{{else}}measured fills; scalable{{end}}</div></div></div>
-<div class="numbers"><div class="number"><span class="muted">First-place bid</span><strong>{{moneyCents .OrderUnitRewardCents}} each</strong><span class="muted">visible top {{moneyCents .ObservedOrderUnitRewardCents}} · crosses the full abbreviated-price bucket</span></div><div class="number"><span class="muted">Each auction exit</span><strong>{{.Quantity}}× list for {{money .TargetListPrice}}</strong><span class="muted">{{money .ExpectedProceeds}} conservative proceeds after fee · reuse the 18 slots</span></div><div class="number profit"><span class="muted">Profit per exit listing</span><strong>+{{money .ConservativeProfit}}</strong><span class="muted">{{pct .MarginBPS}} ROI</span></div><div class="number"><span class="muted">Total market opportunity</span><strong>{{money .PriorityScore}} / day</strong><span class="muted">one order per item · {{.AuctionVolume24h}} sales{{if .Profiled}} · proven profile{{end}}</span></div></div>
+<div class="numbers"><div class="number"><span class="muted">Latest /orders display</span><strong>{{moneyCents .ObservedOrderUnitRewardCents}} each</strong><span class="muted">sampled {{clock .ResearchFreshAt}} · Fabric starts at {{moneyCents (firstBidCents .)}} · reserved cap {{moneyCents .OrderUnitRewardCents}}; rank is verified after creation</span></div><div class="number"><span class="muted">Each auction exit</span><strong>{{.Quantity}}× list for {{money .TargetListPrice}}</strong><span class="muted">{{money .ExpectedProceeds}} conservative proceeds after fee · reuse the 18 slots</span></div><div class="number profit"><span class="muted">Profit per exit listing</span><strong>+{{money .ConservativeProfit}}</strong><span class="muted">{{pct .MarginBPS}} ROI at the reserved cap; the first bid is cheaper</span></div><div class="number"><span class="muted">Total market opportunity</span><strong>{{money .PriorityScore}} / day</strong><span class="muted">one order per item · {{.AuctionVolume24h}} sales{{if .Profiled}} · proven profile{{end}}</span></div></div>
 <div class="actions"><form method="post" action="/order-auction-flipper/watch"><input type="hidden" name="signature" value="{{.Signature}}"><button type="submit">Recheck now</button></form><code>{{.OrderCommand}}</code><span>then</span><code>{{.AuctionCommand}}</code><span class="muted">research {{clock .ResearchFreshAt}} · focused {{clock .FocusedFreshAt}}</span></div></article>
 {{else}}<div class="empty"><strong>No current profitable offers.</strong><div class="muted">The collector must be online and rebuild current order evidence. Retained profiles stay in the fast recheck rotation.</div></div>{{end}}
 </main>
@@ -503,6 +504,13 @@ func max64Service(left, right int64) int64 {
 		return left
 	}
 	return right
+}
+
+func firstOrderBidCents(value orders.Candidate) int64 {
+	if value.ObservedOrderUnitRewardCents < value.OrderUnitRewardCents {
+		return value.ObservedOrderUnitRewardCents + 1
+	}
+	return value.OrderUnitRewardCents
 }
 
 func formatMoney(value int64) string {

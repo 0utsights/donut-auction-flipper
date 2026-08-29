@@ -20,11 +20,12 @@ process.umask(0o077)
 // lane and expose whatever cadence the real menu actually sustains.
 const DISCOVERY_CLICK_DELAY_MS = 750
 const FOCUSED_CLICK_DELAY_MS = 500
+export const MOST_PER_ITEM_RECHECK_MS = 60_000
 // Auction history carries the slow safety evidence. Focused order observation
 // only confirms the current leading reward and short-term consistency.
-const FOCUSED_WATCH_RUNTIME_MS = 8_000
-const AUTOMATIC_FOCUSED_RUNTIME_MS = 15_000
-const PROFILE_REVALIDATION_RUNTIME_MS = 8_000
+const FOCUSED_WATCH_RUNTIME_MS = 3_000
+const AUTOMATIC_FOCUSED_RUNTIME_MS = 8_000
+const PROFILE_REVALIDATION_RUNTIME_MS = 4_000
 // Device-code authorization requires a human browser round trip and regularly
 // takes longer than the normal network-login budget. Keep one code stable long
 // enough to complete it instead of killing the process and rotating the code.
@@ -43,6 +44,7 @@ class ObserverRuntime {
   private activeTask: ObserverTask | undefined
   private activePage = 0
   private connected = false
+  private mostPerItemConfirmedAt = 0
 
   constructor(private readonly config: RuntimeConfig) {
     this.backend = new BackendClient(new URL(config.backendUrl), config.observerToken, config.account.id)
@@ -171,6 +173,7 @@ class ObserverRuntime {
     bot.emit('mount')
     this.connected = true
     this.connectedAt = Date.now()
+    this.mostPerItemConfirmedAt = 0
   }
 
   private async reconnect(plannedRotation = false): Promise<void> {
@@ -203,18 +206,22 @@ class ObserverRuntime {
         await sleep(FOCUSED_CLICK_DELAY_MS)
         this.ensureConnected(bot)
       }
-      this.log('orders_command_sending')
-      navigator.sendCommand('/orders')
-      let globalWindow: NonNullable<Bot['currentWindow']>
-      try {
-        globalWindow = await waitForWindow(bot, 10_000)
-      } catch (error) {
-        throw new MenuSessionEndedError(`orders menu did not open: ${safeMessage(error)}`)
+      if (shouldReverifyMostPerItem(this.mostPerItemConfirmedAt, Date.now(), MOST_PER_ITEM_RECHECK_MS)) {
+        this.log('orders_command_sending')
+        navigator.sendCommand('/orders')
+        let globalWindow: NonNullable<Bot['currentWindow']>
+        try {
+          globalWindow = await waitForWindow(bot, 10_000)
+        } catch (error) {
+          throw new MenuSessionEndedError(`orders menu did not open: ${safeMessage(error)}`)
+        }
+        globalWindow = await this.ensureMostPerItem(bot, navigator, globalWindow, clickDelay, task.id)
+        bot.closeWindow(globalWindow)
+        await sleep(FOCUSED_CLICK_DELAY_MS)
+        this.ensureConnected(bot)
+      } else {
+        this.log('most_per_item_session_proof_reused', `age_ms=${Date.now() - this.mostPerItemConfirmedAt}`)
       }
-      globalWindow = await this.ensureMostPerItem(bot, navigator, globalWindow, clickDelay, task.id)
-      bot.closeWindow(globalWindow)
-      await sleep(FOCUSED_CLICK_DELAY_MS)
-      this.ensureConnected(bot)
       this.log('orders_item_search_sending', `signature=${task.signature}`)
       navigator.searchOrders(task.signature)
       try {
@@ -341,6 +348,7 @@ class ObserverRuntime {
       const listingViews = captured.views.filter(view => schema.listingSlots.has(view.slot))
       const parsed = listingViews.map(parseOrder).filter(value => value !== undefined)
       if (isMostPerItemOrder(parsed, listingViews.length)) {
+        this.mostPerItemConfirmedAt = Date.now()
         this.log('most_per_item_confirmed', `attempt=${attempt + 1} listings=${parsed.length}`)
         return window
       }
@@ -382,6 +390,11 @@ class ObserverRuntime {
 
   private readonly report = (error: unknown): void => { process.stderr.write(`[${this.config.account.id}] ${safeMessage(error)}\n`) }
   private readonly log = (event: string, detail = ''): void => { process.stdout.write(`[${this.config.account.id}] ${event}${detail ? ` ${detail}` : ''}\n`) }
+}
+
+export function shouldReverifyMostPerItem(lastConfirmedAt: number, now: number, ttl: number): boolean {
+  if (!Number.isFinite(lastConfirmedAt) || !Number.isFinite(now) || !Number.isFinite(ttl) || ttl <= 0) return true
+  return lastConfirmedAt <= 0 || now < lastConfirmedAt || now - lastConfirmedAt >= ttl
 }
 
 function botAdapter(bot: Bot): { chat(command: string): void; clickWindow(slot: number, mouseButton: number, mode: number): Promise<void>; currentWindow: WindowView | null } {

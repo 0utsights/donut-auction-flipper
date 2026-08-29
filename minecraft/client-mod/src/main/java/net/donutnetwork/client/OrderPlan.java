@@ -2,6 +2,7 @@ package net.donutnetwork.client;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.text.Normalizer;
 import java.util.Locale;
 import java.util.OptionalLong;
 import java.util.regex.Matcher;
@@ -13,10 +14,10 @@ record OrderPlan(String candidateId, String signature, String itemId, String ite
                  long bidStepCents, long totalCents, long escrowDollars, long targetListPrice,
                  long expectedProceedsPerBatch) {
     private static final Pattern MONEY = Pattern.compile("(?i)\\$?\\s*([0-9][0-9,]*(?:\\.[0-9]+)?)\\s*([KMBT]?)(?![A-Za-z])");
-    private static final Pattern UNIT_MONEY = Pattern.compile("(?i)\\$\\s*([0-9][0-9,]*(?:\\.[0-9]+)?)\\s*([KMBT]?)\\s*(?:each|per item)\\b");
-    private static final Pattern LABELED_QUANTITY = Pattern.compile("(?i)\\b(?:amount|quantity)\\s*:?\\s*([0-9][0-9,]*)\\b");
+    private static final Pattern UNIT_MONEY = Pattern.compile("(?i)\\$\\s*([0-9][0-9,]*(?:\\.[0-9]+)?)\\s*([KMBT]?)\\s*(?:each|per item|chacun|par (?:objet|article))\\b");
+    private static final Pattern LABELED_QUANTITY = Pattern.compile("(?i)\\b(?:amount|quantity|quantit[eé])\\s*:?\\s*([0-9][0-9,]*)\\b");
     private static final Pattern DELIVERED = Pattern.compile("(?i)([0-9][0-9,]*(?:\\.[0-9]+)?)\\s*([KMBT]?)\\s*/\\s*"
-            + "([0-9][0-9,]*(?:\\.[0-9]+)?)\\s*([KMBT]?)\\s+delivered\\b");
+            + "([0-9][0-9,]*(?:\\.[0-9]+)?)\\s*([KMBT]?)\\s+(?:delivered|livr[eé]s?)\\b");
     private static final Pattern DONUT_ITEM_RESULT = Pattern.compile("(?i)^\\[item/([a-z0-9_./-]+)@items]\\s+(.+)$");
 
     static OrderPlan from(CandidateFeedClient.Candidate candidate) { return from(candidate, 1); }
@@ -103,7 +104,8 @@ record OrderPlan(String candidateId, String signature, String itemId, String ite
     }
 
     static String normalizeLabel(String value) {
-        return value == null ? "" : value.replace("§", "").toLowerCase(Locale.ROOT)
+        return value == null ? "" : Normalizer.normalize(value.replace("§", ""), Normalizer.Form.NFKD)
+                .replaceAll("\\p{M}+", "").toLowerCase(Locale.ROOT)
                 .replaceAll("[^a-z0-9]+", " ").strip();
     }
 
@@ -118,8 +120,10 @@ record OrderPlan(String candidateId, String signature, String itemId, String ite
         if (!donut.matches()) return equivalentItemLabel(actual, expectedRegistryName, fallbackName);
         int separator = expectedItemId == null ? -1 : expectedItemId.indexOf(':');
         String expectedPath = separator < 0 ? expectedItemId : expectedItemId.substring(separator + 1);
-        return expectedPath != null && donut.group(1).equalsIgnoreCase(expectedPath)
-                && equivalentItemLabel(donut.group(2), expectedRegistryName, fallbackName);
+        // Donut's bracketed metadata is the canonical registry path. The
+        // trailing human label is localized independently by the server and
+        // cannot safely be compared to the client's registry translation.
+        return expectedPath != null && donut.group(1).equalsIgnoreCase(expectedPath);
     }
 
     private static String normalizedTokenSet(String value) {
@@ -210,7 +214,7 @@ record OrderPlan(String candidateId, String signature, String itemId, String ite
     private static boolean isMoneyContext(String text, Matcher matcher) {
         if (matcher.group().stripLeading().startsWith("$")) return true;
         String prefix = text.substring(Math.max(0, matcher.start() - 28), matcher.start()).toLowerCase(Locale.ROOT);
-        return prefix.matches("(?s).*(?:price|reward|paying|total|cost)\\s*[:=\\-]?\\s*$");
+        return prefix.matches("(?s).*(?:price|reward|paying|total|cost|prix|r[eé]compense|co[uû]t)\\s*[:=\\-]?\\s*$");
     }
 
     private static String clean(String value) {

@@ -7,12 +7,12 @@ import java.time.Instant;
 import static org.junit.jupiter.api.Assertions.*;
 
 class OrderPlanTest {
-    @Test void verifiesDonutItemResultMetadataAndHumanLabelTogether() {
+    @Test void verifiesCanonicalDonutItemMetadataAcrossLocalizedHumanLabels() {
         assertTrue(OrderPlan.exactItemResultLabel("[item/breeze_rod@items] Breeze Rod",
                 "minecraft:breeze_rod", "Breeze Rod", "Breeze Rods"));
-        assertFalse(OrderPlan.exactItemResultLabel("[item/blaze_rod@items] Breeze Rod",
+        assertTrue(OrderPlan.exactItemResultLabel("[item/breeze_rod@items] Bâton de brise",
                 "minecraft:breeze_rod", "Breeze Rod", "Breeze Rods"));
-        assertFalse(OrderPlan.exactItemResultLabel("[item/breeze_rod@items] Blaze Rod",
+        assertFalse(OrderPlan.exactItemResultLabel("[item/blaze_rod@items] Breeze Rod",
                 "minecraft:breeze_rod", "Breeze Rod", "Breeze Rods"));
     }
 
@@ -80,6 +80,7 @@ class OrderPlanTest {
         assertTrue(OrderPlan.textContainsQuantity("Quantity 1,024", 1_024));
         assertFalse(OrderPlan.textContainsQuantity("Amount: 640", 64));
         assertFalse(OrderPlan.textContainsQuantity("64 available", 64));
+        assertTrue(OrderPlan.textContainsQuantity("Quantité : 64", 64));
     }
 
     @Test void parsesExactOrderProgressAndRejectsPartialFills() {

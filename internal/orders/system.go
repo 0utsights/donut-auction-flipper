@@ -179,7 +179,7 @@ func (s *System) queueAutomaticResearch(ctx context.Context) error {
 		signatures = append(signatures, signature)
 		priorities[signature] = 75
 	}
-	return s.store.QueueAutomaticResearch(ctx, signatures, priorities, 2*time.Second, 5*time.Minute, 20*time.Minute)
+	return s.store.QueueAutomaticResearch(ctx, signatures, priorities, time.Second, time.Minute, 10*time.Minute)
 }
 
 func researchSchedulingTier(candidate Candidate) int {
