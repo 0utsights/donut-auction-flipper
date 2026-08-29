@@ -216,6 +216,33 @@ func (e *Engine) ObserveBatch(rawListings []Listing) ([]Listing, int) {
 	return out, duplicates
 }
 
+// ObserveFastBatch updates the live active book without rebuilding the shared
+// broad/debug valuation map. The newest-page lane evaluates the returned rows
+// directly, and order candidates calculate exact quantities from this current
+// engine on demand. Recomputing the same large completed-sale cohorts here made
+// ingestion materially slower without changing either decision.
+func (e *Engine) ObserveFastBatch(rawListings []Listing) ([]Listing, int, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	now := e.now()
+	if e.lastActiveSweep.IsZero() || now.Sub(e.lastActiveSweep) >= 5*time.Second {
+		e.expireWithoutRevaluationLocked(now)
+		e.lastActiveSweep = now
+	}
+	out := make([]Listing, 0, len(rawListings))
+	duplicates := 0
+	changedAny := false
+	for _, raw := range rawListings {
+		listing, duplicate, _, changed := e.observeLocked(raw, now)
+		out = append(out, listing)
+		if duplicate {
+			duplicates++
+		}
+		changedAny = changedAny || changed
+	}
+	return out, duplicates, changedAny
+}
+
 func (e *Engine) observeLocked(raw Listing, now time.Time) (Listing, bool, string, bool) {
 	l := NormalizeListing(raw)
 	if l.FirstSeen.IsZero() {
@@ -255,6 +282,14 @@ func (e *Engine) SweepExpired(now time.Time) int {
 }
 
 func (e *Engine) expireLocked(now time.Time) int {
+	return e.expireListingsLocked(now, true)
+}
+
+func (e *Engine) expireWithoutRevaluationLocked(now time.Time) int {
+	return e.expireListingsLocked(now, false)
+}
+
+func (e *Engine) expireListingsLocked(now time.Time, refreshValuations bool) int {
 	touched := map[string]struct{}{}
 	expired := 0
 	for fingerprint, listing := range e.listings {
@@ -272,7 +307,9 @@ func (e *Engine) expireLocked(now time.Time) int {
 	}
 	for signature := range touched {
 		e.rebuildActiveStatLocked(signature)
-		e.refreshActiveValuationLocked(signature)
+		if refreshValuations {
+			e.refreshActiveValuationLocked(signature)
+		}
 	}
 	return expired
 }

@@ -175,6 +175,33 @@ func TestObserveBatchDoesNotRevalueUnchangedListings(t *testing.T) {
 	}
 }
 
+func TestObserveFastBatchScoresLiveRowsWithoutRebuildingSharedSnapshot(t *testing.T) {
+	e := NewEngine()
+	now := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	e.now = func() time.Time { return now }
+	for index := 0; index < 12; index++ {
+		e.AddTransactions([]Transaction{{SellerName: fmt.Sprintf("seller-%d", index), Item: Item{ID: "diamond", Quantity: 1},
+			TotalPrice: 4_000_000, SoldAt: now.Add(-time.Duration(index) * time.Minute)}})
+	}
+	version := e.Version()
+	listing := Listing{AuthoritativeID: "fast", SellerName: "cheap", Item: Item{ID: "diamond", Quantity: 1}, TotalPrice: 3_000_000}
+	observed, duplicates, changed := e.ObserveFastBatch([]Listing{listing})
+	if duplicates != 0 || !changed || len(observed) != 1 {
+		t.Fatalf("first fast observation duplicates=%d changed=%v observed=%d", duplicates, changed, len(observed))
+	}
+	if after := e.Version(); after != version {
+		t.Fatalf("fast observation rebuilt shared snapshot: before=%d after=%d", version, after)
+	}
+	_, report := e.AnalyzeListings(observed, Thresholds{MinProfit: 1, MinMarginBPS: 1, MinConfidenceBPS: 1, MinVolume24h: 1}, 10)
+	if report.Listings != 1 || report.NoValuation != 0 || report.NoQuantityEvidence != 0 {
+		t.Fatalf("fast row was not evaluated directly: %+v", report)
+	}
+	_, duplicates, changed = e.ObserveFastBatch([]Listing{listing})
+	if duplicates != 1 || changed {
+		t.Fatalf("unchanged fast row duplicates=%d changed=%v", duplicates, changed)
+	}
+}
+
 func TestObserveBatchScoresMarketMovingAskBeforeBoundedSharedRevalue(t *testing.T) {
 	e := NewEngine()
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
@@ -369,6 +396,32 @@ func BenchmarkObserveExistingMarket(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		e.Observe(Listing{AuthoritativeID: "benchmark-listing", SellerName: "benchmark-seller",
 			Item: Item{ID: "elytra", Quantity: 1}, TotalPrice: 280_000_000 + int64(i%100)})
+	}
+}
+
+func BenchmarkObserveFastPage(b *testing.B) {
+	e := NewEngine()
+	now := time.Now().UTC()
+	e.now = func() time.Time { return now }
+	transactions := make([]Transaction, 500)
+	for index := range transactions {
+		transactions[index] = Transaction{SellerName: fmt.Sprintf("seller-%d", index), Item: Item{ID: "diamond", Quantity: 1},
+			TotalPrice: 4_000_000 + int64(index%20), SoldAt: now.Add(-time.Duration(index) * time.Minute)}
+	}
+	e.AddTransactions(transactions)
+	listings := make([]Listing, 44)
+	for index := range listings {
+		listings[index] = Listing{AuthoritativeID: fmt.Sprintf("fast-%d", index), SellerName: fmt.Sprintf("active-%d", index),
+			Item: Item{ID: "diamond", Quantity: 1}, TotalPrice: 3_000_000 + int64(index), ExpiresAt: now.Add(time.Hour)}
+	}
+	e.ObserveFastBatch(listings)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		for index := range listings {
+			listings[index].TotalPrice = 3_000_000 + int64(index) + int64(iteration&1)
+		}
+		e.ObserveFastBatch(listings)
 	}
 }
 

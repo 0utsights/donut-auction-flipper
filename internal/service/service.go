@@ -462,21 +462,17 @@ func (s *Server) CollectFastOnce(ctx context.Context) error {
 	if engine == nil {
 		return nil
 	}
-	engineVersion := engine.Version()
-	observed, _ := engine.ObserveBatch(listings)
+	observed, _, changed := engine.ObserveFastBatch(listings)
 	previous := s.Snapshot()
 	analysis, valuations, flips := previous.Analysis, previous.Valuations, previous.Flips
 	valuationCount := previous.Status.ValuationCount
-	if engine.Version() != engineVersion {
+	if changed {
 		opportunities, newestAnalysis := engine.AnalyzeListings(observed, s.cfg.Thresholds, s.cfg.OpportunityLimit)
 		analysis = newestAnalysis
 		flips = make([]Flip, 0, len(opportunities))
 		for _, opportunity := range opportunities {
 			flips = append(flips, mapFlip(opportunity))
 		}
-		marketSnapshot := engine.Snapshot()
-		valuationCount = len(marketSnapshot.Valuations)
-		valuations = topValuations(marketSnapshot.Valuations, 25)
 	}
 	now := s.now()
 	// A completed broad scan may replace the engine while this request is being
