@@ -18,7 +18,8 @@ record OrderPlan(String candidateId, String signature, String itemId, String ite
     private static final Pattern LABELED_QUANTITY = Pattern.compile("(?i)\\b(?:amount|quantity|quantit[eé])\\s*:?\\s*([0-9][0-9,]*)\\b");
     private static final Pattern DELIVERED = Pattern.compile("(?i)([0-9][0-9,]*(?:\\.[0-9]+)?)\\s*([KMBT]?)\\s*/\\s*"
             + "([0-9][0-9,]*(?:\\.[0-9]+)?)\\s*([KMBT]?)\\s+(?:delivered|livr[eé]s?)\\b");
-    private static final Pattern DONUT_ITEM_RESULT = Pattern.compile("(?i)^\\[item/([a-z0-9_./-]+)@items]\\s+(.+)$");
+    private static final Pattern DONUT_ITEM_RESULT = Pattern.compile(
+            "(?i)^\\[(?:item|block)/([a-z0-9_./-]+)(?:@[a-z0-9_.:/-]+)?]\\s+(.+)$");
 
     static OrderPlan from(CandidateFeedClient.Candidate candidate) { return from(candidate, 1); }
 

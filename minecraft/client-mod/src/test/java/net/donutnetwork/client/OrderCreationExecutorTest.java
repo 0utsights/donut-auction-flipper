@@ -65,9 +65,11 @@ class OrderCreationExecutorTest {
 
     @Test void recognizesObservedLocalizedItemDialogWithoutWeakSubstringMatching() {
         assertTrue(OrderCreationExecutor.localizedTitleEquals("Choisir un objet", Set.of("Choose Item", "Choisir un objet")));
-        assertTrue(OrderCreationExecutor.isSingleItemResultTitle("Choisir un objet (1 résultat)"));
-        assertTrue(OrderCreationExecutor.isSingleItemResultTitle("Choose Item (1 result)"));
-        assertFalse(OrderCreationExecutor.isSingleItemResultTitle("Choisir un objet (10 résultats)"));
+        assertTrue(OrderCreationExecutor.isItemResultTitle("Choisir un objet (1 résultat)"));
+        assertTrue(OrderCreationExecutor.isItemResultTitle("Choose Item (1 result)"));
+        assertTrue(OrderCreationExecutor.isItemResultTitle("Choose Item (6 results)"));
+        assertTrue(OrderCreationExecutor.isItemResultTitle("Choisir un objet (10 résultats)"));
+        assertFalse(OrderCreationExecutor.isItemResultTitle("Choose Item (many results)"));
         assertFalse(OrderCreationExecutor.localizedTitleEquals("Choisir un objet dangereux", Set.of("Choisir un objet")));
     }
 }

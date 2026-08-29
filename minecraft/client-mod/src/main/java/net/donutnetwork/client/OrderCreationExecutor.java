@@ -417,7 +417,7 @@ final class OrderCreationExecutor {
         DialogTextInput field = requireSingleTextInput(screen, dialog, Set.of("search", "recherche", "item", "objet"));
         field.setText(plan.itemPathQuery());
         requireButton(screen, SEARCH_ACTIONS).onPress(new MouseInput(0, 0));
-        transition(Phase.ITEM_RESULT, "waiting for one exact item result"); delay();
+        transition(Phase.ITEM_RESULT, "waiting for the exact item among search results"); delay();
     }
 
     private void handleItemResult(MinecraftClient client, Screen screen) {
@@ -425,11 +425,14 @@ final class OrderCreationExecutor {
         String title = title(screen);
         if (localizedTitleEquals(title, ITEM_DIALOG_TITLES)) return;
         requireDialog(screen, ITEM_DIALOG_TITLES, true);
-        if (!isSingleItemResultTitle(title)) { abort(client, "item search was not uniquely resolved: " + title); return; }
+        if (!isItemResultTitle(title)) { abort(client, "unexpected item-result dialog: " + title); return; }
         String registryName = expectedRegistryName();
         List<ButtonWidget> matches = buttons(screen).stream()
+                .filter(button -> button.active && button.visible)
                 .filter(button -> OrderPlan.exactItemResultLabel(button.getMessage().getString(), plan.itemId(), registryName, plan.itemName())).toList();
-        if (matches.size() != 1) { abort(client, "exact item result was missing or ambiguous"); return; }
+        if (matches.size() != 1) {
+            abort(client, "expected one exact canonical item result, found " + matches.size() + " in " + title); return;
+        }
         matches.getFirst().onPress(new MouseInput(0, 0));
         transition(Phase.AMOUNT, "entering exact batch quantity"); delay();
     }
@@ -1004,11 +1007,11 @@ final class OrderCreationExecutor {
                 .anyMatch(root -> normalized.equals(root) || normalized.startsWith(root + " "));
     }
 
-    static boolean isSingleItemResultTitle(String actual) {
+    static boolean isItemResultTitle(String actual) {
         String normalized = OrderPlan.normalizeLabel(actual);
         for (String title : ITEM_DIALOG_TITLES) {
             String root = OrderPlan.normalizeLabel(title);
-            if (normalized.matches(Pattern.quote(root) + " 1 (?:result|results|resultat|resultats)")) return true;
+            if (normalized.matches(Pattern.quote(root) + " (?:0|[1-9][0-9]{0,2}) (?:result|results|resultat|resultats)")) return true;
         }
         return false;
     }

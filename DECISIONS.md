@@ -238,6 +238,8 @@ The balance-scaled profit-per-exit value is a preferred frontier, not a hard eli
 
 Order-price presentation keeps three values distinct: the literal abbreviated `/orders` observation, Fabric's one-cent-higher initial bid, and the conservative upper bucket reserved for repricing and budget/profit checks. Mineflayer cannot recover hidden digits from `$1.3M`; rank feedback in Fabric is the exact-price discovery mechanism. To reduce observer overhead, a globally verified `Most Per Item` sort is reused for at most sixty seconds within the same isolated Minecraft session while every filtered result still proves page one, exact canonical identity, completeness, and descending reward. Reconnects invalidate the proof. Proven/READY markets use shorter samples and a one-minute recheck cooldown; unproven research retains longer sampling and a ten-minute cooldown.
 
+Fabric item creation accepts Donut's fuzzy multi-result chooser only when exactly one visible, active button carries the expected canonical bracket metadata. Item and block result forms such as `[item/breeze_rod@items]` and `[block/ice]` are supported; localized display names are never allowed to override a mismatched registry path. Zero or multiple canonical matches remain fail-closed. This lets an `ice` search select Ice while rejecting Packed Ice, Blue Ice, Frosted Ice, and unrelated fuzzy results.
+
 ## Assumptions made without operator input
 
 - The official API retains its bearer-authenticated listing and transaction endpoints and 250 requests/minute published limit.

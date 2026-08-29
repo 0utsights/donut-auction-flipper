@@ -16,6 +16,17 @@ class OrderPlanTest {
                 "minecraft:breeze_rod", "Breeze Rod", "Breeze Rods"));
     }
 
+    @Test void selectsOnlyPlainIceFromDonutsFuzzyIceResults() {
+        assertTrue(OrderPlan.exactItemResultLabel("[block/ice] Ice",
+                "minecraft:ice", "Ice", "Ice"));
+        assertFalse(OrderPlan.exactItemResultLabel("[block/packed_ice] Packed Ice",
+                "minecraft:ice", "Ice", "Ice"));
+        assertFalse(OrderPlan.exactItemResultLabel("[block/blue_ice] Blue Ice",
+                "minecraft:ice", "Ice", "Ice"));
+        assertFalse(OrderPlan.exactItemResultLabel("[block/frosted_ice] Frosted Ice",
+                "minecraft:ice", "Ice", "Ice"));
+    }
+
     @Test void preservesCentPreciseRewardAndCheckedStackEscrow() {
         CandidateFeedClient.Candidate candidate = candidate(64, 500_001, 320_001);
         OrderPlan plan = OrderPlan.from(candidate);
