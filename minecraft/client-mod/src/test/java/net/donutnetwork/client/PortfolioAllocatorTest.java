@@ -63,7 +63,7 @@ class PortfolioAllocatorTest {
         CandidateFeedClient.Candidate strongest = candidate("same", 100_000, 80_000, 1, 1, 1);
         CandidateFeedClient.Candidate duplicate = new CandidateFeedClient.Candidate("duplicate", strongest.route(), strongest.state(), strongest.reason(),
                 strongest.signature(), strongest.itemId(), strongest.itemName(), strongest.quantity(), strongest.maxStackSize(), 90_000,
-                strongest.expectedProceeds(), strongest.orderUnitRewardCents(), strongest.targetListPrice(), 70_000, strongest.marginBps(),
+                strongest.expectedProceeds(), strongest.observedOrderUnitRewardCents(), strongest.orderUnitRewardCents(), strongest.targetListPrice(), 70_000, strongest.marginBps(),
                 strongest.completionBps(), strongest.expectedCycleMinutes(), 70_000, 1, strongest.queuePosition(), strongest.orderSlots(),
                 strongest.auctionSlots(), strongest.inventorySlots(), strongest.profitInventorySlot(), strongest.confidenceBps(), strongest.orderTier(),
                 strongest.orderFreshAt(), strongest.focusedFreshAt(), strongest.auctionFreshAt(), strongest.orderCommand(), strongest.auctionCommand());
@@ -146,8 +146,9 @@ class PortfolioAllocatorTest {
     }
 
     private static CandidateFeedClient.Candidate candidate(String id, long cost, long score, int orderSlots, int auctionSlots, int batches) {
+        long safeReward = Math.max(2, cost * 100 / 64);
         return new CandidateFeedClient.Candidate(id, "ORDER_TO_AUCTION", "READY", "", "minecraft:" + id,
-                "minecraft:" + id, id, 64, 64, cost, cost + score, Math.max(1, cost * 100 / 64), cost + score,
+                "minecraft:" + id, id, 64, 64, cost, cost + score, safeReward - 1, safeReward, cost + score,
                 score, 1000, 9000, 30,
                 score, batches, 1, orderSlots, auctionSlots, 1, score, 9000, "actionable", Instant.now(), Instant.now(), Instant.now(),
                 "/orders", "/ah " + id);
@@ -156,7 +157,7 @@ class PortfolioAllocatorTest {
     private static CandidateFeedClient.Candidate withState(CandidateFeedClient.Candidate value, String state) {
         return new CandidateFeedClient.Candidate(value.id(), value.route(), state, value.reason(), value.signature(), value.itemId(),
                 value.itemName(), value.quantity(), value.maxStackSize(), value.acquisitionCost(), value.expectedProceeds(),
-                value.orderUnitRewardCents(), value.targetListPrice(),
+                value.observedOrderUnitRewardCents(), value.orderUnitRewardCents(), value.targetListPrice(),
                 value.conservativeProfit(), value.marginBps(), value.completionBps(), value.expectedCycleMinutes(),
                 value.riskAdjustedProfitDay(), value.executableBatches(), value.queuePosition(), value.orderSlots(), value.auctionSlots(),
                 value.inventorySlots(), value.profitInventorySlot(), value.confidenceBps(), value.orderTier(), value.orderFreshAt(),

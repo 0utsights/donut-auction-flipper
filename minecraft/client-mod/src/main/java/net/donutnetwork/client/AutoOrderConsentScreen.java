@@ -99,7 +99,7 @@ final class AutoOrderConsentScreen extends Screen {
         }
 
         context.drawTextWithShadow(textRenderer, Text.literal("EVERY ORDER"), left + 18, top + 230, MarketUi.MUTED);
-        context.drawTextWithShadow(textRenderer, Text.literal("Fresh markets  •  exact menu values  •  duplicate check  •  post-submit proof"),
+        context.drawTextWithShadow(textRenderer, Text.literal("Rank #1 proof  •  unfilled cancel/reprice  •  refund proof  •  max escrow"),
                 left + 28, top + 246, MarketUi.TEXT);
         String note = validation.isBlank() ? "Nothing is authorized until you press Enable Session." : validation;
         context.drawTextWithShadow(textRenderer, Text.literal(MarketUi.trim(note, 74)), left + 28, top + 261,

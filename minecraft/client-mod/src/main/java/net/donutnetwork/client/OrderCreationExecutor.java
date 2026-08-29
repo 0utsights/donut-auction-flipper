@@ -11,6 +11,8 @@ import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.client.gui.widget.EditBoxWidget;
 import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.client.input.MouseInput;
+import net.minecraft.component.DataComponentTypes;
+import net.minecraft.component.type.LoreComponent;
 import net.minecraft.dialog.body.DialogBody;
 import net.minecraft.dialog.body.ItemDialogBody;
 import net.minecraft.dialog.body.PlainMessageDialogBody;
@@ -37,16 +39,21 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.LinkedHashMap;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.regex.Pattern;
 
 /** Executes verified manual or explicitly enabled queued orders through Donut's server-driven 1.21.11 screens. */
 final class OrderCreationExecutor {
-    enum Phase { IDLE, WAIT_FRESH, ORDER_BOARD, YOUR_ORDERS, ITEM_SEARCH, ITEM_RESULT, AMOUNT, PRICE, REVIEW, PENDING_VERIFICATION, VERIFY_BOARD, VERIFY_YOUR_ORDERS, ABORTED }
+    enum Phase { IDLE, WAIT_FRESH, ORDER_BOARD, YOUR_ORDERS, ITEM_SEARCH, ITEM_RESULT, AMOUNT, PRICE, REVIEW,
+        PENDING_VERIFICATION, VERIFY_BOARD, VERIFY_YOUR_ORDERS, RANK_BOARD, RANK_SEARCH,
+        CANCEL_BOARD, CANCEL_YOUR_ORDERS, CANCEL_MANAGE, CANCEL_CONFIRM,
+        CANCEL_VERIFY_BOARD, CANCEL_VERIFY_YOUR_ORDERS, ABORTED }
     record Status(Phase phase, String message, long sessionSpent, String candidateId) {
         boolean active() { return phase != Phase.IDLE && phase != Phase.ABORTED; }
     }
     record ArmResult(boolean armed, String message) {}
+    private record PublicRank(int rank, int exactRows) {}
     private record DialogTextInput(TextFieldWidget singleLine, EditBoxWidget multiline) {
         static DialogTextInput of(Object widget) {
             if (widget instanceof TextFieldWidget field) return new DialogTextInput(field, null);
@@ -65,7 +72,7 @@ final class OrderCreationExecutor {
     private static final Duration ORDER_MAX_AGE = Duration.ofSeconds(6);
     private static final Duration AUCTION_MAX_AGE = Duration.ofSeconds(15);
     private static final Duration FRESH_WAIT = Duration.ofSeconds(20);
-    private static final Duration WORKFLOW_TIMEOUT = Duration.ofSeconds(45);
+    private static final Duration WORKFLOW_TIMEOUT = Duration.ofMinutes(3);
     private static final Duration SCREEN_TIMEOUT = Duration.ofSeconds(8);
     private static final String FOCUSED_STALE = "focused order observation is not fresh yet";
     private static final long ACTION_DELAY_NANOS = Duration.ofMillis(350).toNanos();
@@ -93,6 +100,12 @@ final class OrderCreationExecutor {
     private Instant nextAutoAttempt = Instant.EPOCH;
     private final ArrayDeque<String> autoQueue = new ArrayDeque<>();
     private final Map<String, Long> autoEscrowCaps = new LinkedHashMap<>();
+    private long currentEscrowCap;
+    private long minimumProfitDollars;
+    private long pendingRepriceUnitCents;
+    private int rankSortAttempts;
+    private boolean retrying;
+    private boolean cancelConfirmationSent;
 
     OrderCreationExecutor(CandidateFeedClient feed) {
         this.feed = feed;
@@ -165,6 +178,13 @@ final class OrderCreationExecutor {
         ArmResult result = canArm(selection, now);
         if (!result.armed()) return result;
         plan = OrderPlan.from(selection);
+        currentEscrowCap = autoEnabled
+                ? autoEscrowCaps.getOrDefault(selection.candidate().id(), selection.capital())
+                : selection.capital();
+        minimumProfitDollars = Math.max(1, selection.conservativeProfit());
+        pendingRepriceUnitCents = 0;
+        rankSortAttempts = 0;
+        retrying = false;
         armedAt = now;
         transition(Phase.WAIT_FRESH, "waiting for a current focused order sample");
         feed.focus(selection.candidate());
@@ -213,7 +233,7 @@ final class OrderCreationExecutor {
         if (Duration.between(armedAt, now).compareTo(WORKFLOW_TIMEOUT) > 0) { abort(client, "order workflow timed out"); return; }
         if (phase == Phase.WAIT_FRESH) {
             String error = liveError(plan, now, true);
-            if (autoEnabled && isRebasablePreTransactionChange(error) && tryRebaseCurrentAuto(now)) {
+            if (autoEnabled && !retrying && isRebasablePreTransactionChange(error) && tryRebaseCurrentAuto(now)) {
                 error = liveError(plan, now, true);
             }
             if (error.isEmpty()) {
@@ -235,7 +255,12 @@ final class OrderCreationExecutor {
             delay();
             return;
         }
-        boolean verifying = phase == Phase.VERIFY_BOARD || phase == Phase.VERIFY_YOUR_ORDERS;
+        boolean verifying = switch (phase) {
+            case VERIFY_BOARD, VERIFY_YOUR_ORDERS, RANK_BOARD, RANK_SEARCH,
+                    CANCEL_BOARD, CANCEL_YOUR_ORDERS, CANCEL_MANAGE, CANCEL_CONFIRM,
+                    CANCEL_VERIFY_BOARD, CANCEL_VERIFY_YOUR_ORDERS -> true;
+            default -> false;
+        };
         if (!verifying) {
             String error = liveError(currentPlan, now, true);
             if (!error.isEmpty()) { abort(client, error); return; }
@@ -254,6 +279,14 @@ final class OrderCreationExecutor {
                 case REVIEW -> handleReview(client, screen);
                 case VERIFY_BOARD -> handleVerifyBoard(client, screen);
                 case VERIFY_YOUR_ORDERS -> handleVerifyYourOrders(client, screen);
+                case RANK_BOARD -> handleRankBoard(client, screen);
+                case RANK_SEARCH -> handleRankSearch(client, screen);
+                case CANCEL_BOARD -> handleCancelBoard(client, screen);
+                case CANCEL_YOUR_ORDERS -> handleCancelYourOrders(client, screen);
+                case CANCEL_MANAGE -> handleCancelManage(client, screen);
+                case CANCEL_CONFIRM -> handleCancelConfirm(client, screen);
+                case CANCEL_VERIFY_BOARD -> handleCancelVerifyBoard(client, screen);
+                case CANCEL_VERIFY_YOUR_ORDERS -> handleCancelVerifyYourOrders(client, screen);
                 default -> { }
             }
         } catch (RuntimeException errorValue) {
@@ -319,6 +352,7 @@ final class OrderCreationExecutor {
         if (!liveError(refreshed, now, true).isEmpty()) return false;
 
         plan = refreshed;
+        minimumProfitDollars = Math.max(1, current.conservativeProfit());
         if (!queuedID.equals(refreshed.candidateId())) {
             autoQueue.removeFirst();
             autoEscrowCaps.remove(queuedID);
@@ -465,28 +499,227 @@ final class OrderCreationExecutor {
         if (!(screen instanceof GenericContainerScreen) || !title.equals("Orders -> Your Orders")) {
             abort(client, "unexpected personal-orders verification screen: " + title); return;
         }
-        int matches = personalOrderCount(client, lastSubmittedPlan.itemId());
+        int matches = personalOrderCountExact(client, lastSubmittedPlan, true);
         if (matches == 1) {
-            String itemName = lastSubmittedPlan.itemName();
-            String candidateID = lastSubmittedPlan.candidateId();
             feed.markActiveOrder(lastSubmittedPlan.itemId());
-            feed.diagnostic("order_workflow", "verified", Map.of("candidate_state", "active", "route", "ORDER_TO_AUCTION", "reason_code", "personal_order_exact_match"));
-            phase = Phase.IDLE;
-            message = "verified " + itemName + " in Your Orders";
-            lastSubmittedPlan = null;
-            if (autoEnabled && !autoQueue.isEmpty() && autoQueue.getFirst().equals(candidateID)) {
-                autoQueue.removeFirst();
-                autoEscrowCaps.remove(candidateID);
-            }
-            nextAutoAttempt = Instant.now().plusSeconds(2);
             if (client.currentScreen != null) client.setScreen(null);
-            tell(client, "Order verified in Your Orders: " + itemName + (autoEnabled
-                    ? ". " + autoQueue.size() + " reviewed orders remain." : "."));
+            client.getNetworkHandler().sendChatCommand("orders");
+            rankSortAttempts = 0;
+            transition(Phase.RANK_BOARD, "verifying Most Per Item before checking public rank");
+            delay();
             return;
         }
-        if (matches > 1) { abort(client, "multiple personal orders matched the submitted item; automatic orders stopped"); return; }
+        if (matches > 1) { abort(client, "multiple exact personal orders matched the submitted values; automatic orders stopped"); return; }
+        if (personalOrderCount(client, lastSubmittedPlan.itemId()) > 0) {
+            abort(client, "personal order item exists but its price or quantity is ambiguous; automatic orders stopped"); return;
+        }
         if (Duration.between(phaseAt, Instant.now()).compareTo(Duration.ofSeconds(1)) < 0) return;
         abort(client, "submitted order was not found in Your Orders; its item remains locked for manual review");
+    }
+
+    private void handleRankBoard(MinecraftClient client, Screen screen) {
+        if (screen == null) return;
+        String title = title(screen);
+        if (!(screen instanceof GenericContainerScreen) || !title.equals("Orders (Page 1)")) {
+            abort(client, "unexpected screen while verifying order sort: " + title); return;
+        }
+        if (!orderPageDescending(client, 10)) {
+            if (rankSortAttempts++ >= 3 || !isFilterControl(containerSlot(client, 47))) {
+                LOGGER.warn("Could not prove Most Per Item before rank check: {}", menuFingerprint(client));
+                abort(client, "Most Per Item ordering could not be proven before the rank check"); return;
+            }
+            clickSlot(client, 47);
+            transition(Phase.RANK_BOARD, "cycling the order filter to prove Most Per Item");
+            delay();
+            return;
+        }
+        client.setScreen(null);
+        client.getNetworkHandler().sendChatCommand("order " + lastSubmittedPlan.itemPathQuery());
+        transition(Phase.RANK_SEARCH, "searching the exact item to locate the new order");
+        delay();
+    }
+
+    private void handleRankSearch(MinecraftClient client, Screen screen) {
+        if (screen == null) return;
+        String title = title(screen);
+        if (!(screen instanceof GenericContainerScreen) || !title.equals("Orders (Page 1)")) {
+            abort(client, "unexpected screen while checking public order rank: " + title); return;
+        }
+        PublicRank result = publicRank(client, lastSubmittedPlan);
+        if (result.rank() == 1) {
+            finishRankedOrder(client, result.exactRows());
+            return;
+        }
+        OptionalLong next = lastSubmittedPlan.nextUnitReward(currentEscrowCap, minimumProfitDollars);
+        pendingRepriceUnitCents = next.orElse(0);
+        feed.diagnostic("order_workflow", "ranked", Map.of("candidate_state", "active", "route", "ORDER_TO_AUCTION",
+                "reason_code", pendingRepriceUnitCents > 0 ? "not_first_reprice" : "not_first_drop"));
+        tell(client, lastSubmittedPlan.itemName() + " placed #" + result.rank() + ". Cancelling it "
+                + (pendingRepriceUnitCents > 0 ? "before the bounded higher bid." : "because the next bid fails the reviewed profit/escrow limit."));
+        client.setScreen(null);
+        client.getNetworkHandler().sendChatCommand("orders");
+        transition(Phase.CANCEL_BOARD, "opening Your Orders for a verified rank replacement");
+        delay();
+    }
+
+    private void handleCancelBoard(MinecraftClient client, Screen screen) {
+        if (screen == null) return;
+        String title = title(screen);
+        if (!(screen instanceof GenericContainerScreen) || !ORDERS_TITLE.matcher(title).matches()) {
+            abort(client, "unexpected screen before rank replacement: " + title); return;
+        }
+        ItemStack stack = containerSlot(client, 51);
+        if (!labelEquals(stack.getName().getString(), "Your Orders")) {
+            abort(client, "Your Orders cancellation control did not match slot 51"); return;
+        }
+        clickSlot(client, 51);
+        transition(Phase.CANCEL_YOUR_ORDERS, "locating the exact unfilled personal order");
+        delay();
+    }
+
+    private void handleCancelYourOrders(MinecraftClient client, Screen screen) {
+        if (screen == null) return;
+        String title = title(screen);
+        if (ORDERS_TITLE.matcher(title).matches()) return;
+        if (!(screen instanceof GenericContainerScreen) || !title.equals("Orders -> Your Orders")) {
+            abort(client, "unexpected personal-orders cancellation screen: " + title); return;
+        }
+        List<Integer> matches = personalOrderSlotsExact(client, lastSubmittedPlan, true);
+        if (matches.size() != 1) {
+            abort(client, matches.isEmpty()
+                    ? "the exact unfilled personal order could not be proven before cancellation"
+                    : "the personal order to cancel was ambiguous");
+            return;
+        }
+        clickSlot(client, matches.getFirst());
+        transition(Phase.CANCEL_MANAGE, "opening the exact personal order controls");
+        delay();
+    }
+
+    private void handleCancelManage(MinecraftClient client, Screen screen) {
+        if (screen == null || title(screen).equals("Orders -> Your Orders")) return;
+        if (!(screen instanceof GenericContainerScreen) || !title(screen).equals("Orders -> Edit Order")) {
+            abort(client, "unexpected order-management screen: " + title(screen)); return;
+        }
+        List<Integer> controls = controlSlots(client, "cancel order");
+        if (controls.size() != 1) {
+            LOGGER.warn("Cancellation control not proven: {}", menuFingerprint(client));
+            abort(client, "exactly one Cancel Order control was not present; no cancellation was attempted"); return;
+        }
+        clickSlot(client, controls.getFirst());
+        cancelConfirmationSent = false;
+        transition(Phase.CANCEL_CONFIRM, "waiting for the server cancellation outcome");
+        delayVerification();
+    }
+
+    private void handleCancelConfirm(MinecraftClient client, Screen screen) {
+        if (screen instanceof DialogScreen<?> && !cancelConfirmationSent) {
+            String normalizedTitle = OrderPlan.normalizeLabel(title(screen));
+            if (!normalizedTitle.contains("cancel") || !normalizedTitle.contains("order")) {
+                abort(client, "unexpected dialog after Cancel Order: " + title(screen)); return;
+            }
+            requireButton(screen, Set.of("confirm", "confirm cancellation", "cancel order")).onPress(new MouseInput(0, 0));
+            cancelConfirmationSent = true;
+            delayVerification();
+            return;
+        }
+        if (screen instanceof GenericContainerScreen && !cancelConfirmationSent) {
+            String normalizedTitle = OrderPlan.normalizeLabel(title(screen));
+            if (normalizedTitle.contains("cancel") && normalizedTitle.contains("order")) {
+                List<Integer> controls = controlSlots(client, Set.of("confirm", "confirm cancellation", "confirm cancel order"));
+                if (controls.size() != 1) {
+                    abort(client, "generic cancellation confirmation was missing or ambiguous"); return;
+                }
+                clickSlot(client, controls.getFirst());
+                cancelConfirmationSent = true;
+                delayVerification();
+                return;
+            }
+        }
+        if (screen instanceof DialogScreen<?> && cancelConfirmationSent) return;
+        if (client.currentScreen != null) client.setScreen(null);
+        client.getNetworkHandler().sendChatCommand("orders");
+        transition(Phase.CANCEL_VERIFY_BOARD, "verifying that the cancelled order is absent");
+        delay();
+    }
+
+    private void handleCancelVerifyBoard(MinecraftClient client, Screen screen) {
+        if (screen == null) return;
+        String title = title(screen);
+        if (!(screen instanceof GenericContainerScreen) || !ORDERS_TITLE.matcher(title).matches()) {
+            abort(client, "unexpected cancellation-verification screen: " + title); return;
+        }
+        ItemStack stack = containerSlot(client, 51);
+        if (!labelEquals(stack.getName().getString(), "Your Orders")) {
+            abort(client, "Your Orders post-cancellation control did not match slot 51"); return;
+        }
+        clickSlot(client, 51);
+        transition(Phase.CANCEL_VERIFY_YOUR_ORDERS, "proving the cancelled order is absent");
+        delay();
+    }
+
+    private void handleCancelVerifyYourOrders(MinecraftClient client, Screen screen) {
+        if (screen == null) return;
+        String title = title(screen);
+        if (ORDERS_TITLE.matcher(title).matches()) return;
+        if (!(screen instanceof GenericContainerScreen) || !title.equals("Orders -> Your Orders")) {
+            abort(client, "unexpected personal-orders post-cancellation screen: " + title); return;
+        }
+        if (personalOrderCount(client, lastSubmittedPlan.itemId()) > 0) {
+            if (Duration.between(phaseAt, Instant.now()).compareTo(Duration.ofSeconds(1)) < 0) return;
+            abort(client, "cancelled order is still present; no replacement was created");
+            return;
+        }
+        OrderPlan cancelled = lastSubmittedPlan;
+        feed.recordOrderCancelled(cancelled.itemId());
+        sessionSpent = Math.max(0, sessionSpent - cancelled.escrowDollars());
+        lastSubmittedPlan = null;
+        if (pendingRepriceUnitCents <= 0) {
+            finishDroppedOrder(client, cancelled, "the next rank bid was outside the reviewed profitable escrow");
+            return;
+        }
+        plan = cancelled.withUnitReward(pendingRepriceUnitCents);
+        pendingRepriceUnitCents = 0;
+        retrying = true;
+        armedAt = Instant.now();
+        feed.candidate(plan.candidateId()).ifPresent(feed::focus);
+        if (client.currentScreen != null) client.setScreen(null);
+        transition(Phase.WAIT_FRESH, "waiting for refund, fresh auction exit, and the bounded replacement bid");
+        tell(client, "Cancellation verified. Rechecking before recreating " + plan.itemName() + " at $" + plan.priceInput()
+                + " each; projected conservative profit is $" + FlipNotifier.format(plan.conservativeProfitDollars()) + ".");
+    }
+
+    private void finishRankedOrder(MinecraftClient client, int exactRows) {
+        String itemName = lastSubmittedPlan.itemName();
+        String candidateID = lastSubmittedPlan.candidateId();
+        feed.markActiveOrder(lastSubmittedPlan.itemId());
+        feed.diagnostic("order_workflow", "verified", Map.of("candidate_state", "active", "route", "ORDER_TO_AUCTION",
+                "reason_code", "public_rank_one"));
+        phase = Phase.IDLE;
+        message = "verified " + itemName + " at public rank #1 among " + exactRows + " exact orders";
+        lastSubmittedPlan = null;
+        retrying = false;
+        pendingRepriceUnitCents = 0;
+        completeQueueItem(candidateID);
+        nextAutoAttempt = Instant.now().plusSeconds(2);
+        if (client.currentScreen != null) client.setScreen(null);
+        tell(client, "Order verified at public rank #1: " + itemName + (autoEnabled
+                ? ". " + autoQueue.size() + " reviewed orders remain." : "."));
+    }
+
+    private void finishDroppedOrder(MinecraftClient client, OrderPlan dropped, String reason) {
+        completeQueueItem(dropped.candidateId());
+        phase = Phase.IDLE;
+        retrying = false;
+        message = "dropped " + dropped.itemName() + ": " + reason;
+        nextAutoAttempt = Instant.now().plusSeconds(1);
+        if (client.currentScreen != null) client.setScreen(null);
+        tell(client, message + (autoEnabled ? ". " + autoQueue.size() + " reviewed orders remain." : "."));
+    }
+
+    private void completeQueueItem(String candidateID) {
+        if (autoEnabled && !autoQueue.isEmpty() && autoQueue.getFirst().equals(candidateID)) autoQueue.removeFirst();
+        autoEscrowCaps.remove(candidateID);
     }
 
     private String liveError(OrderPlan expected, Instant now, boolean requireAllocation) {
@@ -636,6 +869,104 @@ final class OrderCreationExecutor {
             if (id != null && id.toString().equals(expectedItemId)) matches++;
         }
         return matches;
+    }
+
+    private static int personalOrderCountExact(MinecraftClient client, OrderPlan expected, boolean requireUnfilled) {
+        return personalOrderSlotsExact(client, expected, requireUnfilled).size();
+    }
+
+    private static List<Integer> personalOrderSlotsExact(MinecraftClient client, OrderPlan expected, boolean requireUnfilled) {
+        if (!(client.player.currentScreenHandler instanceof GenericContainerScreenHandler handler)) return List.of();
+        int limit = Math.min(handler.getInventory().size(), handler.slots.size());
+        List<Integer> result = new ArrayList<>();
+        for (int index = 0; index < limit; index++) {
+            ItemStack stack = handler.getSlot(index).getStack();
+            if (!itemMatches(stack, expected.itemId())) continue;
+            String text = stackText(stack);
+            if (OrderPlan.textContainsUnitReward(text, expected.unitRewardCents())
+                    && OrderPlan.textContainsOrderProgress(text, expected.quantity(), requireUnfilled)) result.add(index);
+        }
+        return List.copyOf(result);
+    }
+
+    private static PublicRank publicRank(MinecraftClient client, OrderPlan expected) {
+        if (!(client.player.currentScreenHandler instanceof GenericContainerScreenHandler handler)) {
+            throw new IllegalStateException("public rank screen is not a generic container");
+        }
+        int limit = Math.min(45, Math.min(handler.getInventory().size(), handler.slots.size()));
+        int exactRows = 0;
+        int matchingRows = 0;
+        int rank = 0;
+        long previous = Long.MAX_VALUE;
+        for (int index = 0; index < limit; index++) {
+            ItemStack stack = handler.getSlot(index).getStack();
+            if (!itemMatches(stack, expected.itemId())) continue;
+            String text = stackText(stack);
+            OptionalLong displayed = OrderPlan.firstUnitRewardCents(text);
+            if (displayed.isEmpty()) throw new IllegalStateException("exact item row has no parseable unit reward");
+            if (displayed.getAsLong() > previous) throw new IllegalStateException("exact search results are not Most Per Item");
+            previous = displayed.getAsLong();
+            exactRows++;
+            if (OrderPlan.textContainsUnitReward(text, expected.unitRewardCents())
+                    && OrderPlan.textContainsOrderProgress(text, expected.quantity(), true)) {
+                matchingRows++;
+                rank = exactRows;
+            }
+        }
+        if (exactRows == 0) throw new IllegalStateException("exact item search returned no canonical rows");
+        if (matchingRows != 1) throw new IllegalStateException("public order identity is missing or ambiguous");
+        return new PublicRank(rank, exactRows);
+    }
+
+    private static boolean orderPageDescending(MinecraftClient client, int minimumRows) {
+        if (!(client.player.currentScreenHandler instanceof GenericContainerScreenHandler handler)) return false;
+        int limit = Math.min(45, Math.min(handler.getInventory().size(), handler.slots.size()));
+        long previous = Long.MAX_VALUE;
+        int rows = 0;
+        for (int index = 0; index < limit; index++) {
+            ItemStack stack = handler.getSlot(index).getStack();
+            if (stack.isEmpty()) continue;
+            OptionalLong displayed = OrderPlan.firstUnitRewardCents(stackText(stack));
+            if (displayed.isEmpty() || displayed.getAsLong() > previous) return false;
+            previous = displayed.getAsLong();
+            rows++;
+        }
+        return rows >= minimumRows;
+    }
+
+    private static boolean isFilterControl(ItemStack stack) {
+        Identifier id = Registries.ITEM.getId(stack.getItem());
+        return id != null && id.toString().equals("minecraft:hopper")
+                && OrderPlan.normalizeLabel(stack.getName().getString()).equals("filter");
+    }
+
+    private static List<Integer> controlSlots(MinecraftClient client, String exactLabel) {
+        return controlSlots(client, Set.of(exactLabel));
+    }
+
+    private static List<Integer> controlSlots(MinecraftClient client, Set<String> exactLabels) {
+        if (!(client.player.currentScreenHandler instanceof GenericContainerScreenHandler handler)) return List.of();
+        int limit = Math.min(handler.getInventory().size(), handler.slots.size());
+        Set<String> expected = exactLabels.stream().map(OrderPlan::normalizeLabel).collect(java.util.stream.Collectors.toUnmodifiableSet());
+        List<Integer> result = new ArrayList<>();
+        for (int index = 0; index < limit; index++) {
+            ItemStack stack = handler.getSlot(index).getStack();
+            if (!stack.isEmpty() && expected.contains(OrderPlan.normalizeLabel(stack.getName().getString()))) result.add(index);
+        }
+        return List.copyOf(result);
+    }
+
+    private static boolean itemMatches(ItemStack stack, String expectedItemId) {
+        if (stack == null || stack.isEmpty()) return false;
+        Identifier id = Registries.ITEM.getId(stack.getItem());
+        return id != null && id.toString().equals(expectedItemId);
+    }
+
+    private static String stackText(ItemStack stack) {
+        StringBuilder value = new StringBuilder(stack.getName().getString());
+        LoreComponent lore = stack.get(DataComponentTypes.LORE);
+        if (lore != null) for (Text line : lore.lines()) value.append(' ').append(line.getString());
+        return value.toString();
     }
 
     private static Dialog requireDialog(Screen screen, String exactTitle) {

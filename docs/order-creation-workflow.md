@@ -1,6 +1,6 @@
 # Donut order-creation workflow
 
-Verified against the live DonutSMP 1.21.11 client on 2026-08-25. The exploration stopped at the review screen and did not create an order or spend currency.
+Creation was verified against the live DonutSMP 1.21.11 client on 2026-08-29. A real Netherite Scrap order was created and proven in `Your Orders`; the public-rank/reprice code is fixture-tested but has not been allowed to cancel that valuable live order. The exact `Orders -> Edit Order` container was captured non-transactionally on 2026-08-29.
 
 ## Player flow
 
@@ -12,7 +12,7 @@ Verified against the live DonutSMP 1.21.11 client on 2026-08-25. The exploration
 6. In `Price per item?`, enter the unit reward. The screen displays the amount and a minimum price of `$1`. In the live sample it prefilled `$910K` for one diamond block.
 7. Click `Review Order`.
 8. In `Review Order`, verify the canonical item, amount, unit price, and total escrow. The live sample displayed `Block of Diamond`, amount `1`, `$910K each`, and `$910K total`. The screen offers `Change Item`, `Change Amount`, `Change Price`, `Cancel`, and `Create Order`.
-9. `Create Order` is the final economic action. It was not clicked during discovery.
+9. `Create Order` is the final creation action. Fabric clicked it only after the reviewed values matched, then proved the resulting personal order.
 
 The review total observed was exactly `amount × unit price`; no additional creation fee was displayed. This must be revalidated with a low-value live order before relying on it because the server can change its economy rules.
 
@@ -37,16 +37,19 @@ Before taking the final action, Fabric must verify:
 
 Because the exact success/failure chat fixtures are not yet captured, pressing the server action records a conservative local pending position rather than claiming success. The same item cannot be allocated again across client restarts. Direct duplicate-order server messages fail closed and persist the item lock. The player can clear local locks with `Reset order cache`; this only makes the item eligible for review again, and the exact personal-order menu check still blocks creation if the order remains present.
 
-The Fabric executor supports two explicit consent scopes. `ARM ONE ORDER` authorizes exactly one portfolio selection. `ENABLE AUTO ORDERS` authorizes the currently allocated queue for the current Minecraft session and is disabled by default. A selection combines its allocated resale batches into one acquisition order for that item; it never creates duplicate per-stack orders. Before each queued order, Fabric obtains a new focused observation and repeats every review invariant. After clicking `Create Order`, it reopens the verified personal-order menu and requires exactly one matching canonical item before continuing. Unknown screens, missing orders, duplicate matches, changed economics, stale data, disconnects, balance/slot failures, and server duplicate messages stop the entire queue and leave the affected item locked for manual review. Mineflayer remains observation-only and never enters `Your Orders`, the creation wizard, or any transactional screen.
+The Fabric executor supports two explicit consent scopes. `ARM ONE ORDER` authorizes exactly one portfolio selection. `ENABLE AUTO ORDERS` authorizes the currently allocated queue for the current Minecraft session and is disabled by default. A selection combines its allocated resale batches into one acquisition order for that item; it never creates duplicate per-stack orders. Before each queued order, Fabric obtains a new focused observation and repeats every review invariant. It initially bids one cent above the observed display bucket while freezing the backend's conservative bucket boundary as the maximum escrow. After clicking `Create Order`, it reopens the verified personal-order menu and requires one exact canonical item, unit-price bucket, requested quantity, and zero-delivered progress match.
+
+Fabric then reopens the global board, proves `Most Per Item` from descending unit rewards, searches the underscore-delimited canonical path, and identifies the submitted order by canonical item, exact requested quantity, zero-delivered progress, and its visible price bucket. A unique rank of one completes the workflow. A lower rank opens the exact live-captured `Orders -> Edit Order` screen, permits only one semantic `Cancel Order` control, accepts only a cancellation-specific confirmation, and then proves the item is absent from `Your Orders`. Partial fills and ambiguous rows are never cancelled. The scoreboard must confirm the refund before a replacement can start. The replacement uses the competitive display-bucket boundary and is created only when its combined escrow stays below the consent-time cap and its recalculated exit profit stays above the frozen floor. If the boundary still does not reach rank one, or another increase would violate either bound, the order is cancelled and the item is dropped. Unknown screens, missing orders, duplicate matches, changed economics, stale data, disconnects, balance/slot failures, and server duplicate messages stop the queue and leave uncertain state locked for manual review. Mineflayer remains observation-only and never enters `Your Orders`, the creation wizard, or any transactional screen.
 
 ## Data still required for safe live acceptance
 
 - Fabric screen/widget identifiers for all five wizard screens; the live discovery established the visible contract but not stable internal widget IDs.
 - Behavior for invalid, fractional, suffix-formatted, minimum, maximum, and overflow amounts/prices.
 - Whether creation fees exist but are omitted from the review screen.
-- Exact server responses for insufficient funds, slot exhaustion, price changes, disconnects, and timeouts. Until fixtures exist, post-submit success is proven from an exact canonical match in `Your Orders` rather than chat text.
+- Exact server responses for insufficient funds, slot exhaustion, price changes, disconnects, and timeouts. Post-submit success is proven from exact personal and public-menu evidence rather than chat text.
+- The live cancellation confirmation layout still needs a deliberately low-value acceptance fixture. The management container title (`Orders -> Edit Order`) was captured without pressing its red cancellation control; changed confirmation layouts remain fail-closed.
 - Personal-order row schema, filled-item collection flow, cancellation/refund behavior, and expiry.
-- A low-value, explicitly armed end-to-end acceptance order followed by manual cancellation/refund verification before enabling normal-budget order creation.
+- A low-value, explicitly armed end-to-end rank/reprice acceptance order, including cancellation confirmation and scoreboard refund proof, before enabling replacement on normal-budget orders.
 
 ## Acceptance test sequence
 

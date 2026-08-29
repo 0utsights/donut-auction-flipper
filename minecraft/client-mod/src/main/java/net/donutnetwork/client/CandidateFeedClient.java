@@ -52,7 +52,7 @@ final class CandidateFeedClient implements AutoCloseable {
 
     record Candidate(String id, String route, String state, String reason, String signature, String itemId,
                      String itemName, int quantity, int maxStackSize, long acquisitionCost, long expectedProceeds,
-                     long orderUnitRewardCents, long targetListPrice,
+                     long observedOrderUnitRewardCents, long orderUnitRewardCents, long targetListPrice,
                      long conservativeProfit, int marginBps, int completionBps, int expectedCycleMinutes,
                      long riskAdjustedProfitDay, int executableBatches, int queuePosition, int orderSlots, int auctionSlots,
                      int inventorySlots, long profitInventorySlot, int confidenceBps, String orderTier,
@@ -72,6 +72,7 @@ final class CandidateFeedClient implements AutoCloseable {
     private final AtomicReference<String> balanceSource = new AtomicReference<>("saved fallback");
     private final AtomicLong pendingBalanceCeiling = new AtomicLong(Long.MAX_VALUE);
     private final AtomicLong pendingBalanceUntilMillis = new AtomicLong();
+    private final AtomicLong pendingRefundFloor = new AtomicLong(-1);
     private final AtomicLong usedSlots;
     private final Set<String> activeOrderItems = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean diagnostics;
@@ -107,7 +108,10 @@ final class CandidateFeedClient implements AutoCloseable {
     PortfolioAllocator.Allocation allocation() { return allocation.get(); }
     long balance() { return balance.get(); }
     String balanceSource() { return balanceSource.get(); }
-    boolean balanceUsableForOrders() { return !balanceSource.get().equals("saved fallback"); }
+    boolean balanceUsableForOrders() {
+        String source = balanceSource.get();
+        return !source.equals("saved fallback") && !source.equals("waiting for cancellation refund");
+    }
     int usedOrderSlots() { return unpackOrder(usedSlots.get()); }
     int usedAuctionSlots() { return unpackAuction(usedSlots.get()); }
     boolean diagnosticsEnabled() { return diagnostics.get(); }
@@ -137,6 +141,21 @@ final class CandidateFeedClient implements AutoCloseable {
         }
     }
 
+    void recordOrderCancelled(String itemId) {
+        if (itemId == null || !ITEM_ID.matcher(itemId).matches()) return;
+        activeOrderItems.remove(itemId);
+        usedSlots.updateAndGet(value -> packSlots(Math.max(activeOrderItems.size(), unpackOrder(value) - 1), unpackAuction(value)));
+        // Do not invent a refund amount. The scoreboard is authoritative and
+        // will restore the balance after Donut confirms the cancellation.
+        pendingBalanceCeiling.set(Long.MAX_VALUE);
+        pendingBalanceUntilMillis.set(0);
+        pendingRefundFloor.set(balance.get());
+        balanceSource.set("waiting for cancellation refund");
+        persistAndAllocate();
+        enqueueDiagnostic("order_workflow", "cancelled", 0, Map.of("item_id", itemId,
+                "route", "ORDER_TO_AUCTION", "reason_code", "verified_absent_after_cancel"));
+    }
+
     void recheckTrackedOrders() {
         // Clearing only re-admits candidates to the arm screen. Every arm still
         // opens the verified personal-order menu and blocks an exact item match
@@ -153,6 +172,7 @@ final class CandidateFeedClient implements AutoCloseable {
         balance.updateAndGet(value -> delta > 0 && value > Long.MAX_VALUE - delta ? Long.MAX_VALUE : Math.max(0, value + delta));
         pendingBalanceCeiling.set(Long.MAX_VALUE);
         pendingBalanceUntilMillis.set(0);
+        pendingRefundFloor.set(-1);
         balanceSource.set("manual");
         persistAndAllocate();
     }
@@ -218,6 +238,11 @@ final class CandidateFeedClient implements AutoCloseable {
                 pendingBalanceUntilMillis.set(0);
             }
         }
+        if (balanceSource.get().equals("waiting for cancellation refund")) {
+            long floor = pendingRefundFloor.get();
+            if (floor >= 0 && effective <= floor) return;
+            pendingRefundFloor.set(-1);
+        }
         long previous = balance.getAndSet(effective);
         String previousSource = balanceSource.getAndSet(effectiveSource);
         if (previous != effective || !previousSource.equals(effectiveSource)) persistAndAllocate();
@@ -239,6 +264,7 @@ final class CandidateFeedClient implements AutoCloseable {
         long afterEscrow = balance.updateAndGet(value -> Math.max(0, value - plan.escrowDollars()));
         pendingBalanceCeiling.set(afterEscrow);
         pendingBalanceUntilMillis.set(System.currentTimeMillis() + 10_000);
+        pendingRefundFloor.set(-1);
         usedSlots.updateAndGet(value -> packSlots(Math.min(20, unpackOrder(value) + 1), unpackAuction(value)));
         activeOrderItems.add(candidate.itemId());
         balanceSource.set("local pending order");
@@ -360,6 +386,7 @@ final class CandidateFeedClient implements AutoCloseable {
             int quantity = boundedInt(value, "quantity", 1, 64), maxStackSize = boundedInt(value, "max_stack_size", 1, 64);
             int orderSlots = boundedInt(value, "order_slots", 0, 20), auctionSlots = boundedInt(value, "auction_slots", 0, 18);
             long acquisitionCost = boundedLong(value, "acquisition_cost", 1, Long.MAX_VALUE);
+            long observedOrderUnitRewardCents = boundedLong(value, "observed_order_unit_reward_cents", 0, Long.MAX_VALUE);
             long orderUnitRewardCents = boundedLong(value, "order_unit_reward_cents", 0, Long.MAX_VALUE);
             if (quantity > maxStackSize) throw new IllegalArgumentException("candidate exit quantity exceeds its maximum stack size");
             if ((route.equals("ORDER_TO_AUCTION") && (orderSlots != 1 || auctionSlots != 1))
@@ -369,11 +396,15 @@ final class CandidateFeedClient implements AutoCloseable {
             if (route.equals("ORDER_TO_AUCTION") && acquisitionCost != orderEscrow(orderUnitRewardCents, quantity)) {
                 throw new IllegalArgumentException("candidate acquisition cost does not match its exact order quantity");
             }
+            if (route.equals("ORDER_TO_AUCTION") && (observedOrderUnitRewardCents <= 0
+                    || observedOrderUnitRewardCents >= orderUnitRewardCents)) {
+                throw new IllegalArgumentException("candidate order price bucket is invalid");
+            }
             result.add(new Candidate(required(value, "id", 128), route,
                     oneOf(value, "state", "READY", "RESEARCH", "CAPTURED", "HOLD", "STALE", "REJECTED"), optional(value, "reason", 200),
                     required(value, "signature", 2048), itemId, required(value, "item_name", 128), quantity,
                     maxStackSize, acquisitionCost,
-                    boundedLong(value, "expected_proceeds", 0, Long.MAX_VALUE), orderUnitRewardCents,
+                    boundedLong(value, "expected_proceeds", 0, Long.MAX_VALUE), observedOrderUnitRewardCents, orderUnitRewardCents,
                     boundedLong(value, "target_list_price", 0, Long.MAX_VALUE), boundedLong(value, "conservative_profit", Long.MIN_VALUE, Long.MAX_VALUE),
                     boundedInt(value, "margin_bps", 0, Integer.MAX_VALUE), boundedInt(value, "completion_bps", 0, 10_000),
                     boundedInt(value, "expected_cycle_minutes", 1, 1_000_000), boundedLong(value, "risk_adjusted_profit_day", 0, Long.MAX_VALUE),

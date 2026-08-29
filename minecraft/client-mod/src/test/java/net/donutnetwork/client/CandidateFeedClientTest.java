@@ -62,7 +62,7 @@ class CandidateFeedClientTest {
                   "id":"candidate_1","route":"ORDER_TO_AUCTION","state":"READY","reason":"",
                   "signature":"minecraft:diamond_block","item_id":"minecraft:diamond_block","item_name":"Diamond Block",
                   "quantity":64,"max_stack_size":64,"acquisition_cost":10000000,"expected_proceeds":20000000,
-                  "order_unit_reward_cents":15625000,"target_list_price":20512820,
+                  "observed_order_unit_reward_cents":15000000,"order_unit_reward_cents":15625000,"target_list_price":20512820,
                   "conservative_profit":8000000,"margin_bps":10000,"completion_bps":8000,"expected_cycle_minutes":30,
                   "risk_adjusted_profit_day":307200000,"executable_batches":2,"queue_position":1,"order_slots":1,"auction_slots":1,
                   "inventory_slots":1,"profit_per_inventory_slot":8000000,"confidence_bps":9000,"order_tier":"actionable",
@@ -77,7 +77,7 @@ class CandidateFeedClientTest {
                 {"version":1,"generated_at":"2026-08-23T20:00:00Z","candidates":[{
                   "id":"c","route":"ORDER_TO_AUCTION","state":"READY","reason":"","signature":"minecraft:diamond",
                   "item_id":"minecraft:diamond","item_name":"Diamond","quantity":1,"max_stack_size":64,
-                  "acquisition_cost":1,"expected_proceeds":2,"order_unit_reward_cents":1,"target_list_price":2,
+                  "acquisition_cost":2,"expected_proceeds":3,"observed_order_unit_reward_cents":100,"order_unit_reward_cents":101,"target_list_price":3,
                   "conservative_profit":1,"margin_bps":1,"completion_bps":1,
                   "expected_cycle_minutes":1,"risk_adjusted_profit_day":1,"executable_batches":1,"queue_position":1,"order_slots":1,
                   "auction_slots":1,"inventory_slots":1,"profit_per_inventory_slot":1,"confidence_bps":1,"order_tier":"actionable",
