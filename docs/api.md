@@ -87,7 +87,7 @@ Completes or rejects the current lease and may attach a sanitized schema diagnos
 
 These endpoints require the Fabric installation credential.
 
-- `GET /api/v1/supplies/shulker-boxes` — up to 20 fresh, price-sorted official-API listings for one plain generic empty shulker. Filled, named, modified, stale, and expired listings are omitted. This is only a supply quote; Fabric independently verifies the live market row before any purchase.
+- `GET /api/v1/supplies/shulker-boxes` — up to 20 fresh, price-sorted official-API listings for one plain generic empty shulker. A dedicated `shulker_box`/`lowest_price` query refreshes the snapshot every five seconds; the endpoint returns HTTP 503 when no successful snapshot exists or its age exceeds 20 seconds. Filled, named, modified, duplicate, and expired listings are omitted. This is only a supply quote; Fabric independently verifies the live market row before any purchase.
 
 ### `GET /api/v1/candidates`
 

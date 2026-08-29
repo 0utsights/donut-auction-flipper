@@ -53,6 +53,10 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	shulkerInterval, err := envDuration("DN_SHULKER_INTERVAL", 5*time.Second, 2*time.Second, 30*time.Second)
+	if err != nil {
+		return err
+	}
 	requestsPerMinute, err := envInt("DN_REQUESTS_PER_MINUTE", 225, 30, 245)
 	if err != nil {
 		return err
@@ -90,7 +94,8 @@ func run(logger *slog.Logger) error {
 	application, err := service.New(service.Config{
 		Address: address, ClientToken: clientToken, ObserverToken: observerToken, FabricToken: fabricToken,
 		DatabasePath: env("DN_DATABASE_FILE", "data/market.db"), AuctionFeeBPS: auctionFeeBPS, OrderFeeBPS: orderFeeBPS,
-		ListingPages: listingPages, CollectionPause: pause, FastInterval: fastInterval, OpportunityLimit: 100, Thresholds: thresholds,
+		ListingPages: listingPages, CollectionPause: pause, FastInterval: fastInterval, ShulkerInterval: shulkerInterval,
+		OpportunityLimit: 100, Thresholds: thresholds,
 	}, upstream, history, logger)
 	if err != nil {
 		return err

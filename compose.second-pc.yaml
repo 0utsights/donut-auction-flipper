@@ -9,6 +9,7 @@ services:
     environment:
       DN_ADDRESS: 127.0.0.1:8080
       DN_FAST_INTERVAL: ${SECOND_PC_FAST_INTERVAL:-500ms}
+      DN_SHULKER_INTERVAL: ${SECOND_PC_SHULKER_INTERVAL:-5s}
       DONUT_API_KEY: ${DONUT_API_KEY:?set DONUT_API_KEY in the second-PC .env file}
       DN_CLIENT_TOKEN: ""
       DN_OBSERVER_TOKEN: ""

@@ -83,6 +83,8 @@ The `/dn` screen is a compact blue/black order console: live balance, deployable
 
 `Exits` opens the durable position view. `Auto Exits` has separate session consent because it can collect inventory, purchase empty generic shulkers, place and pack them, confirm listings, and verify the result in `Your Items`. Positions occupying 27 or more physical inventory slots use exact 27-stack shulker packages; smaller positions retain the API-proven unchanged exit quantity. The live client rechecks generic empty-shulker contents and lowest price before purchase, applies a balance-scaled spend cap, and stops on any ambiguous item, quantity, modifier, screen, receipt, or price. Modified items remain manual. When no completed position is ready, the enabled session simply waits.
 
+Empty-box quotes use a separate backend search every five seconds rather than a cached broad-scan row. Both server and mod reject a quote older than 20 seconds. If the official API is unavailable, automatic exits wait; the age check is not relaxed.
+
 Orders created before alpha28 have only a duplicate-prevention lock, not frozen acquisition/exit economics, so they are shown as legacy locks and must be claimed/listed manually. The client deliberately does not invent a resale target while importing old state.
 
 Sanitized diagnostics are enabled by default and can be disabled in `/dn`. They contain only documented state, version, latency, route, decision, and error-code fields—never chat, usernames, credentials, server URLs, NBT, or inventories.
@@ -122,6 +124,7 @@ From the player PC, run `scripts/second-pc-tunnel.ps1`. The existing Fabric and 
 | `DN_ORDER_FEE_BPS` | `0` | Order exit fee assumption |
 | `DN_LISTING_PAGES` | `220` | Broad recent-auction pages |
 | `DN_FAST_INTERVAL` | `250ms` | Newest-page API lane interval |
+| `DN_SHULKER_INTERVAL` | `5s` | Targeted lowest-price empty-shulker refresh interval |
 
 All three tokens must be distinct when configured. The older `DN_MIN_*` settings apply only to the standalone API-auction feed. Combined candidates have no fixed dollar-profit floor; Fabric selects from the resource-constrained portfolio frontier.
 

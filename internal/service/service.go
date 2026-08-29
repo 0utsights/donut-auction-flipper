@@ -25,6 +25,8 @@ import (
 
 const auctionPageSize = 44
 
+const shulkerSupplyMaxAge = 20 * time.Second
+
 type Upstream interface {
 	AllTransactionPages(context.Context) ([]market.Transaction, error)
 	AuctionPage(context.Context, int, string, string) ([]market.Listing, error)
@@ -47,6 +49,7 @@ type Config struct {
 	ListingPages     int
 	CollectionPause  time.Duration
 	FastInterval     time.Duration
+	ShulkerInterval  time.Duration
 	OpportunityLimit int
 	Thresholds       market.Thresholds
 }
@@ -93,6 +96,11 @@ type ShulkerSupply struct {
 	Page      int       `json:"page,omitempty"`
 }
 
+type shulkerSupplySnapshot struct {
+	GeneratedAt time.Time       `json:"generated_at"`
+	Supplies    []ShulkerSupply `json:"supplies"`
+}
+
 type Status struct {
 	State               string         `json:"state"`
 	CycleStartedAt      time.Time      `json:"cycle_started_at,omitempty"`
@@ -130,6 +138,7 @@ type Server struct {
 	now          func() time.Time
 	current      atomic.Pointer[Snapshot]
 	engine       atomic.Pointer[market.Engine]
+	shulkers     atomic.Pointer[shulkerSupplySnapshot]
 	version      atomic.Uint64
 	cycleMu      sync.Mutex
 	publishMu    sync.Mutex
@@ -163,6 +172,9 @@ func New(cfg Config, upstream Upstream, history History, logger *slog.Logger) (*
 	}
 	if cfg.FastInterval <= 0 {
 		cfg.FastInterval = 250 * time.Millisecond
+	}
+	if cfg.ShulkerInterval <= 0 {
+		cfg.ShulkerInterval = 5 * time.Second
 	}
 	if cfg.OpportunityLimit <= 0 {
 		cfg.OpportunityLimit = 100
@@ -310,7 +322,72 @@ func (s *Server) fail(started time.Time, collectionErr error) error {
 func (s *Server) RunCollector(ctx context.Context) {
 	go s.runBroadCollector(ctx)
 	go s.runOrderMaintenance(ctx)
+	go s.runShulkerCollector(ctx)
 	s.runFastCollector(ctx)
+}
+
+func (s *Server) runShulkerCollector(ctx context.Context) {
+	for {
+		if err := s.CollectShulkerSuppliesOnce(ctx); err != nil && ctx.Err() == nil {
+			s.logger.Warn("empty-shulker supply refresh failed", "error", err)
+		}
+		timer := time.NewTimer(s.cfg.ShulkerInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+// CollectShulkerSuppliesOnce maintains a narrow, current supply book for the
+// Fabric exit workflow. It deliberately does not reuse broad-scan rows: those
+// can be hours old while a full 220-page scan shares the upstream rate limit.
+func (s *Server) CollectShulkerSuppliesOnce(ctx context.Context) error {
+	listings, err := s.upstream.AuctionPage(ctx, 1, "shulker_box", "lowest_price")
+	if err != nil {
+		return err
+	}
+	now := s.now()
+	supplies := make([]ShulkerSupply, 0, 20)
+	seen := make(map[string]struct{}, 20)
+	for _, listing := range listings {
+		if listing.Source != market.SourceDonutAPI || !plainEmptyShulker(listing.Item) ||
+			listing.TotalPrice <= 0 || !validMinecraftName(listing.SellerName) ||
+			(!listing.ExpiresAt.IsZero() && !listing.ExpiresAt.After(now)) {
+			continue
+		}
+		identity := listing.AuthoritativeID
+		if identity == "" {
+			identity = listing.Fingerprint
+		}
+		if identity == "" {
+			identity = fmt.Sprintf("%s:%d:%d", listing.SellerName, listing.TotalPrice, listing.ExpiresAt.Unix())
+		}
+		if _, exists := seen[identity]; exists {
+			continue
+		}
+		seen[identity] = struct{}{}
+		supplies = append(supplies, ShulkerSupply{AuctionID: listing.AuthoritativeID, Seller: listing.SellerName,
+			ItemID: listing.Item.ID, Price: listing.TotalPrice, LastSeen: now,
+			ExpiresAt: listing.ExpiresAt, Page: listing.Page})
+	}
+	sort.Slice(supplies, func(i, j int) bool {
+		if supplies[i].Price != supplies[j].Price {
+			return supplies[i].Price < supplies[j].Price
+		}
+		if supplies[i].Seller != supplies[j].Seller {
+			return supplies[i].Seller < supplies[j].Seller
+		}
+		return supplies[i].AuctionID < supplies[j].AuctionID
+	})
+	if len(supplies) > 20 {
+		supplies = supplies[:20]
+	}
+	copyOfSupplies := append([]ShulkerSupply(nil), supplies...)
+	s.shulkers.Store(&shulkerSupplySnapshot{GeneratedAt: now, Supplies: copyOfSupplies})
+	return nil
 }
 
 func (s *Server) runOrderMaintenance(ctx context.Context) {
@@ -536,26 +613,19 @@ func (s *Server) debugValuation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) shulkerSupplies(w http.ResponseWriter, _ *http.Request) {
-	engine := s.engine.Load()
-	if engine == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "no completed market scan"})
+	snapshot := s.shulkers.Load()
+	now := s.now()
+	if snapshot == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "empty-shulker supply has not been collected"})
 		return
 	}
-	supplies := make([]ShulkerSupply, 0, 20)
-	for _, listing := range engine.ActiveListings() {
-		if listing.Source != market.SourceDonutAPI || !plainEmptyShulker(listing.Item) ||
-			listing.TotalPrice <= 0 || listing.SellerName == "" {
-			continue
-		}
-		supplies = append(supplies, ShulkerSupply{AuctionID: listing.AuthoritativeID, Seller: listing.SellerName,
-			ItemID: listing.Item.ID, Price: listing.TotalPrice, LastSeen: listing.LastSeen,
-			ExpiresAt: listing.ExpiresAt, Page: listing.Page})
-		if len(supplies) == cap(supplies) {
-			break
-		}
+	age := now.Sub(snapshot.GeneratedAt)
+	if age < -5*time.Second || age > shulkerSupplyMaxAge {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "empty-shulker supply is stale"})
+		return
 	}
 	w.Header().Set("Cache-Control", "private, no-cache")
-	writeJSON(w, http.StatusOK, map[string]any{"generated_at": s.now(), "supplies": supplies})
+	writeJSON(w, http.StatusOK, snapshot)
 }
 
 func plainEmptyShulker(item market.Item) bool {
@@ -835,16 +905,23 @@ func itemSearchID(itemID, fallbackName string) string {
 
 func sellerSearchCommand(seller string) string {
 	seller = strings.TrimSpace(seller)
-	if len(seller) < 1 || len(seller) > 16 {
-		return ""
-	}
-	for _, character := range seller {
-		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || character == '_' {
-			continue
-		}
+	if !validMinecraftName(seller) {
 		return ""
 	}
 	return "/ah " + seller
+}
+
+func validMinecraftName(value string) bool {
+	if value != strings.TrimSpace(value) || len(value) < 1 || len(value) > 16 {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || character == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func topValuations(values map[string]market.Valuation, limit int) []market.Valuation {

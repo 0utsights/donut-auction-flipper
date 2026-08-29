@@ -18,12 +18,16 @@ import (
 )
 
 type fakeUpstream struct {
-	transactions []market.Transaction
-	listings     []market.Listing
-	err          error
-	pages        int
-	pageStarted  chan<- struct{}
-	pageRelease  <-chan struct{}
+	transactions   []market.Transaction
+	listings       []market.Listing
+	searchListings []market.Listing
+	err            error
+	pages          int
+	lastPage       int
+	lastSearch     string
+	lastSort       string
+	pageStarted    chan<- struct{}
+	pageRelease    <-chan struct{}
 }
 
 func (f *fakeUpstream) AllTransactionPages(context.Context) ([]market.Transaction, error) {
@@ -32,7 +36,7 @@ func (f *fakeUpstream) AllTransactionPages(context.Context) ([]market.Transactio
 	}
 	return f.transactions, nil
 }
-func (f *fakeUpstream) AuctionPage(context.Context, int, string, string) ([]market.Listing, error) {
+func (f *fakeUpstream) AuctionPage(_ context.Context, page int, search, sortOrder string) ([]market.Listing, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -43,6 +47,10 @@ func (f *fakeUpstream) AuctionPage(context.Context, int, string, string) ([]mark
 		<-f.pageRelease
 	}
 	f.pages++
+	f.lastPage, f.lastSearch, f.lastSort = page, search, sortOrder
+	if search != "" && f.searchListings != nil {
+		return f.searchListings, nil
+	}
 	return f.listings, nil
 }
 func (*fakeUpstream) Stats() donutapi.Stats { return donutapi.Stats{Requests: 2} }
@@ -127,29 +135,39 @@ func TestCollectBuildsAuthenticatedFlipFeed(t *testing.T) {
 
 func TestFabricShulkerSupplyExposesOnlyPlainEmptyListings(t *testing.T) {
 	now := time.Now().UTC()
-	server, err := New(Config{Address: "127.0.0.1:8080", FabricToken: "fabric-token-123456"}, &fakeUpstream{}, nil, nil)
+	upstream := &fakeUpstream{searchListings: []market.Listing{{Fingerprint: "plain", AuthoritativeID: "auction-plain", SellerName: "plain_seller",
+		Item: market.Item{ID: "minecraft:shulker_box", Quantity: 1, DisplayName: "Shulker Box"}, TotalPrice: 12_500,
+		LastSeen: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour), Source: market.SourceDonutAPI}, {Fingerprint: "cheaper", AuthoritativeID: "auction-cheaper", SellerName: "cheap_seller",
+		Item: market.Item{ID: "minecraft:shulker_box", Quantity: 1}, TotalPrice: 11_500,
+		LastSeen: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour), Source: market.SourceDonutAPI}, {Fingerprint: "duplicate", AuthoritativeID: "auction-cheaper", SellerName: "duplicate",
+		Item: market.Item{ID: "minecraft:shulker_box", Quantity: 1}, TotalPrice: 1,
+		LastSeen: now, ExpiresAt: now.Add(time.Hour), Source: market.SourceDonutAPI}, {Fingerprint: "filled", SellerName: "filled-seller",
+		Item:       market.Item{ID: "minecraft:shulker_box", Quantity: 1, Contents: []market.Item{{ID: "minecraft:diamond", Quantity: 64}}},
+		TotalPrice: 1, LastSeen: now, ExpiresAt: now.Add(time.Hour), Source: market.SourceDonutAPI}, {Fingerprint: "named", SellerName: "named-seller",
+		Item: market.Item{ID: "minecraft:shulker_box", Quantity: 1, DisplayName: "Mystery Box"}, TotalPrice: 2,
+		LastSeen: now, ExpiresAt: now.Add(time.Hour), Source: market.SourceDonutAPI}, {Fingerprint: "bad-seller", SellerName: "bad-seller",
+		Item: market.Item{ID: "minecraft:shulker_box", Quantity: 1}, TotalPrice: 4,
+		LastSeen: now, ExpiresAt: now.Add(time.Hour), Source: market.SourceDonutAPI}, {Fingerprint: "wrong-source", SellerName: "other-source",
+		Item: market.Item{ID: "minecraft:shulker_box", Quantity: 1, DisplayName: "Shulker Box"}, TotalPrice: 3,
+		LastSeen: now, ExpiresAt: now.Add(time.Hour)}}}
+	server, err := New(Config{Address: "127.0.0.1:8080", FabricToken: "fabric-token-123456"}, upstream, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = server.Close() })
 	server.now = func() time.Time { return now }
-	engine := market.NewEngine()
-	engine.Observe(market.Listing{Fingerprint: "plain", AuthoritativeID: "auction-plain", SellerName: "plain-seller",
-		Item: market.Item{ID: "minecraft:shulker_box", Quantity: 1, DisplayName: "Shulker Box"}, TotalPrice: 12_500,
-		LastSeen: now, ExpiresAt: now.Add(time.Hour), Source: market.SourceDonutAPI})
-	engine.Observe(market.Listing{Fingerprint: "filled", SellerName: "filled-seller",
-		Item:       market.Item{ID: "minecraft:shulker_box", Quantity: 1, Contents: []market.Item{{ID: "minecraft:diamond", Quantity: 64}}},
-		TotalPrice: 1, LastSeen: now, ExpiresAt: now.Add(time.Hour), Source: market.SourceDonutAPI})
-	engine.Observe(market.Listing{Fingerprint: "named", SellerName: "named-seller",
-		Item: market.Item{ID: "minecraft:shulker_box", Quantity: 1, DisplayName: "Mystery Box"}, TotalPrice: 2,
-		LastSeen: now, ExpiresAt: now.Add(time.Hour), Source: market.SourceDonutAPI})
-	engine.Observe(market.Listing{Fingerprint: "wrong-source", SellerName: "other-source",
-		Item: market.Item{ID: "minecraft:shulker_box", Quantity: 1, DisplayName: "Shulker Box"}, TotalPrice: 3,
-		LastSeen: now, ExpiresAt: now.Add(time.Hour)})
-	server.engine.Store(engine)
 	unauthorized := requestJSON(server, http.MethodGet, "/api/v1/supplies/shulker-boxes", "", "")
 	if unauthorized.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthorized supply code=%d body=%s", unauthorized.Code, unauthorized.Body.String())
+	}
+	if response := requestJSON(server, http.MethodGet, "/api/v1/supplies/shulker-boxes", "fabric-token-123456", ""); response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("uncollected supply code=%d body=%s", response.Code, response.Body.String())
+	}
+	if err := server.CollectShulkerSuppliesOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if upstream.lastPage != 1 || upstream.lastSearch != "shulker_box" || upstream.lastSort != "lowest_price" {
+		t.Fatalf("wrong targeted query: page=%d search=%q sort=%q", upstream.lastPage, upstream.lastSearch, upstream.lastSort)
 	}
 
 	response := requestJSON(server, http.MethodGet, "/api/v1/supplies/shulker-boxes", "fabric-token-123456", "")
@@ -159,11 +177,18 @@ func TestFabricShulkerSupplyExposesOnlyPlainEmptyListings(t *testing.T) {
 	var payload struct {
 		Supplies []ShulkerSupply `json:"supplies"`
 	}
-	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil || len(payload.Supplies) != 1 {
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil || len(payload.Supplies) != 2 {
 		t.Fatalf("bad supply payload: %s error=%v", response.Body.String(), err)
 	}
-	if payload.Supplies[0].AuctionID != "auction-plain" || payload.Supplies[0].Price != 12_500 {
+	if payload.Supplies[0].AuctionID != "auction-cheaper" || payload.Supplies[0].Price != 11_500 ||
+		payload.Supplies[1].AuctionID != "auction-plain" || payload.Supplies[1].Price != 12_500 ||
+		!payload.Supplies[0].LastSeen.Equal(now) {
 		t.Fatalf("wrong supply: %+v", payload.Supplies[0])
+	}
+	server.now = func() time.Time { return now.Add(shulkerSupplyMaxAge + time.Second) }
+	response = requestJSON(server, http.MethodGet, "/api/v1/supplies/shulker-boxes", "fabric-token-123456", "")
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "stale") {
+		t.Fatalf("stale supply code=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
