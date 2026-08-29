@@ -10,7 +10,7 @@ record LocalOrderPosition(String candidateId, String signature, String itemId, S
                           long expectedProceedsPerBatch, int deliveredQuantity, int claimedQuantity,
                           int packagedQuantity, int listedQuantity, State state,
                           Instant createdAt, Instant updatedAt) {
-    enum State { PENDING_VERIFICATION, ACTIVE, CLAIM_READY, CLAIM_PENDING, CLAIMING, CLAIMED,
+    enum State { PENDING_VERIFICATION, ACTIVE, CLAIM_READY, SUPPLY_PENDING, CLAIM_PENDING, CLAIMING, CLAIMED,
         PACKAGE_PENDING, PACKAGING, LISTING_PENDING, LISTING, EXITED, HOLD }
 
     LocalOrderPosition {

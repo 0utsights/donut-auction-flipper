@@ -20,6 +20,14 @@ class OrderPositionStoreTest {
         assertEquals(position, store.load().get(position.itemId()));
     }
 
+	@Test void preservesAnInterruptedShulkerPurchaseMarkerAcrossRestart() {
+		OrderPositionStore store = new OrderPositionStore(directory.resolve("positions.json"));
+		LocalOrderPosition pending = position("minecraft:diamond_block")
+				.withState(LocalOrderPosition.State.SUPPLY_PENDING, Instant.parse("2026-08-29T12:00:01Z"));
+		assertTrue(store.save(List.of(pending)));
+		assertEquals(LocalOrderPosition.State.SUPPLY_PENDING, store.load().get(pending.itemId()).state());
+	}
+
     @Test void rejectsDuplicateItemsOnLoadInsteadOfChoosingOne() throws Exception {
         OrderPositionStore store = new OrderPositionStore(directory.resolve("positions.json"));
         store.save(List.of(position("minecraft:diamond_block")));

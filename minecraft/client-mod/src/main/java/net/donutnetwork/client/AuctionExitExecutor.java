@@ -106,6 +106,7 @@ final class AuctionExitExecutor {
     private long shulkerSpendThisWorkflow;
     private int filledShulkerCountBefore;
     private StackAssembler assembler;
+	private LocalOrderPosition.State stateBeforeSupplyPurchase;
 
     AuctionExitExecutor(CandidateFeedClient feed) { this.feed = feed; }
 
@@ -270,7 +271,8 @@ final class AuctionExitExecutor {
         if (!vanillaSignature(position)) {
             throw new IllegalStateException("automatic exits currently require a vanilla item signature; modifiers need manual review");
         }
-        if ((position.state() == LocalOrderPosition.State.CLAIM_PENDING && position.claimedQuantity() < desiredClaimCumulative)
+		if (position.state() == LocalOrderPosition.State.SUPPLY_PENDING
+				|| (position.state() == LocalOrderPosition.State.CLAIM_PENDING && position.claimedQuantity() < desiredClaimCumulative)
                 || (position.state() == LocalOrderPosition.State.PACKAGE_PENDING && position.packagedQuantity() < desiredPackageCumulative)
                 || (position.state() == LocalOrderPosition.State.LISTING_PENDING && position.listedQuantity() < desiredListingCumulative)) {
             throw new IllegalStateException("an irreversible action was interrupted before its receipt; reconcile this position manually");
@@ -360,6 +362,9 @@ final class AuctionExitExecutor {
         }
         if (selectedSupplySlot < 0) throw new IllegalStateException("no exact empty shulker row was available on Lowest Price page 1");
         shulkerCountBefore = countEmptyShulkers(client.player.getInventory());
+		stateBeforeSupplyPurchase = position.state();
+		feed.recordExitState(position.itemId(), LocalOrderPosition.State.SUPPLY_PENDING);
+		position = feed.orderPosition(position.itemId()).orElseThrow();
         confirmationSent = false;
         clickSlot(client, selectedSupplySlot, 0, SlotActionType.PICKUP);
         transition(Phase.BUY_CONFIRM, "confirming one exact empty shulker at $" + selectedSupplyPrice);
@@ -388,7 +393,13 @@ final class AuctionExitExecutor {
 
     private void buyVerify(MinecraftClient client) {
         if (countEmptyShulkers(client.player.getInventory()) != shulkerCountBefore + 1) return;
+		if (stateBeforeSupplyPurchase == null || position.state() != LocalOrderPosition.State.SUPPLY_PENDING) {
+			throw new IllegalStateException("empty-shulker receipt has no durable purchase marker");
+		}
         shulkerSpendThisWorkflow = Math.addExact(shulkerSpendThisWorkflow, selectedSupplyPrice);
+		feed.recordExitState(position.itemId(), stateBeforeSupplyPurchase);
+		position = feed.orderPosition(position.itemId()).orElseThrow();
+		stateBeforeSupplyPurchase = null;
         closeScreen(client);
         transition(Phase.PREFLIGHT, "empty shulker received; rechecking the exact exit batch");
         delay();
@@ -775,6 +786,7 @@ final class AuctionExitExecutor {
         selectedHotbarBefore = -1; loadedInOpenShulker = 0; desiredClaimCumulative = 0;
         desiredPackageCumulative = 0; desiredListingCumulative = 0; shulkerSpendThisWorkflow = 0;
         filledShulkerCountBefore = 0;
+		stateBeforeSupplyPurchase = null;
     }
 
     private String serverError(MinecraftClient client) {

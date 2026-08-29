@@ -166,7 +166,8 @@ final class CandidateFeedClient implements AutoCloseable {
 
     int exitReadyCount() {
         return (int) orderPositions.values().stream().filter(position -> position.state() == LocalOrderPosition.State.CLAIM_READY
-                || position.state() == LocalOrderPosition.State.CLAIM_PENDING || position.state() == LocalOrderPosition.State.CLAIMING
+				|| position.state() == LocalOrderPosition.State.SUPPLY_PENDING
+				|| position.state() == LocalOrderPosition.State.CLAIM_PENDING || position.state() == LocalOrderPosition.State.CLAIMING
                 || position.state() == LocalOrderPosition.State.CLAIMED || position.state() == LocalOrderPosition.State.PACKAGE_PENDING
                 || position.state() == LocalOrderPosition.State.PACKAGING || position.state() == LocalOrderPosition.State.LISTING_PENDING
                 || position.state() == LocalOrderPosition.State.LISTING).count();
