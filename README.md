@@ -61,7 +61,7 @@ Requirements: Minecraft 1.21.11, Java 21, Fabric Loader 0.19.2+, and Fabric API.
 gradle -p minecraft/client-mod clean test build
 ```
 
-Copy the remapped JAR from `minecraft/client-mod/build/libs/` to the instance's `mods` directory. The verified build is checked in at `outputs/donut-market-flips-2.1.0-alpha.30.jar`. Press `N` or run `/dn`.
+Copy the remapped JAR from `minecraft/client-mod/build/libs/` to the instance's `mods` directory. The verified build is checked in at `outputs/donut-market-flips-2.1.0-alpha.31.jar`. Press `N` or run `/dn`.
 
 The generated `config/donut-network.properties` contains:
 
@@ -74,7 +74,7 @@ balance=0
 used_order_slots=0
 used_auction_slots=0
 diagnostics=true
-order_server_hosts=play.donutsmp.net,donutsmp.net
+order_server_hosts=play.donutsmp.net,donutsmp.net,java.donutsmp.net
 ```
 
 Balance, used slots, reserve, and the final portfolio stay local. Once per second Fabric follows the same team-colored sidebar objective as Minecraft's HUD and reads Donut's visible balance, including compact values such as `$119M` and `$2.5M`; clearly labeled balance chat remains a fallback, and the screen provides a manual adjustment when no sidebar is available. The backend never applies a reference balance or returns a balance-sized portfolio. Position/outcome inference remains disabled in shadow mode until sanitized real transaction-message fixtures exist—the mod does not guess that opening a menu means a trade occurred. The mod applies a dynamic 15–35% reserve, fills as many distinct profitable offer slots as the local balance permits (up to 20), then sizes each order within measured volume and a 25% per-item exposure cap. A large order exits through sequential exact-stack listings of at most 64 units that reuse the 18 auction slots; future exit batches do not falsely consume simultaneous slots during acquisition planning.

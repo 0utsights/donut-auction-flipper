@@ -12,6 +12,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class OrderCreationExecutorTest {
+	@Test void defaultAllowlistIncludesDonutsCurrentSrvTarget() {
+		assertTrue(Set.of(ClientConfig.DEFAULT_ORDER_SERVER_HOSTS.split(",")).contains("java.donutsmp.net"));
+	}
+
     @Test void recognizesDirectServerDuplicateResponses() {
         assertTrue(OrderCreationExecutor.isDuplicateOrderMessage("You already have an active order for this item."));
         assertTrue(OrderCreationExecutor.isDuplicateOrderMessage("Only create one order per item"));

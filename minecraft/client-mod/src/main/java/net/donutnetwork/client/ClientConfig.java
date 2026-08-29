@@ -22,6 +22,7 @@ import java.util.UUID;
 final class ClientConfig {
     private static final Logger LOGGER = LoggerFactory.getLogger("donut-network-client");
     private static final Path PATH = FabricLoader.getInstance().getConfigDir().resolve("donut-network.properties");
+	static final String DEFAULT_ORDER_SERVER_HOSTS = "play.donutsmp.net,donutsmp.net,java.donutsmp.net";
 
     record Settings(URI backend, String token, Duration pollInterval, boolean chatAlerts,
                     long balance, int usedOrderSlots, int usedAuctionSlots, boolean diagnostics, String installId,
@@ -61,7 +62,7 @@ final class ClientConfig {
             throw new IllegalArgumentException("client_token must be 16-512 printable ASCII characters without spaces");
         }
         long balance = boundedLong(properties, "balance", 0, 0, Long.MAX_VALUE);
-        Set<String> orderServerHosts = Arrays.stream(properties.getProperty("order_server_hosts", "play.donutsmp.net,donutsmp.net").split(","))
+        Set<String> orderServerHosts = Arrays.stream(properties.getProperty("order_server_hosts", DEFAULT_ORDER_SERVER_HOSTS).split(","))
                 .map(value -> value.strip().toLowerCase(Locale.ROOT)).filter(value -> value.matches("[a-z0-9.-]{1,253}"))
                 .collect(Collectors.toUnmodifiableSet());
         if (orderServerHosts.isEmpty()) throw new IllegalArgumentException("order_server_hosts must contain at least one hostname");
@@ -127,7 +128,7 @@ final class ClientConfig {
 		properties.setProperty("used_auction_slots", "0");
 		properties.setProperty("diagnostics", "true");
 		properties.setProperty("install_id", "");
-		properties.setProperty("order_server_hosts", "play.donutsmp.net,donutsmp.net");
+		properties.setProperty("order_server_hosts", DEFAULT_ORDER_SERVER_HOSTS);
 		properties.setProperty("active_order_items", "");
 		properties.setProperty("market_probe", "false");
         return properties;
