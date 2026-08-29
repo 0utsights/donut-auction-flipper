@@ -23,7 +23,6 @@ import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Item;
 import net.minecraft.registry.Registries;
-import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.screen.GenericContainerScreenHandler;
 import net.minecraft.screen.ScreenHandler;
 import net.minecraft.screen.ShulkerBoxScreenHandler;
@@ -326,6 +325,10 @@ final class AuctionExitExecutor {
     private void buySelect(MinecraftClient client) {
         Screen screen = client.currentScreen;
         if (!(screen instanceof GenericContainerScreen) || !AUCTION_TITLE.matcher(title(screen)).matches()) return;
+		if (Duration.between(feed.shulkerSupplySuccess(), Instant.now()).compareTo(SUPPLY_MAX_AGE) > 0
+				|| feed.shulkerSupplies().isEmpty()) {
+			throw new IllegalStateException("empty-shulker supply quote expired before purchase selection");
+		}
         GenericContainerScreenHandler handler = genericHandler(client);
         ItemStack filter = handler.getSlot(47).getStack();
         if (!label(filter).equals("filter") || !normalizedText(filter).contains("lowest price")) {
@@ -343,11 +346,11 @@ final class AuctionExitExecutor {
             ItemStack row = handler.getSlot(slot).getStack();
             Optional<Long> price = safeEmptyShulkerAuctionRow(row);
             if (price.isEmpty()) continue;
-            if (price.get() > perBoxCap || Math.multiplyExact(price.get(), Math.max(1, missing)) > aggregateCap) {
+			long projectedSpend = Math.addExact(shulkerSpendThisWorkflow,
+					Math.multiplyExact(price.get(), Math.max(1, missing)));
+			if (price.get() > perBoxCap || projectedSpend > aggregateCap) {
                 throw new IllegalStateException("empty-shulker supply exceeds the balance-scaled safety cap");
             }
-            long projectedSpend = Math.addExact(shulkerSpendThisWorkflow,
-                    Math.multiplyExact(price.get(), Math.max(1, missing)));
             if (projectedSpend >= conservativeProfitAfterUndercuts()) {
                 throw new IllegalStateException("empty-shulker cost would consume the remaining conservative profit");
             }
@@ -717,7 +720,7 @@ final class AuctionExitExecutor {
     }
 
     private boolean listingMarketStackMatches(ItemStack stack) {
-        return listing.shulker() ? filledShulkerMatches(stack, position.itemId(), listing.itemQuantity())
+		return listing.shulker() ? filledShulkerMarketMatches(stack, position.itemId(), listing.itemQuantity())
                 : itemMatches(stack, position.itemId()) && stack.getCount() == listing.itemQuantity();
     }
 
@@ -869,7 +872,7 @@ final class AuctionExitExecutor {
         LoreComponent lore = stack.get(DataComponentTypes.LORE);
         if (lore != null && !lore.lines().isEmpty()) return false;
         ContainerComponent contents = stack.get(DataComponentTypes.CONTAINER);
-        return contents == null || contents.streamNonEmpty().findAny().isEmpty();
+		return (contents == null || contents.streamNonEmpty().findAny().isEmpty()) && onlyContainerComponentChange(stack);
     }
 
     private static int findFilledShulker(PlayerInventory inventory, String itemId, int quantity) {
@@ -886,7 +889,18 @@ final class AuctionExitExecutor {
     }
 
     private static boolean filledShulkerMatches(ItemStack stack, String itemId, int quantity) {
-        if (stack == null || stack.isEmpty() || !stack.isIn(ItemTags.SHULKER_BOXES) || stack.getCount() != 1) return false;
+		if (!filledShulkerMarketMatches(stack, itemId, quantity)
+				|| !Registries.ITEM.getId(stack.getItem()).toString().equals("minecraft:shulker_box")
+				|| stack.get(DataComponentTypes.CUSTOM_NAME) != null
+				|| stack.get(DataComponentTypes.CUSTOM_DATA) != null) return false;
+		LoreComponent lore = stack.get(DataComponentTypes.LORE);
+		return (lore == null || lore.lines().isEmpty()) && onlyContainerComponentChange(stack);
+	}
+
+	private static boolean filledShulkerMarketMatches(ItemStack stack, String itemId, int quantity) {
+		if (stack == null || stack.isEmpty()
+				|| !Registries.ITEM.getId(stack.getItem()).toString().equals("minecraft:shulker_box")
+				|| stack.getCount() != 1) return false;
         ContainerComponent contents = stack.get(DataComponentTypes.CONTAINER);
         if (contents == null) return false;
         int total = 0;
@@ -896,6 +910,11 @@ final class AuctionExitExecutor {
         }
         return total == quantity;
     }
+
+	private static boolean onlyContainerComponentChange(ItemStack stack) {
+		return stack.getComponentChanges().entrySet().stream()
+				.allMatch(entry -> entry.getKey() == DataComponentTypes.CONTAINER);
+	}
 
     private static int countOpenShulkerItem(MinecraftClient client, String itemId) {
         if (!(client.player.currentScreenHandler instanceof ShulkerBoxScreenHandler handler)) return 0;
