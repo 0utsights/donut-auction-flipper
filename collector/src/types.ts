@@ -1,5 +1,5 @@
 export const SCHEMA_VERSION = 'orders-v1'
-export const PARSER_VERSION = 'mineflayer-orders-1.8.0'
+export const PARSER_VERSION = 'mineflayer-orders-1.9.0'
 
 export interface AccountConfig {
   id: string
@@ -42,6 +42,7 @@ export interface ParsedOrder {
   quantity: number
   max_stack_size: number
   unit_reward_cents: number
+  competitive_unit_reward_cents: number
   requested_quantity: number
   remaining_quantity: number
   owner?: string

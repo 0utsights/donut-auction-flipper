@@ -298,7 +298,7 @@ func bestExitValuation(engine *market.Engine, evidence Evidence, cfg Config, now
 		}
 		gross := mulMoney(quickUnit, int64(quantity))
 		net := applyFee(gross, cfg.AuctionFeeBPS)
-		cost := centsForQuantity(effectiveOrderUnitReward(evidence, now)+1, int64(quantity), true)
+		cost := centsForQuantity(effectiveCompetitiveOrderUnitReward(evidence, now), int64(quantity), true)
 		profit := net - cost
 		// Confidence is useful when comparing two profitable batch quantities. For
 		// losing quantities retain the signed profit so the least-bad row remains
@@ -493,6 +493,7 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 			continue
 		}
 		orderUnitRewardCents := effectiveOrderUnitReward(evidence, now)
+		competitiveUnitCents := effectiveCompetitiveOrderUnitReward(evidence, now)
 		completion := completionBPS(evidence, valuation)
 		fresh := now.Sub(evidence.LastSeenAt) <= orderObservationWindow
 		marketReason := marketHoldReason(valuation, now, false)
@@ -508,6 +509,12 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 			valuation.Volume24h >= minimumFillerAuctionVolume && valuation.PriceSellerCount >= minimumFillerAuctionSellers &&
 			valuation.ConfidenceBPS >= minimumFillerExitConfidenceBPS && fillerMarketReason == ""
 		state, reason := strings.ToUpper(evidence.Tier), evidence.Reason
+		// Evidence maturity and candidate executability are different state
+		// machines. An actionable order profile still remains RESEARCH until its
+		// exact auction exit passes the current liquidity and risk gates.
+		if state == "ACTIONABLE" {
+			state = "RESEARCH"
+		}
 		if ready {
 			state, reason = "READY", ""
 		}
@@ -556,9 +563,10 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 			}
 		}
 
-		// Donut rewards are cent-precise. Beat the current best buy order by the
-		// smallest representable amount instead of scaling the increment with price.
-		competitiveUnitCents := orderUnitRewardCents + 1
+		// The menu abbreviates high prices, so the collector supplies the next
+		// visible bucket boundary. This is the lowest bid guaranteed to exceed any
+		// hidden value that could render as the observed token if Donut truncates.
+		// Candidate economics are computed from this actual proposed bid.
 		orderCost := centsForQuantity(competitiveUnitCents, int64(quantity), true)
 		auctionGross := mulMoney(quickUnit, int64(quantity))
 		auctionNet := applyFee(auctionGross, cfg.AuctionFeeBPS)
@@ -571,7 +579,7 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 		result = append(result, candidate(Candidate{
 			ID: candidateID("order_to_auction", evidence.Signature, quantity), Route: "ORDER_TO_AUCTION", State: orderState, Reason: orderReason,
 			Signature: evidence.Signature, ItemID: evidence.ItemID, ItemName: displayName(evidence), Quantity: quantity, MaxStackSize: maxStack,
-			AcquisitionCost: orderCost, ExpectedProceeds: auctionNet, OrderUnitRewardCents: competitiveUnitCents, TargetListPrice: listGross,
+			AcquisitionCost: orderCost, ExpectedProceeds: auctionNet, ObservedOrderUnitRewardCents: orderUnitRewardCents, OrderUnitRewardCents: competitiveUnitCents, TargetListPrice: listGross,
 			CompletionBPS: completion, ExpectedCycleMinutes: cycle,
 			ExecutableBatches: executable, ResearchBatches: researchBatches, QueuePosition: 1, OrderSlots: 1, AuctionSlots: 1, InventorySlots: inventorySlots,
 			ConfidenceBPS: valuation.ConfidenceBPS, OrderTier: evidence.Tier, SignatureComplete: evidence.SignatureComplete, ResearchFreshAt: evidence.LastSeenAt, OrderFreshAt: evidence.FocusedSeenAt, FocusedFreshAt: evidence.FocusedSeenAt, AuctionFreshAt: valuation.GeneratedAt,
@@ -600,7 +608,7 @@ func buildCandidates(allEvidence []Evidence, valuations map[string]market.Valuat
 			result = append(result, candidate(Candidate{
 				ID: candidateID("auction_to_order", evidence.Signature, quantity), Route: "AUCTION_TO_ORDER", State: immediateState, Reason: immediateReason,
 				Signature: evidence.Signature, ItemID: evidence.ItemID, ItemName: displayName(evidence), Quantity: quantity, MaxStackSize: maxStack,
-				AcquisitionCost: auctionCost, ExpectedProceeds: orderNet, OrderUnitRewardCents: orderUnitRewardCents,
+				AcquisitionCost: auctionCost, ExpectedProceeds: orderNet, ObservedOrderUnitRewardCents: orderUnitRewardCents, OrderUnitRewardCents: orderUnitRewardCents,
 				CompletionBPS: completion, ExpectedCycleMinutes: 2,
 				ExecutableBatches: immediateExecutable, ResearchBatches: immediateExecutable, QueuePosition: 0, OrderSlots: 0, AuctionSlots: 0, InventorySlots: inventorySlots,
 				ConfidenceBPS: valuation.ConfidenceBPS, OrderTier: evidence.Tier, SignatureComplete: evidence.SignatureComplete, ResearchFreshAt: evidence.LastSeenAt, OrderFreshAt: evidence.FocusedSeenAt, FocusedFreshAt: evidence.FocusedSeenAt, AuctionFreshAt: valuation.GeneratedAt,
@@ -664,6 +672,24 @@ func effectiveOrderUnitReward(evidence Evidence, now time.Time) int64 {
 		return evidence.FocusedUnitRewardCents
 	}
 	return evidence.BestUnitRewardCents
+}
+
+func effectiveCompetitiveOrderUnitReward(evidence Evidence, now time.Time) int64 {
+	focused := evidence.FocusedUnitRewardCents > 0 && !evidence.FocusedSeenAt.IsZero() &&
+		!evidence.FocusedSeenAt.After(now) && now.Sub(evidence.FocusedSeenAt) <= 30*time.Second
+	if focused {
+		if evidence.FocusedCompetitiveUnitRewardCents > evidence.FocusedUnitRewardCents {
+			return evidence.FocusedCompetitiveUnitRewardCents
+		}
+		return evidence.FocusedUnitRewardCents + 1
+	}
+	if evidence.BestCompetitiveUnitRewardCents > evidence.BestUnitRewardCents {
+		return evidence.BestCompetitiveUnitRewardCents
+	}
+	// This compatibility path is only reachable by directly constructed test
+	// evidence. Stored observations without a collector-supplied bucket bound are
+	// excluded by Store.enrichEvidence and cannot produce live candidates.
+	return evidence.BestUnitRewardCents + 1
 }
 
 func candidate(value Candidate) Candidate {

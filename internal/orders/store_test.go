@@ -537,6 +537,34 @@ func TestLegacyDollarRewardsAreQuarantinedFromCentEvidence(t *testing.T) {
 	}
 }
 
+func TestObservationWithoutCompetitiveBucketIsDiagnosticOnly(t *testing.T) {
+	system, err := NewSystem(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	ctx := context.Background()
+	if _, err = system.Register(ctx, ObserverRegistration{ObserverID: "current", ParserVersion: "p1", ProxyLabel: "proxy"}); err != nil {
+		t.Fatal(err)
+	}
+	value := order("unsafe", 100)
+	value.CompetitiveUnitRewardCents = value.UnitRewardCents
+	if _, err = system.SaveScan(ctx, scan("current", "", "missing-boundary", 1, time.Now().UTC(), value)); err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := system.store.Evidence(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evidence) != 0 {
+		t.Fatalf("boundary-less observation entered economics: %+v", evidence)
+	}
+	var rawRows int
+	if err = system.store.db.QueryRow(`SELECT COUNT(*) FROM order_rows WHERE order_key='unsafe'`).Scan(&rawRows); err != nil || rawRows != 1 {
+		t.Fatalf("diagnostic raw row missing: count=%d err=%v", rawRows, err)
+	}
+}
+
 func TestDiscoveryTaskCadenceAndSchemaHold(t *testing.T) {
 	system, err := NewSystem(Config{})
 	if err != nil {
@@ -833,6 +861,7 @@ func TestCurrentPriceAndQueueDoNotUseHistoricalBest(t *testing.T) {
 	_, _ = system.Register(ctx, ObserverRegistration{ObserverID: "one", ParserVersion: "p1", ProxyLabel: "proxy"})
 	historical := order("same", 100)
 	historical.UnitRewardCents = 10_000
+	historical.CompetitiveUnitRewardCents = 10_001
 	historical.PricePosition = 1
 	if _, err := system.SaveScan(ctx, scan("one", "", "old", 1, now.Add(-9*time.Minute), historical)); err != nil {
 		t.Fatal(err)
@@ -840,6 +869,7 @@ func TestCurrentPriceAndQueueDoNotUseHistoricalBest(t *testing.T) {
 	for index, age := range []time.Duration{90 * time.Second, 45 * time.Second, 0} {
 		current := order("same", 100)
 		current.UnitRewardCents = 100
+		current.CompetitiveUnitRewardCents = 101
 		current.PricePosition = 3
 		if _, err := system.SaveScan(ctx, scan("one", "", fmt.Sprintf("current-%d", index), index+2, now.Add(-age), current)); err != nil {
 			t.Fatal(err)
@@ -867,6 +897,7 @@ func TestPriceStabilityUsesTopOfBookPerSessionNotPaginationDepth(t *testing.T) {
 		for page, reward := range []int64{100, 90, 80} {
 			value := order(fmt.Sprintf("order-%d-%d", pass, page), 100)
 			value.UnitRewardCents = reward
+			value.CompetitiveUnitRewardCents = reward + 1
 			batch := scan("one", "", fmt.Sprintf("session-%d", pass), page+1, base.Add(time.Duration(pass*15)*time.Second), value)
 			batch.ContentHash = fmt.Sprintf("%064x", 1_000+pass*10+page)
 			if _, err := system.SaveScan(ctx, batch); err != nil {
@@ -902,6 +933,7 @@ func TestFocusedSampleTracksLatestPriceInsteadOfSessionMaximum(t *testing.T) {
 	for index, reward := range []int64{100, 80} {
 		value := order("same", 100)
 		value.UnitRewardCents = reward
+		value.CompetitiveUnitRewardCents = reward + 1
 		batch := scan("one", task.ID, "one-focused-session", 1, now.Add(time.Duration(index)*time.Second), value)
 		batch.LeaseToken = task.LeaseToken
 		batch.ContentHash = fmt.Sprintf("%064x", 9_000+index)
@@ -1265,6 +1297,21 @@ func TestCandidateAdmitsThinProfitableMarketAsOneStackFiller(t *testing.T) {
 	}
 }
 
+func TestActionableEvidenceWithoutAuctionQualificationRemainsResearch(t *testing.T) {
+	now := time.Now().UTC()
+	evidence := Evidence{Signature: "minecraft:sponge", ItemID: "minecraft:sponge", DisplayName: "Sponge",
+		Tier: "actionable", CompleteScans: 10, FillEvents: 5, DistinctOrders: 3, FilledUnits24h: 64,
+		BestUnitRewardCents: 10_000, ObservedQuantity: 1, MaxStackSize: 64, LastSeenAt: now,
+		Stable: true, SignatureComplete: true}
+	valuation := market.Valuation{Signature: evidence.Signature, PricingQuantity: 1, QuickSellValue: 200,
+		Volume24h: 2, PriceSellerCount: 1, ConfidenceBPS: 9_000, ExpectedSellMinutes: 30, GeneratedAt: now}
+
+	values := buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now)
+	if len(values) != 1 || values[0].State != "RESEARCH" {
+		t.Fatalf("non-qualified actionable evidence leaked into candidate state: %+v", values)
+	}
+}
+
 func TestCandidateUsesCurrentFocusedRewardForExecutionEconomics(t *testing.T) {
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 	evidence := Evidence{Signature: "minecraft:diamond_block", ItemID: "minecraft:diamond_block", DisplayName: "Diamond Block",
@@ -1281,6 +1328,36 @@ func TestCandidateUsesCurrentFocusedRewardForExecutionEconomics(t *testing.T) {
 	for _, value := range values {
 		if value.OrderUnitRewardCents != 350_000+map[bool]int64{true: 1, false: 0}[value.Route == "ORDER_TO_AUCTION"] {
 			t.Fatalf("route retained stale discovery reward: %+v", value)
+		}
+	}
+}
+
+func TestCandidateCrossesAbbreviatedPriceBucketAndRepricesEconomics(t *testing.T) {
+	now := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	evidence := Evidence{Signature: "minecraft:netherite_scrap", ItemID: "minecraft:netherite_scrap", DisplayName: "Netherite Scrap",
+		Tier: "actionable", CompleteScans: 10, FillEvents: 8, DistinctOrders: 3, FilledUnits24h: 20, AvailableUnits: 20,
+		BestUnitRewardCents: 130_000_000, BestCompetitiveUnitRewardCents: 140_000_000,
+		ObservedQuantity: 1, MaxStackSize: 64, LastSeenAt: now, Stable: true, SignatureComplete: true}
+	valuation := market.Valuation{Signature: evidence.Signature, QuickSellValue: 1_500_000, PricingQuantity: 1,
+		Volume24h: 20, PriceSellerCount: 4, ConfidenceBPS: 9_000, ExpectedSellMinutes: 30, GeneratedAt: now}
+
+	values := buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now)
+	var orderCandidate Candidate
+	for _, value := range values {
+		if value.Route == "ORDER_TO_AUCTION" {
+			orderCandidate = value
+		}
+	}
+	if orderCandidate.OrderUnitRewardCents != 140_000_000 || orderCandidate.ObservedOrderUnitRewardCents != 130_000_000 ||
+		orderCandidate.AcquisitionCost != 1_400_000 {
+		t.Fatalf("abbreviated price bucket was not crossed: %+v", orderCandidate)
+	}
+
+	valuation.QuickSellValue = 1_350_000
+	values = buildCandidates([]Evidence{evidence}, map[string]market.Valuation{evidence.Signature: valuation}, Config{}, now)
+	for _, value := range values {
+		if value.Route == "ORDER_TO_AUCTION" && value.State != "REJECTED" {
+			t.Fatalf("bucket-top acquisition cost was not used by profitability gate: %+v", value)
 		}
 	}
 }
@@ -1499,7 +1576,7 @@ func scan(observer, task, session string, page int, at time.Time, values ...Orde
 
 func order(key string, remaining int64) OrderObservation {
 	return OrderObservation{OrderKey: key, ItemID: "minecraft:diamond", Signature: "minecraft:diamond", DisplayName: "Diamond",
-		Quantity: 1, MaxStackSize: 64, UnitRewardCents: 100, RequestedQuantity: 100, RemainingQuantity: remaining, IdentityVerified: true,
+		Quantity: 1, MaxStackSize: 64, UnitRewardCents: 100, CompetitiveUnitRewardCents: 101, RequestedQuantity: 100, RemainingQuantity: remaining, IdentityVerified: true,
 		Owner: "buyer", PricePosition: 1, Slot: 1, RawFieldHash: strings.Repeat("a", 64), SignatureComplete: true}
 }
 

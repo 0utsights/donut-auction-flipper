@@ -193,17 +193,23 @@ class ObserverRuntime {
     const clickDelay = task.kind === 'focused_watch' ? FOCUSED_CLICK_DELAY_MS : DISCOVERY_CLICK_DELAY_MS
     let window: NonNullable<Bot['currentWindow']>
     if (task.kind === 'focused_watch' && task.signature) {
+      // A previous focused task can leave an item-filtered page open. It uses
+      // the same title, schema, and refresh control as the global order book,
+      // so reusing it here falsely treats a small filtered result as the page
+      // that proves the global Most Per Item mode. Always reopen `/orders`
+      // before verifying the sort, then issue the canonical item search.
+      if (bot.currentWindow) {
+        bot.closeWindow(bot.currentWindow)
+        await sleep(FOCUSED_CLICK_DELAY_MS)
+        this.ensureConnected(bot)
+      }
+      this.log('orders_command_sending')
+      navigator.sendCommand('/orders')
       let globalWindow: NonNullable<Bot['currentWindow']>
-      if (bot.currentWindow && navigator.schemaFor(bot.currentWindow as unknown as WindowView) && navigator.controlAvailable('refresh')) {
-        globalWindow = bot.currentWindow
-      } else {
-        this.log('orders_command_sending')
-        navigator.sendCommand('/orders')
-        try {
-          globalWindow = await waitForWindow(bot, 10_000)
-        } catch (error) {
-          throw new MenuSessionEndedError(`orders menu did not open: ${safeMessage(error)}`)
-        }
+      try {
+        globalWindow = await waitForWindow(bot, 10_000)
+      } catch (error) {
+        throw new MenuSessionEndedError(`orders menu did not open: ${safeMessage(error)}`)
       }
       globalWindow = await this.ensureMostPerItem(bot, navigator, globalWindow, clickDelay, task.id)
       bot.closeWindow(globalWindow)
