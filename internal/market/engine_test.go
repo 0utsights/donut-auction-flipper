@@ -184,7 +184,7 @@ func TestObserveFastBatchScoresLiveRowsWithoutRebuildingSharedSnapshot(t *testin
 			TotalPrice: 4_000_000, SoldAt: now.Add(-time.Duration(index) * time.Minute)}})
 	}
 	version := e.Version()
-	listing := Listing{AuthoritativeID: "fast", SellerName: "cheap", Item: Item{ID: "diamond", Quantity: 1}, TotalPrice: 3_000_000}
+	listing := Listing{AuthoritativeID: "fast", SellerName: "cheap", Item: Item{ID: "diamond", Quantity: 1}, TotalPrice: 3_000_000, ExpiresAt: now.Add(time.Second)}
 	observed, duplicates, changed := e.ObserveFastBatch([]Listing{listing})
 	if duplicates != 0 || !changed || len(observed) != 1 {
 		t.Fatalf("first fast observation duplicates=%d changed=%v observed=%d", duplicates, changed, len(observed))
@@ -199,6 +199,11 @@ func TestObserveFastBatchScoresLiveRowsWithoutRebuildingSharedSnapshot(t *testin
 	_, duplicates, changed = e.ObserveFastBatch([]Listing{listing})
 	if duplicates != 1 || changed {
 		t.Fatalf("unchanged fast row duplicates=%d changed=%v", duplicates, changed)
+	}
+	now = now.Add(5 * time.Second)
+	_, duplicates, changed = e.ObserveFastBatch(nil)
+	if duplicates != 0 || !changed || len(e.ActiveListings()) != 0 {
+		t.Fatalf("expired fast row did not invalidate feed: duplicates=%d changed=%v active=%d", duplicates, changed, len(e.ActiveListings()))
 	}
 }
 

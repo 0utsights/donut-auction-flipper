@@ -225,13 +225,14 @@ func (e *Engine) ObserveFastBatch(rawListings []Listing) ([]Listing, int, bool) 
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	now := e.now()
+	expired := 0
 	if e.lastActiveSweep.IsZero() || now.Sub(e.lastActiveSweep) >= 5*time.Second {
-		e.expireWithoutRevaluationLocked(now)
+		expired = e.expireWithoutRevaluationLocked(now)
 		e.lastActiveSweep = now
 	}
 	out := make([]Listing, 0, len(rawListings))
 	duplicates := 0
-	changedAny := false
+	changedAny := expired > 0
 	for _, raw := range rawListings {
 		listing, duplicate, _, changed := e.observeLocked(raw, now)
 		out = append(out, listing)
