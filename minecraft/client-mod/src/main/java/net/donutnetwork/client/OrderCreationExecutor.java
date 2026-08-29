@@ -33,6 +33,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.ArrayDeque;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -74,6 +75,7 @@ final class OrderCreationExecutor {
     private static final Duration FRESH_WAIT = Duration.ofSeconds(20);
     private static final Duration WORKFLOW_TIMEOUT = Duration.ofMinutes(3);
     private static final Duration SCREEN_TIMEOUT = Duration.ofSeconds(8);
+    private static final Duration AUTO_RETRY_DELAY = Duration.ofMinutes(1);
     private static final String FOCUSED_STALE = "focused order observation is not fresh yet";
     private static final long ACTION_DELAY_NANOS = Duration.ofMillis(350).toNanos();
     private static final Pattern ORDERS_TITLE = Pattern.compile("Orders \\(Page [0-9]+\\)");
@@ -109,6 +111,8 @@ final class OrderCreationExecutor {
     private Instant nextAutoAttempt = Instant.EPOCH;
     private final ArrayDeque<String> autoQueue = new ArrayDeque<>();
     private final Map<String, Long> autoEscrowCaps = new LinkedHashMap<>();
+    private final Map<String, String> autoItemIds = new LinkedHashMap<>();
+    private final Map<String, Instant> autoRetryAfter = new LinkedHashMap<>();
     private long currentEscrowCap;
     private long minimumProfitDollars;
     private long pendingRepriceUnitCents;
@@ -134,35 +138,32 @@ final class OrderCreationExecutor {
         if (!feed.balanceUsableForOrders()) return new ArmResult(false, "waiting for the live scoreboard balance or a manual override");
         if (feed.allocation().availableOrderSlots() < 1) return new ArmResult(false, "all 20 local order slots are currently marked as used");
         List<PortfolioAllocator.Selection> selections = feed.allocation().selections();
-        if (selections.isEmpty()) return new ArmResult(false, "the local portfolio has no eligible orders");
-        ArmResult first = canArm(selections.getFirst(), Instant.now());
-        if (!first.armed()) return first;
-        return new ArmResult(true, selections.size() + " reviewed orders are ready for session consent");
+        return new ArmResult(true, selections.isEmpty()
+                ? "no reviewed orders now; the session will wait for future READY allocations"
+                : selections.size() + " reviewed orders are ready now; later READY allocations will also be queued");
     }
 
     ArmResult enableAuto(MinecraftClient client) {
         ArmResult readiness = autoReadiness(client);
         if (!readiness.armed()) return readiness;
-        List<PortfolioAllocator.Selection> selections = feed.allocation().selections();
         if (phase == Phase.ABORTED) phase = Phase.IDLE;
-        autoQueue.clear();
-        autoEscrowCaps.clear();
-        selections.stream().limit(feed.allocation().availableOrderSlots()).forEach(selection -> {
-            autoQueue.addLast(selection.candidate().id());
-            autoEscrowCaps.put(selection.candidate().id(), selection.capital());
-        });
-        if (autoQueue.isEmpty()) return new ArmResult(false, "no free local order slots are available");
+        clearAutoQueueState();
+        sessionSpent = 0;
+        lastSubmittedPlan = null;
         autoEnabled = true;
-        message = "automatic order queue enabled for " + autoQueue.size() + " reviewed candidates";
+        refreshAutoQueue(Instant.now());
+        message = autoQueue.isEmpty()
+                ? "automatic order session active; waiting for reviewed candidates"
+                : "automatic order session active with " + autoQueue.size() + " reviewed candidates queued";
         nextAutoAttempt = Instant.EPOCH;
-        feed.diagnostic("order_workflow", "auto_enabled", Map.of("candidate_state", "queue", "route", "ORDER_TO_AUCTION", "reason_code", "explicit_auto_consent"));
+        feed.diagnostic("order_workflow", "auto_enabled", Map.of("candidate_state", autoQueue.isEmpty() ? "waiting" : "queue",
+                "route", "ORDER_TO_AUCTION", "reason_code", "explicit_continuous_session_consent"));
         return new ArmResult(true, message);
     }
 
     void disableAuto(MinecraftClient client, String reason) {
         autoEnabled = false;
-        autoQueue.clear();
-        autoEscrowCaps.clear();
+        clearAutoQueueState();
         if (status().active()) abort(client, reason == null || reason.isBlank() ? "automatic order queue stopped by player" : reason);
         else message = reason == null || reason.isBlank() ? "automatic order queue disabled" : reason;
     }
@@ -214,8 +215,7 @@ final class OrderCreationExecutor {
         message = "server reported a duplicate order; item was locked until Your Orders is reviewed";
         plan = null;
         autoEnabled = false;
-        autoQueue.clear();
-        autoEscrowCaps.clear();
+        clearAutoQueueState();
         feed.diagnostic("order_workflow", "duplicate_reported", Map.of("candidate_state", "unknown", "route", "ORDER_TO_AUCTION", "reason_code", "server_duplicate_message"));
         if (client.currentScreen != null) client.setScreen(null);
         tell(client, "Duplicate-order response detected. This item is blocked locally; open Your Orders before retrying it.");
@@ -304,12 +304,17 @@ final class OrderCreationExecutor {
     }
 
     private void maybeStartAuto(MinecraftClient client) {
-        if (!autoEnabled || Instant.now().isBefore(nextAutoAttempt) || client.currentScreen != null) return;
+        Instant now = Instant.now();
+        if (!autoEnabled || now.isBefore(nextAutoAttempt) || client.currentScreen != null) return;
+        boolean wasEmpty = autoQueue.isEmpty();
+        int added = refreshAutoQueue(now);
         if (autoQueue.isEmpty()) {
-            autoEnabled = false;
-            message = "automatic order queue completed";
-            tell(client, message);
+            message = "automatic order session active; waiting for reviewed candidates";
+            nextAutoAttempt = now.plusSeconds(1);
             return;
+        }
+        if (wasEmpty && added > 0) {
+            tell(client, "Automatic order session queued " + added + " newly reviewed candidate" + (added == 1 ? "." : "s."));
         }
         String candidateID = autoQueue.getFirst();
         Optional<PortfolioAllocator.Selection> current = feed.allocation().selections().stream()
@@ -322,6 +327,48 @@ final class OrderCreationExecutor {
         PortfolioAllocator.Selection next = new PortfolioAllocator.Selection(current.get().candidate(), authorizedBatches);
         ArmResult result = arm(next);
         if (!result.armed()) skipCurrentAuto(client, result.message());
+    }
+
+    private int refreshAutoQueue(Instant now) {
+        autoRetryAfter.entrySet().removeIf(entry -> !now.isBefore(entry.getValue()));
+        List<PortfolioAllocator.Selection> eligible = feed.allocation().selections().stream()
+                .filter(selection -> !feed.hasActiveOrder(selection.candidate().itemId())).toList();
+        List<PortfolioAllocator.Selection> additions = autoQueueAdditions(eligible,
+                feed.allocation().availableOrderSlots(), Set.copyOf(autoQueue), new HashSet<>(autoItemIds.values()),
+                autoRetryAfter, now);
+        for (PortfolioAllocator.Selection selection : additions) {
+            String candidateID = selection.candidate().id();
+            autoQueue.addLast(candidateID);
+            autoEscrowCaps.put(candidateID, selection.capital());
+            autoItemIds.put(candidateID, selection.candidate().itemId());
+        }
+        return additions.size();
+    }
+
+    static List<PortfolioAllocator.Selection> autoQueueAdditions(List<PortfolioAllocator.Selection> selections,
+                                                                  int availableOrderSlots,
+                                                                  Set<String> queuedCandidateIds,
+                                                                  Set<String> queuedItemIds,
+                                                                  Map<String, Instant> retryAfter,
+                                                                  Instant now) {
+        int capacity = Math.max(0, availableOrderSlots - queuedCandidateIds.size());
+        if (capacity == 0 || selections == null || selections.isEmpty()) return List.of();
+        List<PortfolioAllocator.Selection> result = new ArrayList<>();
+        Set<String> candidateIds = new HashSet<>(queuedCandidateIds);
+        Set<String> itemIds = new HashSet<>(queuedItemIds);
+        for (PortfolioAllocator.Selection selection : selections) {
+            if (result.size() >= capacity) break;
+            if (selection == null || selection.candidate() == null) continue;
+            String candidateID = selection.candidate().id();
+            String itemID = selection.candidate().itemId();
+            Instant retryAt = retryAfter.get(candidateID);
+            if (candidateID == null || itemID == null || candidateIds.contains(candidateID) || itemIds.contains(itemID)
+                    || (retryAt != null && now.isBefore(retryAt))) continue;
+            result.add(selection);
+            candidateIds.add(candidateID);
+            itemIds.add(itemID);
+        }
+        return List.copyOf(result);
     }
 
     static int authorizedBatches(int currentBatches, long acquisitionCost, long escrowCap) {
@@ -365,10 +412,13 @@ final class OrderCreationExecutor {
         if (!queuedID.equals(refreshed.candidateId())) {
             autoQueue.removeFirst();
             autoEscrowCaps.remove(queuedID);
+            autoItemIds.remove(queuedID);
             autoQueue.remove(refreshed.candidateId());
             autoEscrowCaps.remove(refreshed.candidateId());
+            autoItemIds.remove(refreshed.candidateId());
             autoQueue.addFirst(refreshed.candidateId());
             autoEscrowCaps.put(refreshed.candidateId(), escrowCap);
+            autoItemIds.put(refreshed.candidateId(), refreshed.itemId());
         }
         message = "focused market refresh accepted within the reviewed escrow cap";
         feed.diagnostic("order_workflow", "auto_rebased", Map.of("candidate_state", candidate.state(),
@@ -719,6 +769,7 @@ final class OrderCreationExecutor {
     }
 
     private void finishDroppedOrder(MinecraftClient client, OrderPlan dropped, String reason) {
+        deferAutoCandidate(dropped.candidateId());
         completeQueueItem(dropped.candidateId());
         phase = Phase.IDLE;
         retrying = false;
@@ -729,8 +780,22 @@ final class OrderCreationExecutor {
     }
 
     private void completeQueueItem(String candidateID) {
-        if (autoEnabled && !autoQueue.isEmpty() && autoQueue.getFirst().equals(candidateID)) autoQueue.removeFirst();
+        autoQueue.remove(candidateID);
         autoEscrowCaps.remove(candidateID);
+        autoItemIds.remove(candidateID);
+    }
+
+    private void deferAutoCandidate(String candidateID) {
+        if (autoEnabled && candidateID != null && !candidateID.isBlank()) {
+            autoRetryAfter.put(candidateID, Instant.now().plus(AUTO_RETRY_DELAY));
+        }
+    }
+
+    private void clearAutoQueueState() {
+        autoQueue.clear();
+        autoEscrowCaps.clear();
+        autoItemIds.clear();
+        autoRetryAfter.clear();
     }
 
     private String liveError(OrderPlan expected, Instant now, boolean requireAllocation) {
@@ -779,20 +844,23 @@ final class OrderCreationExecutor {
         String safeReason = safe(reason);
         LOGGER.warn("Order workflow aborted in {}: {}; screen={}", phase, safeReason, describeScreen(client.currentScreen));
         feed.diagnostic("order_workflow", "aborted", Map.of("candidate_state", phase.name(), "route", "ORDER_TO_AUCTION", "reason_code", "workflow_abort"));
-        phase = Phase.ABORTED; message = safeReason; plan = null; autoEnabled = false; autoQueue.clear(); autoEscrowCaps.clear();
+        phase = Phase.ABORTED; message = safeReason; plan = null; autoEnabled = false; clearAutoQueueState();
         if (client.currentScreen != null) client.setScreen(null);
         tell(client, "Order creation stopped safely: " + safeReason);
     }
 
     private void skipCurrentAuto(MinecraftClient client, String reason) {
         String skipped = autoQueue.pollFirst();
-        if (skipped != null) autoEscrowCaps.remove(skipped);
+        if (skipped != null) {
+            deferAutoCandidate(skipped);
+            autoEscrowCaps.remove(skipped);
+            autoItemIds.remove(skipped);
+        }
         plan = null;
         phase = Phase.IDLE;
         nextAutoAttempt = Instant.now().plusSeconds(1);
         if (autoQueue.isEmpty()) {
-            autoEnabled = false;
-            message = "automatic queue exhausted after skipping changed pre-transaction candidates";
+            message = "skipped one changed candidate before any server action; session is waiting for reviewed candidates";
         } else {
             message = "skipped one changed candidate before any server action: " + safe(reason)
                     + "; " + autoQueue.size() + " remain";

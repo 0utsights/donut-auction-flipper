@@ -67,7 +67,7 @@ final class AutoOrderConsentScreen extends Screen {
         PortfolioAllocator.Allocation allocation = candidates.allocation();
         OrderCreationExecutor.ArmResult readiness = executor.autoReadiness(client);
         int stateColor = readiness.armed() ? MarketUi.GOOD : MarketUi.WARN;
-        String state = readiness.armed() ? "READY" : "BLOCKED";
+        String state = readiness.armed() ? (allocation.selections().isEmpty() ? "WAITING READY" : "READY") : "BLOCKED";
 
         MarketUi.drawBackdrop(context, width, height);
         context.createNewRootLayer();
@@ -80,13 +80,13 @@ final class AutoOrderConsentScreen extends Screen {
         int gap = 6;
         int cardWidth = (panelWidth - 32 - gap * 2) / 3;
         metric(context, left + 16, metricTop, cardWidth, "PLANNED", allocation.selections().size() + " orders");
-        metric(context, left + 16 + cardWidth + gap, metricTop, cardWidth, "MAX ESCROW", "$" + FlipNotifier.format(allocation.selectedCapital()));
+        metric(context, left + 16 + cardWidth + gap, metricTop, cardWidth, "DEPLOYABLE", "$" + FlipNotifier.format(allocation.deployable()));
         metric(context, left + 16 + (cardWidth + gap) * 2, metricTop, cardWidth, "FREE SLOTS", allocation.availableOrderSlots() + " / 20");
 
         context.drawTextWithShadow(textRenderer, Text.literal("REVIEWED QUEUE"), left + 18, top + 158, MarketUi.MUTED);
         List<PortfolioAllocator.Selection> selections = allocation.selections();
         if (selections.isEmpty()) {
-            context.drawTextWithShadow(textRenderer, Text.literal("No eligible item is currently allocated."), left + 28, top + 174, MarketUi.WARN);
+            context.drawTextWithShadow(textRenderer, Text.literal("No eligible item now. The enabled session will wait for new READY items."), left + 28, top + 174, MarketUi.TEXT);
         } else {
             for (int index = 0; index < Math.min(3, selections.size()); index++) {
                 PortfolioAllocator.Selection selection = selections.get(index);
@@ -99,9 +99,9 @@ final class AutoOrderConsentScreen extends Screen {
         }
 
         context.drawTextWithShadow(textRenderer, Text.literal("EVERY ORDER"), left + 18, top + 230, MarketUi.MUTED);
-        context.drawTextWithShadow(textRenderer, Text.literal("Rank #1 proof  •  unfilled cancel/reprice  •  refund proof  •  max escrow"),
+        context.drawTextWithShadow(textRenderer, Text.literal("Fresh proof  •  exact item  •  rank #1  •  duplicate check  •  frozen cap"),
                 left + 28, top + 246, MarketUi.TEXT);
-        String note = validation.isBlank() ? "Nothing is authorized until you press Enable Session." : validation;
+        String note = validation.isBlank() ? "Future READY allocations are queued until Stop Auto or a safety stop." : validation;
         context.drawTextWithShadow(textRenderer, Text.literal(MarketUi.trim(note, 74)), left + 28, top + 261,
                 validation.isBlank() ? MarketUi.MUTED : stateColor);
         context.createNewRootLayer();

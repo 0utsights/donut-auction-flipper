@@ -240,6 +240,8 @@ Order-price presentation keeps three values distinct: the literal abbreviated `/
 
 Fabric item creation accepts Donut's fuzzy multi-result chooser only when exactly one visible, active button carries the expected canonical bracket metadata. Item and block result forms such as `[item/breeze_rod@items]` and `[block/ice]` are supported; localized display names are never allowed to override a mismatched registry path. Zero or multiple canonical matches remain fail-closed. This lets an `ice` search select Ice while rejecting Packed Ice, Blue Ice, Frosted Ice, and unrelated fuzzy results.
 
+Explicit automatic-order consent enables a continuous in-memory session, not a one-time candidate snapshot. The session may start with zero READY allocations and waits without turning itself off; whenever Fabric is idle it reconciles the latest local portfolio and queues newly eligible canonical items up to the currently free order slots. Every new queue entry freezes its own current allocation capital as the maximum escrow, then runs the complete fresh-market, duplicate, exact-item, rank, cancellation, and refund checks. A changed or dropped candidate is cooled down for one minute so an unchanged failure cannot create a transaction loop. The session ends only when the player selects Stop Auto, disconnects, or a fail-closed workflow error disables it.
+
 ## Assumptions made without operator input
 
 - The official API retains its bearer-authenticated listing and transaction endpoints and 250 requests/minute published limit.

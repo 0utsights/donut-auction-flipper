@@ -47,7 +47,8 @@ final class DonutScreen extends Screen {
 
         int footer = layout.top + layout.panelHeight - 36;
         if (orderExecutor.autoEnabled()) {
-            addDrawableChild(MarketUi.button("STOP AUTO (" + orderExecutor.autoRemaining() + ")", layout.left + 16, footer, 130, 22,
+            String stopLabel = orderExecutor.autoRemaining() == 0 ? "STOP AUTO" : "STOP AUTO (" + orderExecutor.autoRemaining() + ")";
+            addDrawableChild(MarketUi.button(stopLabel, layout.left + 16, footer, 130, 22,
                     MarketUi.ButtonStyle.DANGER,
                     () -> { orderExecutor.disableAuto(client, "automatic order queue stopped by player"); clearAndInit(); },
                     "Stop the automatic queue and cancel any in-progress order wizard."));
@@ -172,7 +173,10 @@ final class DonutScreen extends Screen {
         OrderCreationExecutor.ArmResult readiness = orderExecutor.autoReadiness(client);
         String text;
         int color;
-        if (status.active() || status.phase() == OrderCreationExecutor.Phase.ABORTED) {
+        if (orderExecutor.autoEnabled()) {
+            text = "AUTO ACTIVE  •  " + status.message();
+            color = status.active() ? MarketUi.WARN : MarketUi.GOOD;
+        } else if (status.active() || status.phase() == OrderCreationExecutor.Phase.ABORTED) {
             text = status.phase() + "  •  " + status.message();
             color = status.phase() == OrderCreationExecutor.Phase.ABORTED ? MarketUi.BAD : MarketUi.WARN;
         } else if (readiness.armed()) {

@@ -2,6 +2,9 @@ package net.donutnetwork.client;
 
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -71,5 +74,42 @@ class OrderCreationExecutorTest {
         assertTrue(OrderCreationExecutor.isItemResultTitle("Choisir un objet (10 résultats)"));
         assertFalse(OrderCreationExecutor.isItemResultTitle("Choose Item (many results)"));
         assertFalse(OrderCreationExecutor.localizedTitleEquals("Choisir un objet dangereux", Set.of("Choisir un objet")));
+    }
+
+    @Test void continuousSessionCanWaitEmptyThenQueueANewDistinctCandidate() {
+        Instant now = Instant.parse("2026-08-29T19:00:00Z");
+        PortfolioAllocator.Selection ice = selection("ice-one", "ice");
+        assertTrue(OrderCreationExecutor.autoQueueAdditions(
+                List.of(), 20, Set.of(), Set.of(), Map.of(), now).isEmpty());
+        assertEquals(List.of(ice), OrderCreationExecutor.autoQueueAdditions(
+                List.of(ice), 20, Set.of(), Set.of(), Map.of(), now));
+
+        PortfolioAllocator.Selection replacement = selection("ice-two", "ice");
+        assertEquals(List.of(ice), OrderCreationExecutor.autoQueueAdditions(
+                List.of(ice, replacement), 20, Set.of(), Set.of(), Map.of(), now));
+        assertTrue(OrderCreationExecutor.autoQueueAdditions(
+                List.of(ice), 20, Set.of(), Set.of("minecraft:ice"), Map.of(), now).isEmpty());
+    }
+
+    @Test void continuousSessionBoundsSlotsAndCoolsDownAnUnchangedFailure() {
+        Instant now = Instant.parse("2026-08-29T19:00:00Z");
+        PortfolioAllocator.Selection ice = selection("ice-one", "ice");
+        PortfolioAllocator.Selection sponge = selection("sponge-one", "sponge");
+        assertEquals(List.of(ice), OrderCreationExecutor.autoQueueAdditions(
+                List.of(ice, sponge), 1, Set.of(), Set.of(), Map.of(), now));
+        assertTrue(OrderCreationExecutor.autoQueueAdditions(
+                List.of(ice), 20, Set.of(), Set.of(), Map.of("ice-one", now.plusSeconds(60)), now).isEmpty());
+        assertEquals(List.of(ice), OrderCreationExecutor.autoQueueAdditions(
+                List.of(ice), 20, Set.of(), Set.of(), Map.of("ice-one", now.minusSeconds(1)), now));
+    }
+
+    private static PortfolioAllocator.Selection selection(String id, String itemPath) {
+        Instant now = Instant.parse("2026-08-29T19:00:00Z");
+        CandidateFeedClient.Candidate candidate = new CandidateFeedClient.Candidate(id, "ORDER_TO_AUCTION", "READY", "",
+                "minecraft:" + itemPath, "minecraft:" + itemPath, itemPath, 64, 64, 1_000, 2_000,
+                1_500, 1_501, 2_100, 1_000, 5_000, 8_000, 30, 10_000,
+                1, 1, 1, 1, 1, 1_000, 9_000, "actionable", now, now, now,
+                "/orders", "/ah " + itemPath);
+        return new PortfolioAllocator.Selection(candidate, 1);
     }
 }
