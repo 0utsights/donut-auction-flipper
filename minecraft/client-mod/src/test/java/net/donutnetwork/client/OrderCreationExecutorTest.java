@@ -2,6 +2,8 @@ package net.donutnetwork.client;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.Set;
+
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -53,5 +55,11 @@ class OrderCreationExecutorTest {
         assertTrue(OrderCreationExecutor.isRebasablePreTransactionChange("allocated stack count was reduced"));
         assertFalse(OrderCreationExecutor.isRebasablePreTransactionChange("an order for this item is already active or pending"));
         assertFalse(OrderCreationExecutor.isRebasablePreTransactionChange("auction exit is stale"));
+    }
+
+    @Test void recognizesOnlyTheExpectedServerTextInputDescriptor() {
+        assertTrue(OrderCreationExecutor.recognizedTextInputDescriptor("search", "Item", Set.of("search")));
+        assertTrue(OrderCreationExecutor.recognizedTextInputDescriptor("value", "Price per item", Set.of("price")));
+        assertFalse(OrderCreationExecutor.recognizedTextInputDescriptor("notes", "Item", Set.of("price")));
     }
 }

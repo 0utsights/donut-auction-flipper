@@ -93,8 +93,13 @@ class CandidateFeedClientTest {
                 DonutNetworkClient.composeSidebarRow("$", "134M")).orElseThrow());
         assertEquals(119_000_000L, CandidateFeedClient.parseSidebarBalance("$ 119M").orElseThrow());
         assertEquals(2_500_000L, CandidateFeedClient.parseSidebarBalance("§a$ 2.5M").orElseThrow());
+        assertEquals(143_000_000L, CandidateFeedClient.parseSidebarBalance("§f$ 143M\u0080").orElseThrow());
+        assertEquals(143_000_000L, CandidateFeedClient.parseSidebarBalance("f$ 143M\u0080").orElseThrow());
+        assertEquals(143_000_000L, CandidateFeedClient.parseSidebarBalance("§§f$ 143M\u0080").orElseThrow());
+        assertEquals(143_000_000L, CandidateFeedClient.parseSidebarBalance("§f$ 143M§\u0080").orElseThrow());
         assertEquals(32_000L, CandidateFeedClient.parseSidebarBalance("$ 32K").orElseThrow());
         assertTrue(CandidateFeedClient.parseSidebarBalance("MARKWO bought 64 Stone for $10.9K").isEmpty());
+        assertTrue(CandidateFeedClient.parseSidebarBalance("not$ 143M").isEmpty());
         assertTrue(CandidateFeedClient.parseSidebarBalance("$ 999999999999999999999T").isEmpty());
     }
 }

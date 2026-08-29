@@ -79,11 +79,12 @@ export function parseOrder(view: ItemView): ParsedOrder | undefined {
   const delivered = deliveredPattern.exec(text)
   if (!money || (!remaining && !delivered)) return undefined
   const unitRewardCents = parseScaledInteger(money[1] ?? '', money[2] ?? '', 100n)
+  const competitiveUnitRewardCents = parseCompetitiveRewardCents(money[1] ?? '', money[2] ?? '')
   const deliveredQuantity = parseScaledInteger(delivered?.[1] ?? '', delivered?.[2] ?? '', 1n)
   const deliveredTotal = parseScaledInteger(delivered?.[3] ?? '', delivered?.[4] ?? '', 1n)
   const remainingQuantity = delivered ? deliveredTotal - deliveredQuantity : parseInteger(remaining?.[1] ?? '')
   const requestedQuantity = delivered ? deliveredTotal : (requested ? parseInteger(requested[1] ?? '') : remainingQuantity)
-  if (unitRewardCents <= 0 || remainingQuantity < 0 || requestedQuantity < remainingQuantity) return undefined
+  if (unitRewardCents <= 0 || competitiveUnitRewardCents <= unitRewardCents || remainingQuantity < 0 || requestedQuantity < remainingQuantity) return undefined
   const owner = ownerPattern.exec(text)?.[1] ?? ''
   const rawHash = hash(JSON.stringify({ itemId: view.itemId, count: view.count, displayName: view.displayName, text: view.text }))
 	const explicitId = idPattern.exec(text)?.[1]
@@ -92,6 +93,7 @@ export function parseOrder(view: ItemView): ParsedOrder | undefined {
   return {
     order_key: orderKey, item_id: view.itemId, signature: view.itemId, ...(view.displayName ? { display_name: view.displayName } : {}),
     quantity: view.count, max_stack_size: view.maxStackSize, unit_reward_cents: unitRewardCents,
+		competitive_unit_reward_cents: competitiveUnitRewardCents,
 		requested_quantity: requestedQuantity, remaining_quantity: remainingQuantity, ...(owner ? { owner } : {}),
 		...(pricePosition > 0 ? { price_position: pricePosition } : {}),
     slot: view.slot, raw_field_hash: rawHash,
@@ -234,6 +236,25 @@ function parseScaledInteger(number: string, suffix: string, outputScale: bigint)
   const result = raw * multiplier * outputScale
   if (result % scale !== 0n || result / scale > BigInt(Number.MAX_SAFE_INTEGER)) return -1
   return Number(result / scale)
+}
+
+// Donut abbreviates order prices in the menu. "$1.3M" is a display bucket,
+// not proof that the hidden price is exactly $1,300,000. Cross the entire
+// least-significant displayed bucket so a proposed order is above every value
+// that could render as the observed token even if the server truncates it.
+// Unabbreviated values are exact and only need the smallest currency tick.
+function parseCompetitiveRewardCents(number: string, suffix: string): number {
+  const displayed = parseScaledInteger(number, suffix, 100n)
+  if (displayed < 0) return -1
+  const normalized = number.replace(/,/g, '')
+  const fractionalDigits = normalized.includes('.') ? normalized.length - normalized.indexOf('.') - 1 : 0
+  const multiplier = suffixes[suffix.toLowerCase()]
+  if (multiplier === undefined) return -1
+  if (suffix === '') return displayed < Number.MAX_SAFE_INTEGER ? displayed + 1 : -1
+  const divisor = 10n ** BigInt(fractionalDigits)
+  const centsPerDisplayStep = (multiplier * 100n + divisor - 1n) / divisor
+  const result = BigInt(displayed) + (centsPerDisplayStep > 0n ? centsPerDisplayStep : 1n)
+  return result <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(result) : -1
 }
 function parseInteger(value: string): number { const parsed = Number(value.replace(/,/g, '')); return Number.isSafeInteger(parsed) ? parsed : -1 }
 function integer(value: unknown, fallback: number): number { return typeof value === 'number' && Number.isInteger(value) ? value : fallback }

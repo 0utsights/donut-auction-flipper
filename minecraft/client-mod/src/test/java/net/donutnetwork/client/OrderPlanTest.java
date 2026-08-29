@@ -7,6 +7,15 @@ import java.time.Instant;
 import static org.junit.jupiter.api.Assertions.*;
 
 class OrderPlanTest {
+    @Test void verifiesDonutItemResultMetadataAndHumanLabelTogether() {
+        assertTrue(OrderPlan.exactItemResultLabel("[item/breeze_rod@items] Breeze Rod",
+                "minecraft:breeze_rod", "Breeze Rod", "Breeze Rods"));
+        assertFalse(OrderPlan.exactItemResultLabel("[item/blaze_rod@items] Breeze Rod",
+                "minecraft:breeze_rod", "Breeze Rod", "Breeze Rods"));
+        assertFalse(OrderPlan.exactItemResultLabel("[item/breeze_rod@items] Blaze Rod",
+                "minecraft:breeze_rod", "Breeze Rod", "Breeze Rods"));
+    }
+
     @Test void preservesCentPreciseRewardAndCheckedStackEscrow() {
         CandidateFeedClient.Candidate candidate = candidate(64, 500_001, 320_001);
         OrderPlan plan = OrderPlan.from(candidate);

@@ -161,15 +161,16 @@ final class CandidateFeedClient implements AutoCloseable {
         parseBalance(message, LABELED_BALANCE).ifPresent(value -> updateBalance(value, "labeled chat"));
     }
 
-    void observeSidebarBalance(Iterable<String> lines) {
-        if (lines == null) return;
+    boolean observeSidebarBalance(Iterable<String> lines) {
+        if (lines == null) return false;
         for (String line : lines) {
             OptionalLong parsed = parseBalance(line, SIDEBAR_BALANCE);
             if (parsed.isPresent()) {
                 updateBalance(parsed.getAsLong(), "scoreboard");
-                return;
+                return true;
             }
         }
+        return false;
     }
 
     static OptionalLong parseSidebarBalance(String line) {
@@ -177,7 +178,14 @@ final class CandidateFeedClient implements AutoCloseable {
     }
 
     private static OptionalLong parseBalance(String text, Pattern pattern) {
-        String clean = text == null ? "" : text.replaceAll("§[0-9A-FK-ORa-fk-or]", "").strip();
+        String clean = text == null ? "" : text.replaceAll("§[0-9A-FK-ORa-fk-or]", "")
+                .replace("§", "")
+                .replaceAll("[\\p{Cc}\\p{Cf}]", "").strip()
+                // Donut's 1.21.11 scoreboard can expose the formatting-code payload
+                // without its section-sign prefix, or with a duplicated section sign
+                // (for example, `f$ 143M` or `§§f$ 143M`). Remove only a bounded
+                // legacy-format prefix immediately before the anchored currency row.
+                .replaceFirst("(?i)^(?:§|[0-9A-FK-OR]){1,4}(?=\\s*\\$)", "");
         Matcher matcher = pattern.matcher(clean);
         if (!matcher.find()) return OptionalLong.empty();
         try {

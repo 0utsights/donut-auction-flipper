@@ -9,6 +9,7 @@ test('parses a conservative order fixture', () => {
   assert.ok(order)
   assert.equal(order.item_id, 'minecraft:diamond_block')
   assert.equal(order.unit_reward_cents, 500_000)
+  assert.equal(order.competitive_unit_reward_cents, 500_001)
   assert.equal(order.remaining_quantity, 640)
   assert.equal(order.requested_quantity, 1000)
   assert.equal(order.order_key, 'ord_123')
@@ -27,6 +28,7 @@ test('preserves fractional currency as integer cents', () => {
   const view = projectItem({ name: 'iron_ingot', count: 1, nbt: { lore: ['Unit Reward: $0.01', 'Remaining: 64'] } }, 2)
   assert.ok(view)
   assert.equal(parseOrder(view)?.unit_reward_cents, 1)
+  assert.equal(parseOrder(view)?.competitive_unit_reward_cents, 2)
   assert.equal(parseOrder(view)?.identity_verified, false)
 })
 
@@ -81,6 +83,7 @@ test('parses Donut delivered progress as remaining quantity', () => {
   const order = parseOrder(view)
   assert.ok(order)
   assert.equal(order.unit_reward_cents, 25_000_000_000)
+  assert.equal(order.competitive_unit_reward_cents, 25_100_000_000)
   assert.equal(order.requested_quantity, 120)
   assert.equal(order.remaining_quantity, 4)
   assert.equal(order.signature_complete, false)
@@ -92,14 +95,24 @@ test('parses abbreviated Donut order totals without inflating remaining units', 
   const order = parseOrder(view)
   assert.ok(order)
   assert.equal(order.unit_reward_cents, 1_910_000)
+  assert.equal(order.competitive_unit_reward_cents, 1_920_000)
   assert.equal(order.requested_quantity, 700_000)
   assert.equal(order.remaining_quantity, 80_000)
+})
+
+test('crosses the entire displayed million-price bucket', () => {
+  const view = projectItem({ name: 'netherite_scrap', customLore: ['$1.3M each', '0/31 Delivered'] }, 7)
+  assert.ok(view)
+  const order = parseOrder(view)
+  assert.ok(order)
+  assert.equal(order.unit_reward_cents, 130_000_000)
+  assert.equal(order.competitive_unit_reward_cents, 140_000_000)
 })
 
 test('proves most-per-item order only from a complete descending page', () => {
   const orders = Array.from({ length: 10 }, (_, index) => ({
     order_key: String(index), item_id: 'minecraft:stone', signature: 'minecraft:stone', quantity: 1,
-    max_stack_size: 64, unit_reward_cents: 10_000 - index, requested_quantity: 1, remaining_quantity: 1,
+    max_stack_size: 64, unit_reward_cents: 10_000 - index, competitive_unit_reward_cents: 10_001 - index, requested_quantity: 1, remaining_quantity: 1,
     slot: index, raw_field_hash: String(index), signature_complete: true, identity_verified: true
   }))
   assert.equal(isMostPerItemOrder(orders, 10), true)
@@ -113,7 +126,7 @@ test('proves most-per-item order only from a complete descending page', () => {
 test('accepts a small canonical search result only when unit rewards descend', () => {
   const orders = [300, 200, 200].map((unit_reward_cents, slot) => ({
     order_key: `order-${slot}`, item_id: 'minecraft:diamond_block', signature: 'minecraft:diamond_block', quantity: 64,
-    max_stack_size: 64, unit_reward_cents, requested_quantity: 64, remaining_quantity: 64, slot,
+    max_stack_size: 64, unit_reward_cents, competitive_unit_reward_cents: unit_reward_cents + 1, requested_quantity: 64, remaining_quantity: 64, slot,
     raw_field_hash: `hash-${slot}`, signature_complete: true, identity_verified: false
   }))
   assert.equal(isFilteredMostPerItemOrder(orders, 3), true)

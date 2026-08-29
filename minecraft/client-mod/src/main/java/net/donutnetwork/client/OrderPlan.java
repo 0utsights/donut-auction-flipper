@@ -11,6 +11,7 @@ record OrderPlan(String candidateId, String signature, String itemId, String ite
                  int quantity, long unitRewardCents, long totalCents, long escrowDollars, long targetListPrice) {
     private static final Pattern MONEY = Pattern.compile("(?i)\\$?\\s*([0-9][0-9,]*(?:\\.[0-9]+)?)\\s*([KMBT]?)(?![A-Za-z])");
     private static final Pattern LABELED_QUANTITY = Pattern.compile("(?i)\\b(?:amount|quantity)\\s*:?\\s*([0-9][0-9,]*)\\b");
+    private static final Pattern DONUT_ITEM_RESULT = Pattern.compile("(?i)^\\[item/([a-z0-9_./-]+)@items]\\s+(.+)$");
 
     static OrderPlan from(CandidateFeedClient.Candidate candidate) {
         return from(candidate, 1);
@@ -76,6 +77,15 @@ record OrderPlan(String candidateId, String signature, String itemId, String ite
         if (normalized.equals(normalizeLabel(expectedRegistryName)) || normalized.equals(normalizeLabel(fallbackName))) return true;
         // Donut and vanilla occasionally reverse names such as "Diamond Block" and "Block of Diamond".
         return normalizedTokenSet(normalized).equals(normalizedTokenSet(normalizeLabel(expectedRegistryName)));
+    }
+
+    static boolean exactItemResultLabel(String actual, String expectedItemId, String expectedRegistryName, String fallbackName) {
+        Matcher donut = DONUT_ITEM_RESULT.matcher(actual == null ? "" : actual.strip());
+        if (!donut.matches()) return equivalentItemLabel(actual, expectedRegistryName, fallbackName);
+        int separator = expectedItemId == null ? -1 : expectedItemId.indexOf(':');
+        String expectedPath = separator < 0 ? expectedItemId : expectedItemId.substring(separator + 1);
+        return expectedPath != null && donut.group(1).equalsIgnoreCase(expectedPath)
+                && equivalentItemLabel(donut.group(2), expectedRegistryName, fallbackName);
     }
 
     private static String normalizedTokenSet(String value) {

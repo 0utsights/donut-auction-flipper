@@ -63,6 +63,7 @@ Submits one menu snapshot. Important fields are:
     "quantity": 64,
     "max_stack_size": 64,
     "unit_reward_cents": 500000,
+    "competitive_unit_reward_cents": 500001,
     "requested_quantity": 640,
     "remaining_quantity": 512,
     "owner": "buyer_name",
@@ -76,7 +77,7 @@ Submits one menu snapshot. Important fields are:
 ```
 
 Submissions are idempotent by observer/session/page/content hash. A missing row is not treated as a fill. Only a later observation of the same order with reduced remaining quantity creates fill evidence.
-Order rewards use integer cents so values such as `$0.01` and `$230.10` remain exact. Candidate capital, proceeds, and profit remain conservative whole-dollar values after quantity multiplication: acquisition costs round up and proceeds round down.
+Order rewards use integer cents so values such as `$0.01` and `$230.10` remain exact. `unit_reward_cents` is the value visible in the order menu. `competitive_unit_reward_cents` is the lowest bid known to cross that complete display bucket: exact prices add one cent, while abbreviated prices move to the next displayed boundary (`$1.3M` becomes `$1.4M`). Boundary-less observations are retained only as diagnostics and cannot enter candidate economics. Candidate capital, proceeds, and profit remain conservative whole-dollar values after quantity multiplication: acquisition costs round up and proceeds round down.
 
 ### `POST /api/v1/observers/task-result`
 
@@ -88,7 +89,7 @@ These endpoints require the Fabric installation credential.
 
 ### `GET /api/v1/candidates`
 
-Returns a bounded, ETag-enabled candidate pool. Every record includes direction, exact item signature and quantity, conservative buy/sell economics, fees, completion probability, cycle time, executable volume, order/auction slot use, inventory-slot efficiency, evidence tier, state (`READY`, `HOLD`, `STALE`, or `RESEARCH`), rejection code, and safe manual commands.
+Returns a bounded, ETag-enabled candidate pool. Every record includes direction, exact item signature and quantity, the visible order reward in `observed_order_unit_reward_cents`, the fully repriced first-place target in `order_unit_reward_cents`, conservative buy/sell economics, fees, completion probability, cycle time, executable volume, order/auction slot use, inventory-slot efficiency, evidence tier, state (`READY`, `HOLD`, `STALE`, or `RESEARCH`), rejection code, and safe manual commands.
 
 The backend does not personalize this feed. Balance, cash reserve, available slots, and final allocation remain in the Fabric installation. Position inference is disabled until real message fixtures are verified.
 

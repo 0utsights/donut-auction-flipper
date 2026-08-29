@@ -2,10 +2,13 @@ package net.donutnetwork.client;
 
 import net.donutnetwork.client.mixin.DialogScreenAccessor;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.Element;
+import net.minecraft.client.gui.ParentElement;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.screen.dialog.DialogScreen;
 import net.minecraft.client.gui.screen.ingame.GenericContainerScreen;
 import net.minecraft.client.gui.widget.ButtonWidget;
+import net.minecraft.client.gui.widget.EditBoxWidget;
 import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.client.input.MouseInput;
 import net.minecraft.dialog.body.DialogBody;
@@ -27,6 +30,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.ArrayDeque;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -42,6 +47,18 @@ final class OrderCreationExecutor {
         boolean active() { return phase != Phase.IDLE && phase != Phase.ABORTED; }
     }
     record ArmResult(boolean armed, String message) {}
+    private record DialogTextInput(TextFieldWidget singleLine, EditBoxWidget multiline) {
+        static DialogTextInput of(Object widget) {
+            if (widget instanceof TextFieldWidget field) return new DialogTextInput(field, null);
+            if (widget instanceof EditBoxWidget field) return new DialogTextInput(null, field);
+            return null;
+        }
+        void setText(String value) {
+            if (singleLine != null) singleLine.setText(value);
+            else multiline.setText(value);
+        }
+        String getText() { return singleLine != null ? singleLine.getText() : multiline.getText(); }
+    }
 
     private static final Logger LOGGER = LoggerFactory.getLogger("donut-network-client");
     private static final Duration FEED_MAX_AGE = Duration.ofSeconds(3);
@@ -355,7 +372,7 @@ final class OrderCreationExecutor {
         if (title.equals("Orders -> Your Orders")) return;
         Dialog dialog = requireDialog(screen, "Choose Item");
         if (!title.equals("Choose Item")) { abort(client, "unexpected item-search screen: " + title); return; }
-        TextFieldWidget field = requireSingleTextField(screen, dialog, Set.of("search"));
+        DialogTextInput field = requireSingleTextInput(screen, dialog, Set.of("search"));
         field.setText(plan.itemPathQuery());
         requireButton(screen, SEARCH_ACTIONS).onPress(new MouseInput(0, 0));
         transition(Phase.ITEM_RESULT, "waiting for one exact item result"); delay();
@@ -369,7 +386,7 @@ final class OrderCreationExecutor {
         if (!title.matches("Choose Item \\(1 results?\\)")) { abort(client, "item search was not uniquely resolved: " + title); return; }
         String registryName = expectedRegistryName();
         List<ButtonWidget> matches = buttons(screen).stream()
-                .filter(button -> OrderPlan.equivalentItemLabel(button.getMessage().getString(), registryName, plan.itemName())).toList();
+                .filter(button -> OrderPlan.exactItemResultLabel(button.getMessage().getString(), plan.itemId(), registryName, plan.itemName())).toList();
         if (matches.size() != 1) { abort(client, "exact item result was missing or ambiguous"); return; }
         matches.getFirst().onPress(new MouseInput(0, 0));
         transition(Phase.AMOUNT, "entering exact batch quantity"); delay();
@@ -380,7 +397,7 @@ final class OrderCreationExecutor {
         String title = title(screen);
         if (title.startsWith("Choose Item")) return;
         Dialog dialog = requireDialog(screen, "How many?");
-        TextFieldWidget field = requireSingleTextField(screen, dialog, Set.of("amount", "quantity", "how many"));
+        DialogTextInput field = requireSingleTextInput(screen, dialog, Set.of("amount", "quantity", "how many"));
         field.setText(Integer.toString(plan.quantity()));
         if (!field.getText().equals(Integer.toString(plan.quantity()))) { abort(client, "amount field rejected the exact quantity"); return; }
         requireButton(screen, AMOUNT_ACTIONS).onPress(new MouseInput(0, 0));
@@ -392,7 +409,7 @@ final class OrderCreationExecutor {
         String title = title(screen);
         if (title.equals("How many?")) return;
         Dialog dialog = requireDialog(screen, "Price per item?");
-        TextFieldWidget field = requireSingleTextField(screen, dialog, Set.of("price", "reward"));
+        DialogTextInput field = requireSingleTextInput(screen, dialog, Set.of("price", "reward"));
         field.setText(plan.priceInput());
         if (!field.getText().equals(plan.priceInput())) { abort(client, "price field rejected the exact cent value"); return; }
         requireButton(screen, PRICE_ACTIONS).onPress(new MouseInput(0, 0));
@@ -631,17 +648,31 @@ final class OrderCreationExecutor {
         return accessor.donut$getDialog();
     }
 
-    private static TextFieldWidget requireSingleTextField(Screen screen, Dialog dialog, Set<String> expectedLabels) {
-        List<TextFieldWidget> fields = screen.children().stream().filter(TextFieldWidget.class::isInstance).map(TextFieldWidget.class::cast).toList();
-        if (fields.size() != 1) throw new IllegalStateException("expected exactly one text field");
-        List<String> labels = new ArrayList<>();
-        for (DialogInput input : dialog.common().inputs()) {
-            labels.add(OrderPlan.normalizeLabel(input.key()));
-            if (input.control() instanceof TextInputControl text) labels.add(OrderPlan.normalizeLabel(text.label().getString()));
+    private static DialogTextInput requireSingleTextInput(Screen screen, Dialog dialog, Set<String> expectedLabels) {
+        List<DialogTextInput> fields = descendants(screen).stream().map(DialogTextInput::of)
+                .filter(java.util.Objects::nonNull).toList();
+        if (fields.size() != 1) {
+            throw new IllegalStateException("expected exactly one supported text input, found " + fields.size());
         }
-        boolean recognized = labels.stream().anyMatch(label -> expectedLabels.stream().anyMatch(label::contains));
-        if (!recognized) throw new IllegalStateException("dialog input label is not recognized");
+        List<DialogInput> declared = dialog.common().inputs().stream()
+                .filter(input -> input.control() instanceof TextInputControl).toList();
+        if (declared.size() != 1 || !recognizedTextInput(declared.getFirst(), expectedLabels)) {
+            throw new IllegalStateException("dialog input label is missing or ambiguous");
+        }
         return fields.getFirst();
+    }
+
+    static boolean recognizedTextInput(DialogInput input, Set<String> expectedLabels) {
+        if (input == null || !(input.control() instanceof TextInputControl text) || expectedLabels == null) return false;
+        return recognizedTextInputDescriptor(input.key(), text.label().getString(), expectedLabels);
+    }
+
+    static boolean recognizedTextInputDescriptor(String inputKey, String inputLabel, Set<String> expectedLabels) {
+        if (expectedLabels == null) return false;
+        String key = OrderPlan.normalizeLabel(inputKey);
+        String label = OrderPlan.normalizeLabel(inputLabel);
+        return expectedLabels.stream().map(OrderPlan::normalizeLabel)
+                .anyMatch(expected -> !expected.isEmpty() && (key.contains(expected) || label.contains(expected)));
     }
 
     private static ButtonWidget requireButton(Screen screen, Set<String> exactLabels) {
@@ -652,7 +683,29 @@ final class OrderCreationExecutor {
     }
 
     private static List<ButtonWidget> buttons(Screen screen) {
-        return screen.children().stream().filter(ButtonWidget.class::isInstance).map(ButtonWidget.class::cast).toList();
+        return descendants(screen).stream().filter(ButtonWidget.class::isInstance).map(ButtonWidget.class::cast).toList();
+    }
+
+    /**
+     * Server dialog inputs can be nested inside ScrollableLayoutWidget's
+     * ContainerWidget rather than registered as direct Screen children.
+     * Traverse only the public ParentElement tree, with identity and depth
+     * bounds so malformed or cyclic UI trees remain fail-closed.
+     */
+    private static List<Element> descendants(ParentElement root) {
+        List<Element> result = new ArrayList<>();
+        Set<Element> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        collectDescendants(root, result, visited, 0);
+        return result;
+    }
+
+    private static void collectDescendants(ParentElement parent, List<Element> result, Set<Element> visited, int depth) {
+        if (depth >= 12) return;
+        for (Element child : parent.children()) {
+            if (!visited.add(child)) continue;
+            result.add(child);
+            if (child instanceof ParentElement nested) collectDescendants(nested, result, visited, depth + 1);
+        }
     }
 
     private String expectedRegistryName() {

@@ -34,6 +34,7 @@ public final class DonutNetworkClient implements ClientModInitializer {
     private OrderCreationExecutor orderExecutor;
     private boolean startupHintShown;
     private int scoreboardPollTicks;
+    private long nextSidebarDiagnosticAt;
 
     @Override public void onInitializeClient() {
         try {
@@ -100,7 +101,13 @@ public final class DonutNetworkClient implements ClientModInitializer {
             if (entry.display() != null) lines.add(entry.display().getString());
             lines.add(entry.owner());
         }
-        candidates.observeSidebarBalance(lines);
+        boolean observed = candidates.observeSidebarBalance(lines);
+        long now = System.currentTimeMillis();
+        if (!observed && now >= nextSidebarDiagnosticAt) {
+            nextSidebarDiagnosticAt = now + 30_000;
+            LOGGER.info("Visible sidebar balance was not parsed; objective={}; rows={}", objective.getName(),
+                    summarizeSidebarRows(lines));
+        }
     }
 
     /** Mirrors InGameHud's team-colored sidebar selection before its default fallback. */
@@ -116,6 +123,30 @@ public final class DonutNetworkClient implements ClientModInitializer {
 
     static String composeSidebarRow(String name, String score) {
         return ((name == null ? "" : name) + " " + (score == null ? "" : score)).strip();
+    }
+
+    static String summarizeSidebarRows(List<String> lines) {
+        StringBuilder value = new StringBuilder();
+        for (String line : lines) {
+            if (line == null || line.isBlank()) continue;
+            String clean = diagnosticCodePoints(line.replace('\r', ' ').replace('\n', ' '));
+            if (value.length() > 0) value.append(" | ");
+            value.append('[').append(clean.substring(0, Math.min(80, clean.length()))).append(']');
+            if (value.length() >= 1_200) break;
+        }
+        return value.substring(0, Math.min(1_200, value.length()));
+    }
+
+    private static String diagnosticCodePoints(String value) {
+        StringBuilder escaped = new StringBuilder();
+        value.codePoints().forEach(codePoint -> {
+            if (codePoint >= 0x20 && codePoint <= 0x7e) {
+                escaped.appendCodePoint(codePoint);
+            } else {
+                escaped.append(String.format("<U+%04X>", codePoint));
+            }
+        });
+        return escaped.toString();
     }
 
     private void openScreen(MinecraftClient client) {

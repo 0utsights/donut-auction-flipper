@@ -30,4 +30,10 @@ class DonutNetworkClientTest {
         return scoreboard.addObjective(name, ScoreboardCriterion.DUMMY, Text.literal(name),
                 ScoreboardCriterion.RenderType.INTEGER, false, null);
     }
+
+    @Test void boundsLocalSidebarDiagnostics() {
+        String summary = DonutNetworkClient.summarizeSidebarRows(java.util.List.of("$", "142M\u0080", "x".repeat(2_000)));
+        org.junit.jupiter.api.Assertions.assertTrue(summary.startsWith("[$] | [142M<U+0080>]"));
+        org.junit.jupiter.api.Assertions.assertTrue(summary.length() <= 1_200);
+    }
 }
