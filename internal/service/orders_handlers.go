@@ -274,14 +274,14 @@ func (s *Server) clientDiagnostics(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		if err := s.orders.SaveDiagnostic(r.Context(), value); err != nil {
-			if errors.Is(err, orders.ErrDiagnosticRateLimit) {
-				writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "diagnostic rate limit exceeded"})
-				return
-			}
-			s.orderError(w, "save client diagnostic", err)
+	}
+	if err := s.orders.SaveDiagnostics(r.Context(), values); err != nil {
+		if errors.Is(err, orders.ErrDiagnosticRateLimit) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "diagnostic rate limit exceeded"})
 			return
 		}
+		s.orderError(w, "save client diagnostics", err)
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -517,6 +517,7 @@ body{font:14px ui-monospace,SFMono-Regular,Consolas,monospace;max-width:1550px;m
 <details id="evidence"><summary>Order evidence and rejection details</summary><div class="scroll"><table><tr><th>Item</th><th>Tier</th><th>Scans</th><th>Confirmed fills / orders</th><th>24h filled / available</th><th>Visible / first-place bid</th><th>Research seen</th><th>Focused seen</th><th>Reason</th></tr>{{range .Orders.Evidence}}<tr data-row="{{.DisplayName}} {{.Signature}} {{.Tier}}"><td>{{.DisplayName}}<br><code>{{.Signature}}</code></td><td class="{{.Tier}}">{{.Tier}}</td><td>{{.CompleteScans}}</td><td>{{.FillEvents}} / {{.DistinctOrders}}</td><td>{{.FilledUnits24h}} / {{.AvailableUnits}}</td><td>{{moneyCents .BestUnitRewardCents}} → {{moneyCents .BestCompetitiveUnitRewardCents}}</td><td>{{clock .LastSeenAt}}</td><td>{{clock .FocusedSeenAt}}</td><td class="wrap">{{.Reason}}</td></tr>{{else}}<tr><td colspan="9" class="muted">Waiting for trusted order snapshots.</td></tr>{{end}}</table></div></details>
 <details><summary>Blocked and stale candidate diagnostics</summary><div class="scroll"><table><tr><th>State</th><th>Route</th><th>Item</th><th>Profit</th><th>Priority</th><th>Reason</th><th>Risks</th></tr>{{range .Blocked}}<tr><td class="{{.State}}">{{.State}}</td><td>{{.Route}}</td><td>{{.Quantity}}× {{.ItemName}}</td><td>{{money .ConservativeProfit}}</td><td>{{money .PriorityScore}}</td><td class="wrap">{{.Reason}}</td><td class="wrap">{{range .RiskFlags}}{{.}} {{end}}</td></tr>{{else}}<tr><td colspan="7" class="muted">None.</td></tr>{{end}}</table></div></details>
 <details><summary>Recent confirmed short-gap reductions</summary><table><tr><th>Item</th><th>Order</th><th>Units</th><th>Unit reward</th><th>Interval</th><th>Observed</th></tr>{{range .Orders.RecentFills}}<tr><td><code>{{.Signature}}</code></td><td>{{.OrderKey}}</td><td>{{.Units}}</td><td>{{moneyCents .UnitRewardCents}}</td><td>{{clock .PreviousObservedAt}} → {{clock .ObservedAt}}</td><td>{{clock .ObservedAt}}</td></tr>{{else}}<tr><td colspan="6" class="muted">No confirmed reductions yet. Historical long-gap reductions are quarantined and disappearances never count.</td></tr>{{end}}</table></details>
+<details open><summary>Recent sanitized Fabric runtime events ({{.Orders.Diagnostics}} retained / 14d)</summary><div class="scroll"><table><tr><th>Observed</th><th>Mod</th><th>Event</th><th>Code</th><th>Duration</th><th>Safe fields</th></tr>{{range .Orders.RecentDiagnostics}}<tr><td>{{clock .CreatedAt}}</td><td>{{.Version}}</td><td>{{.Event}}</td><td>{{.Code}}</td><td>{{.Duration}}ms</td><td class="wrap">{{.Fields}}</td></tr>{{else}}<tr><td colspan="6" class="muted">No accepted Fabric diagnostics. Restart with the current mod and confirm Diagnostics is ON.</td></tr>{{end}}</table></div></details>
 <script>
 const filter=document.getElementById('filter'),auto=document.getElementById('auto');
 filter.value=sessionStorage.getItem('orderFilter')||'';

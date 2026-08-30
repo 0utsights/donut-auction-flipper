@@ -110,6 +110,15 @@ type Diagnostic struct {
 	CreatedAt time.Time         `json:"created_at,omitempty"`
 }
 
+type DiagnosticSummary struct {
+	Version   string            `json:"version"`
+	Event     string            `json:"event"`
+	Code      string            `json:"code,omitempty"`
+	Duration  int64             `json:"duration_ms,omitempty"`
+	Fields    map[string]string `json:"fields,omitempty"`
+	CreatedAt time.Time         `json:"created_at"`
+}
+
 type Evidence struct {
 	Signature                         string    `json:"signature"`
 	ItemID                            string    `json:"item_id"`
@@ -199,14 +208,15 @@ type CandidateFeed struct {
 }
 
 type DebugSnapshot struct {
-	Observers    []Observer     `json:"observers"`
-	Evidence     []Evidence     `json:"evidence"`
-	Watches      []Watch        `json:"watches"`
-	Candidates   []Candidate    `json:"candidates"`
-	ScanCoverage ScanCoverage   `json:"scan_coverage"`
-	RecentFills  []FillEvidence `json:"recent_fills"`
-	Diagnostics  int            `json:"diagnostics_14d"`
-	GeneratedAt  time.Time      `json:"generated_at"`
+	Observers         []Observer          `json:"observers"`
+	Evidence          []Evidence          `json:"evidence"`
+	Watches           []Watch             `json:"watches"`
+	Candidates        []Candidate         `json:"candidates"`
+	ScanCoverage      ScanCoverage        `json:"scan_coverage"`
+	RecentFills       []FillEvidence      `json:"recent_fills"`
+	Diagnostics       int                 `json:"diagnostics_14d"`
+	RecentDiagnostics []DiagnosticSummary `json:"recent_diagnostics"`
+	GeneratedAt       time.Time           `json:"generated_at"`
 }
 
 type ScanCoverage struct {

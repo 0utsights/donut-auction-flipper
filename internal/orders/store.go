@@ -850,29 +850,45 @@ func (s *Store) DeleteWatch(ctx context.Context, id string) error {
 }
 
 func (s *Store) SaveDiagnostic(ctx context.Context, diagnostic Diagnostic) error {
-	encoded, err := json.Marshal(diagnostic.Fields)
-	if err != nil {
-		return err
-	}
-	created := diagnostic.CreatedAt
-	if created.IsZero() {
-		created = s.now()
+	return s.SaveDiagnostics(ctx, []Diagnostic{diagnostic})
+}
+
+func (s *Store) SaveDiagnostics(ctx context.Context, diagnostics []Diagnostic) error {
+	if len(diagnostics) == 0 {
+		return nil
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	var recent int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM diagnostics WHERE install_id=? AND created_ms>=?`, diagnostic.InstallID, s.now().Add(-time.Hour).UnixMilli()).Scan(&recent); err != nil {
-		return err
+	incoming := make(map[string]int)
+	for _, diagnostic := range diagnostics {
+		incoming[diagnostic.InstallID]++
 	}
-	if recent >= 500 {
-		return ErrDiagnosticRateLimit
+	cutoff := s.now().Add(-time.Hour).UnixMilli()
+	for installID, count := range incoming {
+		var recent int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM diagnostics WHERE install_id=? AND created_ms>=?`, installID, cutoff).Scan(&recent); err != nil {
+			return err
+		}
+		if recent+count > 500 {
+			return ErrDiagnosticRateLimit
+		}
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO diagnostics(install_id,version,event,code,duration_ms,fields_json,created_ms) VALUES(?,?,?,?,?,?,?)`,
-		diagnostic.InstallID, diagnostic.Version, diagnostic.Event, diagnostic.Code, diagnostic.Duration, string(encoded), created.UnixMilli()); err != nil {
-		return err
+	for _, diagnostic := range diagnostics {
+		encoded, encodeErr := json.Marshal(diagnostic.Fields)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		created := diagnostic.CreatedAt
+		if created.IsZero() {
+			created = s.now()
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO diagnostics(install_id,version,event,code,duration_ms,fields_json,created_ms) VALUES(?,?,?,?,?,?,?)`,
+			diagnostic.InstallID, diagnostic.Version, diagnostic.Event, diagnostic.Code, diagnostic.Duration, string(encoded), created.UnixMilli()); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -1175,6 +1191,10 @@ func (s *Store) Debug(ctx context.Context) (DebugSnapshot, error) {
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM diagnostics WHERE created_ms>=?`, s.now().Add(-14*24*time.Hour).UnixMilli()).Scan(&diagnostics); err != nil {
 		return DebugSnapshot{}, err
 	}
+	recentDiagnostics, err := s.recentDiagnostics(ctx)
+	if err != nil {
+		return DebugSnapshot{}, err
+	}
 	coverage, err := s.scanCoverage(ctx)
 	if err != nil {
 		return DebugSnapshot{}, err
@@ -1183,7 +1203,32 @@ func (s *Store) Debug(ctx context.Context) (DebugSnapshot, error) {
 	if err != nil {
 		return DebugSnapshot{}, err
 	}
-	return DebugSnapshot{Observers: observers, Evidence: evidence, Watches: watches, ScanCoverage: coverage, RecentFills: fills, Diagnostics: diagnostics, GeneratedAt: s.now()}, nil
+	return DebugSnapshot{Observers: observers, Evidence: evidence, Watches: watches, ScanCoverage: coverage, RecentFills: fills,
+		Diagnostics: diagnostics, RecentDiagnostics: recentDiagnostics, GeneratedAt: s.now()}, nil
+}
+
+func (s *Store) recentDiagnostics(ctx context.Context) ([]DiagnosticSummary, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT version,event,code,duration_ms,fields_json,created_ms
+		FROM diagnostics ORDER BY created_ms DESC,id DESC LIMIT 50`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]DiagnosticSummary, 0, 50)
+	for rows.Next() {
+		var value DiagnosticSummary
+		var encoded string
+		var created int64
+		if err := rows.Scan(&value.Version, &value.Event, &value.Code, &value.Duration, &encoded, &created); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(encoded), &value.Fields); err != nil {
+			return nil, fmt.Errorf("decode diagnostic fields: %w", err)
+		}
+		value.CreatedAt = time.UnixMilli(created).UTC()
+		result = append(result, value)
+	}
+	return result, rows.Err()
 }
 
 func (s *Store) scanCoverage(ctx context.Context) (ScanCoverage, error) {

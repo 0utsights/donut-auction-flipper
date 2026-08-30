@@ -19,6 +19,9 @@ class CandidateFeedClientTest {
                         "candidate_state", "WAIT_FRESH", "route", "ORDER_TO_AUCTION",
                         "item_id", "minecraft:spider_eye", "chat", "private")));
         assertTrue(CandidateFeedClient.sanitizeDiagnosticFields(Map.of("endpoint", "http://secret.invalid")).isEmpty());
+        assertFalse(CandidateFeedClient.shouldRetryDiagnosticStatus(400));
+        assertFalse(CandidateFeedClient.shouldRetryDiagnosticStatus(429));
+        assertTrue(CandidateFeedClient.shouldRetryDiagnosticStatus(503));
     }
 
     @Test void separatesDurablePositionLocksFromLiveServerOrderLocks() {

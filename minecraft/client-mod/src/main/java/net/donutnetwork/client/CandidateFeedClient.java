@@ -506,6 +506,8 @@ final class CandidateFeedClient implements AutoCloseable {
             } catch (Exception error) {
                 focusRequestUntil.remove(candidate.signature());
                 LOGGER.warn("Could not start focused watch: {}", safeMessage(error));
+                enqueueDiagnostic("error", "focus_request", 0, Map.of("exception_class", error.getClass().getSimpleName(),
+                        "endpoint", "/api/v1/watches", "candidate_state", candidate.state(), "route", candidate.route()));
             }
         });
     }
@@ -693,12 +695,21 @@ final class CandidateFeedClient implements AutoCloseable {
         try { sendJson("/api/v1/client/diagnostics", "POST", batch.toString()); }
         catch (BackendHttpException error) {
             // A malformed event must not poison the queue forever and suppress
-            // every later runtime diagnostic. Retry only statuses that can heal.
-            if (error.status >= 429) for (JsonObject value : removed) if (diagnosticQueue.size() < 100) diagnosticQueue.add(value);
-            else LOGGER.warn("Dropped a diagnostic batch rejected with HTTP {}", error.status);
+            // every later runtime diagnostic. A 429 may follow an older server
+            // that partially committed a batch, so dropping optional telemetry
+            // is safer than duplicating it for an hour. Retry server failures.
+            if (shouldRetryDiagnosticStatus(error.status)) {
+                for (JsonObject value : removed) {
+                    if (diagnosticQueue.size() < 100) diagnosticQueue.add(value);
+                }
+            } else {
+                LOGGER.warn("Dropped a diagnostic batch rejected with HTTP {}", error.status);
+            }
         }
         catch (Exception error) { for (JsonObject value : removed) if (diagnosticQueue.size() < 100) diagnosticQueue.add(value); }
     }
+
+    static boolean shouldRetryDiagnosticStatus(int status) { return status >= 500; }
 
     private void sendJson(String path, String method, String body) throws Exception {
         HttpRequest request = request(config.backend().resolve(path)).header("Content-Type", "application/json")

@@ -206,6 +206,10 @@ func (s *System) DeleteWatch(ctx context.Context, id string) error {
 func (s *System) SaveDiagnostic(ctx context.Context, value Diagnostic) error {
 	return s.store.SaveDiagnostic(ctx, value)
 }
+
+func (s *System) SaveDiagnostics(ctx context.Context, values []Diagnostic) error {
+	return s.store.SaveDiagnostics(ctx, values)
+}
 func (s *System) Cleanup(ctx context.Context) error          { return s.store.Cleanup(ctx) }
 func (s *System) Backup(ctx context.Context) (string, error) { return s.store.Backup(ctx) }
 

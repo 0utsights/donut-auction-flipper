@@ -3,6 +3,7 @@ package orders
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -822,6 +823,50 @@ func TestUnknownOrIncompleteScanCannotCreateEconomicEvidence(t *testing.T) {
 	debug, err := system.store.Debug(ctx)
 	if err != nil || debug.ScanCoverage.UnknownSchema != 1 || debug.ScanCoverage.Incomplete != 1 {
 		t.Fatalf("capture coverage=%+v err=%v", debug.ScanCoverage, err)
+	}
+}
+
+func TestDiagnosticBatchIsAtomicAndDebugShowsNewestSafeEvents(t *testing.T) {
+	system, err := NewSystem(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	ctx := context.Background()
+	now := time.Date(2026, 8, 30, 18, 0, 0, 0, time.UTC)
+	system.store.now = func() time.Time { return now }
+	initial := make([]Diagnostic, 499)
+	for index := range initial {
+		initial[index] = Diagnostic{InstallID: "install-one", Version: "alpha.38", Event: "decision",
+			Code: "initial", Fields: map[string]string{"reason_code": "test"}, CreatedAt: now}
+	}
+	if err := system.SaveDiagnostics(ctx, initial); err != nil {
+		t.Fatal(err)
+	}
+	rejected := []Diagnostic{
+		{InstallID: "install-one", Version: "alpha.38", Event: "error", Code: "must-not-commit", CreatedAt: now},
+		{InstallID: "install-one", Version: "alpha.38", Event: "error", Code: "must-not-commit", CreatedAt: now},
+	}
+	if err := system.SaveDiagnostics(ctx, rejected); !errors.Is(err, ErrDiagnosticRateLimit) {
+		t.Fatalf("rate limit error=%v", err)
+	}
+	var count int
+	if err := system.store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM diagnostics`).Scan(&count); err != nil || count != 499 {
+		t.Fatalf("partially committed rejected batch count=%d err=%v", count, err)
+	}
+	now = now.Add(time.Hour + time.Second)
+	newest := Diagnostic{InstallID: "install-one", Version: "alpha.38", Event: "decision", Code: "focused_stale",
+		Fields: map[string]string{"model_version": "42", "reason_code": "focused_stale"}, CreatedAt: now}
+	if err := system.SaveDiagnostic(ctx, newest); err != nil {
+		t.Fatal(err)
+	}
+	debug, err := system.store.Debug(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(debug.RecentDiagnostics) != 50 || debug.RecentDiagnostics[0].Code != "focused_stale" ||
+		debug.RecentDiagnostics[0].Fields["model_version"] != "42" {
+		t.Fatalf("recent diagnostics=%+v", debug.RecentDiagnostics)
 	}
 }
 

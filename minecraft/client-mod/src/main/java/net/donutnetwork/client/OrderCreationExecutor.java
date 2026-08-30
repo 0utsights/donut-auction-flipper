@@ -959,7 +959,8 @@ final class OrderCreationExecutor {
                 plan == null ? "none" : plan.itemId(), error, focusedAge, auctionAge,
                 current != null && feed.isAllocated(current.id()), feed.status().state());
         feed.diagnostic("decision", "order_wait", Map.of("candidate_state", phase.name(),
-                "route", "ORDER_TO_AUCTION", "reason_code", waitReasonCode(error)));
+                "route", "ORDER_TO_AUCTION", "reason_code", waitReasonCode(error),
+                "model_version", Long.toString(feed.status().version())));
     }
 
     static String waitReasonCode(String error) {
