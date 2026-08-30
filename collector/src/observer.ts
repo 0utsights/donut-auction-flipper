@@ -49,6 +49,8 @@ class ObserverRuntime {
   private mostPerItemConfirmedAt = 0
   private reconnectNotBefore = 0
   private sequenceGuardUntil = 0
+  private heartbeatTail: Promise<void> = Promise.resolve()
+  private heartbeatQueueDepth = 0
 
   constructor(private readonly config: RuntimeConfig) {
     this.backend = new BackendClient(new URL(config.backendUrl), config.observerToken, config.account.id)
@@ -63,7 +65,12 @@ class ObserverRuntime {
     this.log('minecraft_ready')
     await this.backend.register(this.config.account.proxyLabel)
     this.log('backend_registered')
-    this.heartbeat = setInterval(() => { const task = this.activeTask; void this.backend.heartbeat(this.bot?.player ? (task ? 'scanning' : 'online') : 'connecting', task?.id ?? '', task?.lease_token ?? '', this.activePage, this.bot?.player?.ping ?? 0, this.reconnects).catch(this.report) }, 5_000)
+    this.heartbeat = setInterval(() => {
+      if (this.heartbeatQueueDepth > 0) return
+      const task = this.activeTask
+      void this.sendHeartbeat(this.bot?.player ? (task ? 'scanning' : 'online') : 'connecting',
+        task?.id ?? '', task?.lease_token ?? '', this.activePage).catch(this.report)
+    }, 5_000)
     let backendFailures = 0
     while (!this.stopping) {
       const controller = new AbortController()
@@ -91,7 +98,7 @@ class ObserverRuntime {
       if (!this.connected) await this.reconnect()
       this.activeTask = task
       this.log('task_leased', `kind=${task.kind} priority=${task.priority} target=${task.signature || '-'}`)
-      await this.backend.heartbeat('scanning', task.id, task.lease_token, 0, this.bot?.player?.ping ?? 0, this.reconnects)
+      await this.sendHeartbeat('scanning', task.id, task.lease_token, 0)
       let status: 'complete' | 'retry' | 'failed' = 'complete'
       let message = ''
       let reconnect = false
@@ -298,7 +305,7 @@ class ObserverRuntime {
       if (task.kind === 'focused_watch' && parsed.length !== submittedOrders.length) {
         this.log('filtered_search_noise_ignored', `ignored=${parsed.length - submittedOrders.length}`)
       }
-      const yieldToFocus = await this.backend.heartbeat(schema && complete ? 'scanning' : 'schema_hold', task.id, task.lease_token, scan.page, bot.player?.ping ?? 0, this.reconnects)
+      const yieldToFocus = await this.sendHeartbeat(schema && complete ? 'scanning' : 'schema_hold', task.id, task.lease_token, scan.page)
       if (yieldToFocus && task.kind === 'discovery') {
         this.log('discovery_yielding_to_focus', `page=${scan.page}`)
         return
@@ -393,6 +400,14 @@ class ObserverRuntime {
 
   private ensureConnected(bot: Bot): void {
     if (!this.connected || this.bot !== bot || !bot.player) throw new Error('observer disconnected during order scan')
+  }
+
+  private sendHeartbeat(state: string, taskId: string, leaseToken: string, page: number): Promise<boolean> {
+    this.heartbeatQueueDepth++
+    const operation = this.heartbeatTail.then(() => this.backend.heartbeat(state, taskId, leaseToken, page,
+      this.bot?.player?.ping ?? 0, this.reconnects))
+    this.heartbeatTail = operation.then(() => undefined, () => undefined)
+    return operation.finally(() => { this.heartbeatQueueDepth-- })
   }
 
   private capture(window: WindowView): { window: WindowView; title: string; views: ItemView[]; hash: string } {
