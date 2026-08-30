@@ -30,4 +30,15 @@ class AuctionExitExecutorTest {
         assertFalse(AuctionExitExecutor.textContainsRequested("1.5M Requested", 1_500_001));
         assertFalse(AuctionExitExecutor.textContainsRequested("1.55M Requested", 1_500_000));
     }
+
+    @Test void completedPersonalOrderUsesExactProgressWithoutBrittleStatusPhrases() {
+        String liveRow = "Netherite Scraps $ 1.4M each 21/21 Delivered Click to manage order";
+        assertTrue(AuctionExitExecutor.completedOrderTextMatches(liveRow, 21, 140_000_001));
+        assertTrue(AuctionExitExecutor.trackedOrderTextMatches(
+                "Netherite Scraps $ 1.4M each 7/21 Delivered Click to deliver items", 21, 140_000_001));
+        assertFalse(AuctionExitExecutor.completedOrderTextMatches(
+                "Netherite Scraps $ 1.4M each 20/21 Delivered Click to deliver items", 21, 140_000_001));
+        assertFalse(AuctionExitExecutor.completedOrderTextMatches(liveRow, 22, 140_000_001));
+        assertFalse(AuctionExitExecutor.completedOrderTextMatches(liveRow, 21, 150_000_001));
+    }
 }

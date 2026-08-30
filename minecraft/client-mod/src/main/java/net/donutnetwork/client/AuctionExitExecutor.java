@@ -78,6 +78,7 @@ final class AuctionExitExecutor {
     private static final Pattern ORDERS_TITLE = Pattern.compile("^Orders \\(Page [0-9]+\\)$");
     private static final Pattern REQUESTED_QUANTITY = Pattern.compile(
             "(?i)(?:^|\\D)([0-9][0-9,]*(?:\\.[0-9]+)?)([KMBT]?)\\s+requested(?:\\D|$)");
+    private static final int PERSONAL_ORDER_GRID_SLOTS = 45;
     private static final Duration SCREEN_TIMEOUT = Duration.ofSeconds(8);
     private static final Duration WORKFLOW_TIMEOUT = Duration.ofMinutes(4);
     private static final Duration SUPPLY_MAX_AGE = Duration.ofSeconds(15);
@@ -144,12 +145,20 @@ final class AuctionExitExecutor {
         return "completed orders can be claimed and listed";
     }
 
-    void enable(MinecraftClient client) {
+    boolean enable(MinecraftClient client) {
         String server = serverError(client);
         if (!server.isEmpty()) {
             message = server;
             tell(client, "Automatic exits remain off: " + server);
-            return;
+            return false;
+        }
+        int rearmed;
+        try {
+            rearmed = feed.rearmSafePreClaimHolds();
+        } catch (RuntimeException persistenceFailure) {
+            message = "could not persist safe held-order rechecks";
+            tell(client, "Automatic exits remain off: " + message);
+            return false;
         }
         clearCurrent();
         enabled = true;
@@ -157,7 +166,9 @@ final class AuctionExitExecutor {
         message = feed.readyExitPlans().isEmpty()
                 ? "waiting for a tracked order to complete"
                 : "exit session enabled; preparing the first completed order";
-        tell(client, "Automatic exits enabled for this session. Purchases, claims, packaging, and listings remain guarded by exact checks.");
+        tell(client, "Automatic exits enabled for this session. Purchases, claims, packaging, and listings remain guarded by exact checks."
+                + (rearmed == 0 ? "" : " Rechecking " + rearmed + " safe pre-claim hold" + (rearmed == 1 ? "." : "s.")));
+        return true;
     }
 
     void disable(MinecraftClient client, String reason) {
@@ -456,15 +467,21 @@ final class AuctionExitExecutor {
         if (!(client.currentScreen instanceof GenericContainerScreen) || !title(client.currentScreen).equals("Orders -> Your Orders")) return;
         GenericContainerScreenHandler handler = genericHandler(client);
         List<Integer> matches = new ArrayList<>();
-        int limit = Math.min(handler.getInventory().size(), handler.slots.size());
+        List<String> sameItemRows = new ArrayList<>();
+        int limit = Math.min(PERSONAL_ORDER_GRID_SLOTS, Math.min(handler.getInventory().size(), handler.slots.size()));
         for (int slot = 0; slot < limit; slot++) {
             ItemStack row = handler.getSlot(slot).getStack();
-            if (itemMatches(row, position.itemId()) && normalizedText(row).contains("order completed")
-                    && normalizedText(row).contains(position.totalQuantity() + "/" + position.totalQuantity() + " delivered")
-                    && textContainsRequested(stackText(row), position.totalQuantity())
-                    && OrderPlan.textContainsUnitReward(stackText(row), position.unitRewardCents())) matches.add(slot);
+            if (!itemMatches(row, position.itemId())) continue;
+            String text = stackText(row);
+            sameItemRows.add(safe(text));
+            if (completedOrderTextMatches(text, position.totalQuantity(), position.unitRewardCents())) matches.add(slot);
         }
-        if (matches.size() != 1) throw new IllegalStateException("completed personal order is missing or ambiguous");
+        if (matches.size() != 1) {
+            LOGGER.warn("Completed order match failed: item={}; quantity={}; unit_cents={}; matches={}; same_item_rows={}",
+                    position.itemId(), position.totalQuantity(), position.unitRewardCents(), matches.size(),
+                    sameItemRows.stream().limit(3).toList());
+            throw new IllegalStateException("completed personal order is missing or ambiguous");
+        }
         clickSlot(client, matches.getFirst(), 0, SlotActionType.PICKUP);
         transition(Phase.CLAIM_MANAGE, "opening verified Collect control");
         delay();
@@ -475,10 +492,12 @@ final class AuctionExitExecutor {
         GenericContainerScreenHandler handler = genericHandler(client);
         ItemStack identity = handler.getSlot(10).getStack();
         ItemStack collect = handler.getSlot(13).getStack();
-        if (!itemMatches(identity, position.itemId()) || !normalizedText(identity).contains("order completed")
-                || !textContainsRequested(stackText(identity), position.totalQuantity())
-                || !OrderPlan.textContainsUnitReward(stackText(identity), position.unitRewardCents())
+        if (!itemMatches(identity, position.itemId())
+                || !completedOrderTextMatches(stackText(identity), position.totalQuantity(), position.unitRewardCents())
                 || !label(collect).equals("collect") || !Registries.ITEM.getId(collect.getItem()).toString().equals("minecraft:chest")) {
+            LOGGER.warn("Completed order edit-screen match failed: item={}; quantity={}; unit_cents={}; identity={}; collect_id={}; collect_label={}",
+                    position.itemId(), position.totalQuantity(), position.unitRewardCents(), safe(stackText(identity)),
+                    Registries.ITEM.getId(collect.getItem()), safe(label(collect)));
             throw new IllegalStateException("completed order identity or Collect control changed");
         }
         itemCountBefore = countPlainItem(client.player.getInventory(), position.itemId());
@@ -518,7 +537,7 @@ final class AuctionExitExecutor {
         }
         if (gained < 0 || gained > needed) throw new IllegalStateException("collection transfer quantity changed unexpectedly");
         int remaining = needed - gained;
-        int limit = Math.min(handler.getInventory().size(), handler.slots.size());
+        int limit = Math.min(PERSONAL_ORDER_GRID_SLOTS, Math.min(handler.getInventory().size(), handler.slots.size()));
         for (int slot = 0; slot < limit; slot++) {
             ItemStack stack = handler.getSlot(slot).getStack();
             if (!plainItemMatches(stack, position.itemId())) continue;
@@ -791,16 +810,26 @@ final class AuctionExitExecutor {
         if (!(client.currentScreen instanceof GenericContainerScreen)
                 || !title(client.currentScreen).equals("Orders -> Your Orders")) return;
         GenericContainerScreenHandler handler = genericHandler(client);
+        int limit = Math.min(handler.getInventory().size(), handler.slots.size());
+        List<ItemStack> orderRows = new ArrayList<>();
+        Set<String> observedItemIds = new java.util.LinkedHashSet<>();
+        for (int slot = 0; slot < limit; slot++) {
+            ItemStack row = handler.getSlot(slot).getStack();
+            if (row.isEmpty() || OrderPlan.firstOrderProgress(stackText(row)).isEmpty()) continue;
+            Identifier id = Registries.ITEM.getId(row.getItem());
+            if (id == null) throw new IllegalStateException("personal order row has no canonical registry item");
+            orderRows.add(row);
+            observedItemIds.add(id.toString());
+        }
+        if (orderRows.size() > 20) throw new IllegalStateException("personal order menu contains more than 20 order rows");
         int updated = 0;
+        Map<String, Integer> progressUpdates = new java.util.LinkedHashMap<>();
         for (LocalOrderPosition tracked : feed.orderPositions()) {
             if (tracked.state() == LocalOrderPosition.State.HOLD || tracked.state() == LocalOrderPosition.State.EXITED) continue;
             List<ItemStack> matches = new ArrayList<>();
-            int limit = Math.min(handler.getInventory().size(), handler.slots.size());
-            for (int slot = 0; slot < limit; slot++) {
-                ItemStack row = handler.getSlot(slot).getStack();
+            for (ItemStack row : orderRows) {
                 if (itemMatches(row, tracked.itemId())
-                        && textContainsRequested(stackText(row), tracked.totalQuantity())
-                        && OrderPlan.textContainsUnitReward(stackText(row), tracked.unitRewardCents())) {
+                        && trackedOrderTextMatches(stackText(row), tracked.totalQuantity(), tracked.unitRewardCents())) {
                     matches.add(row);
                 }
             }
@@ -811,9 +840,10 @@ final class AuctionExitExecutor {
             if (matches.size() != 1) continue;
             Optional<OrderPlan.OrderProgress> progress = OrderPlan.firstOrderProgress(stackText(matches.getFirst()));
             if (progress.isEmpty() || progress.get().total() != tracked.totalQuantity()) continue;
-            feed.recordObservedOrderProgress(tracked.itemId(), progress.get().delivered());
+            progressUpdates.put(tracked.itemId(), progress.get().delivered());
             updated++;
         }
+        feed.reconcilePersonalOrders(observedItemIds, orderRows.size(), progressUpdates);
         lastOrderReconcile = Instant.now();
         feed.diagnostic("auction_exit", "orders_reconciled", Map.of("candidate_state", "tracked",
                 "route", "ORDER_TO_AUCTION", "reason_code", "personal_menu_progress_refresh"));
@@ -1215,6 +1245,18 @@ final class AuctionExitExecutor {
             } catch (ArithmeticException | NumberFormatException ignored) { }
         }
         return false;
+    }
+
+    static boolean completedOrderTextMatches(String value, int quantity, long unitRewardCents) {
+        Optional<OrderPlan.OrderProgress> progress = OrderPlan.firstOrderProgress(value);
+        return progress.isPresent() && progress.get().delivered() == quantity && progress.get().total() == quantity
+                && OrderPlan.textContainsUnitReward(value, unitRewardCents);
+    }
+
+    static boolean trackedOrderTextMatches(String value, int quantity, long unitRewardCents) {
+        Optional<OrderPlan.OrderProgress> progress = OrderPlan.firstOrderProgress(value);
+        return progress.isPresent() && progress.get().total() == quantity
+                && OrderPlan.textContainsUnitReward(value, unitRewardCents);
     }
 
     private static Optional<Long> firstMoney(ItemStack stack) {

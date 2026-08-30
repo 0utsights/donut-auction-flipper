@@ -4,10 +4,30 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class CandidateFeedClientTest {
+    @Test void separatesDurablePositionLocksFromLiveServerOrderLocks() {
+        assertEquals(Set.of("minecraft:totem_of_undying"), CandidateFeedClient.liveOrderLocks(
+                Set.of("minecraft:netherite_scrap", "minecraft:totem_of_undying"),
+                Set.of("minecraft:netherite_scrap")));
+        assertThrows(IllegalArgumentException.class,
+                () -> CandidateFeedClient.liveOrderLocks(null, Set.of()));
+    }
+
+    @Test void validatesAuthoritativePersonalOrderSnapshots() {
+        assertEquals(Set.of("minecraft:diamond_block"), CandidateFeedClient.validatedPersonalOrderSnapshot(
+                Set.of("minecraft:diamond_block"), 2));
+        assertThrows(IllegalArgumentException.class,
+                () -> CandidateFeedClient.validatedPersonalOrderSnapshot(Set.of("minecraft:diamond_block"), 0));
+        assertThrows(IllegalArgumentException.class,
+                () -> CandidateFeedClient.validatedPersonalOrderSnapshot(Set.of("not an item"), 1));
+        assertThrows(IllegalArgumentException.class,
+                () -> CandidateFeedClient.validatedPersonalOrderSnapshot(Set.of(), 21));
+    }
+
     @Test
     void decodesOnlyFreshSortedUniqueShulkerSupply() {
         Instant now = Instant.parse("2026-08-29T17:00:00Z");

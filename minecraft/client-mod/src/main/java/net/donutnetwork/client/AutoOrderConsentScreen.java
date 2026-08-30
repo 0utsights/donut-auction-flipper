@@ -42,8 +42,13 @@ final class AutoOrderConsentScreen extends Screen {
                     OrderCreationExecutor.ArmResult result = executor.enableAuto(client);
                     validation = result.message();
                     if (result.armed()) {
-                        exitExecutor.enable(client);
-                        client.setScreen(null);
+                        if (exitExecutor.enable(client)) {
+                            client.setScreen(null);
+                        } else {
+                            executor.disableAuto(client, "automatic exits could not be enabled");
+                            validation = "automatic exits could not be enabled; the combined session remains off";
+                            clearAndInit();
+                        }
                     } else clearAndInit();
                 }, readiness.message());
         // The blocker button deliberately remains clickable so it explains why

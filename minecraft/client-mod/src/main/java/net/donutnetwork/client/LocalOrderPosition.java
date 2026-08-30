@@ -73,6 +73,10 @@ record LocalOrderPosition(String candidateId, String signature, String itemId, S
     int remainingToClaim() { return totalQuantity - claimedQuantity; }
     int remainingToPackage() { return claimedQuantity - packagedQuantity; }
     int remainingToList() { return packagedQuantity - listedQuantity; }
+    boolean safePreClaimHold() {
+        return state == State.HOLD && deliveredQuantity == totalQuantity
+                && claimedQuantity == 0 && packagedQuantity == 0 && listedQuantity == 0;
+    }
 
     private LocalOrderPosition copy(int delivered, State next, Instant now) {
         return copy(delivered, claimedQuantity, packagedQuantity, listedQuantity, next, now);

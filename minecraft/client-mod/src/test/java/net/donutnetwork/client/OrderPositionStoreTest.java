@@ -71,6 +71,19 @@ class OrderPositionStoreTest {
         assertEquals(0, position.remainingToList());
     }
 
+    @Test void onlyAZeroProgressCompletedHoldIsSafeToRecheck() {
+        Instant later = Instant.parse("2026-08-29T12:01:00Z");
+        LocalOrderPosition safe = position("minecraft:diamond_block").withState(LocalOrderPosition.State.HOLD, later);
+        assertTrue(safe.safePreClaimHold());
+        assertFalse(safe.claimed(64, true, later.plusSeconds(1))
+                .withState(LocalOrderPosition.State.HOLD, later.plusSeconds(2)).safePreClaimHold());
+        LocalOrderPosition incomplete = new LocalOrderPosition(safe.candidateId(), safe.signature(), safe.itemId(), safe.itemName(),
+                safe.batchQuantity(), safe.maxStackSize(), safe.batches(), safe.totalQuantity(), safe.unitRewardCents(),
+                safe.escrowDollars(), safe.targetListPrice(), safe.expectedProceedsPerBatch(), 63,
+                0, 0, 0, LocalOrderPosition.State.HOLD, safe.createdAt(), later.plusSeconds(3));
+        assertFalse(incomplete.safePreClaimHold());
+    }
+
     private static LocalOrderPosition position(String itemId) {
         Instant now = Instant.parse("2026-08-29T12:00:00Z");
         return new LocalOrderPosition("candidate", "signature", itemId, "Diamond Block", 64, 64, 1, 64,

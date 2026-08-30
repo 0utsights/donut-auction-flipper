@@ -111,13 +111,15 @@ final class CandidateFeedClient implements AutoCloseable {
         this.config = Objects.requireNonNull(config); this.alertSink = Objects.requireNonNull(alertSink); this.http = Objects.requireNonNull(http);
         this.positionStore = Objects.requireNonNull(positionStore);
         balance = new AtomicLong(config.balance());
-        activeOrderItems.addAll(config.activeOrderItems());
         orderPositions.putAll(positionStore.load());
-        activeOrderItems.addAll(orderPositions.keySet());
+        // Older builds persisted durable position IDs into active_order_items.
+        // Positions already provide their own duplicate lock, so remove those
+        // migrated IDs from the separate live/legacy server-order lock set.
+        activeOrderItems.addAll(liveOrderLocks(config.activeOrderItems(), orderPositions.keySet()));
         usedSlots = new AtomicLong(packSlots(Math.max(config.usedOrderSlots(), activeOrderItems.size()), config.usedAuctionSlots()));
         diagnostics = new AtomicBoolean(config.diagnostics());
         allocation = new AtomicReference<>(allocator.allocate(List.of(), config.balance(),
-                Math.max(config.usedOrderSlots(), activeOrderItems.size()), config.usedAuctionSlots(), activeOrderItems));
+                Math.max(config.usedOrderSlots(), activeOrderItems.size()), config.usedAuctionSlots(), duplicateLockedItemIds()));
         scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> { Thread thread = new Thread(runnable, "donut-candidate-feed"); thread.setDaemon(true); return thread; });
     }
 
@@ -204,6 +206,24 @@ final class CandidateFeedClient implements AutoCloseable {
         requirePositionPersistence();
     }
 
+    int rearmSafePreClaimHolds() {
+        Map<String, LocalOrderPosition> before = Map.copyOf(orderPositions);
+        AtomicLong rearmed = new AtomicLong();
+        Instant now = Instant.now();
+        orderPositions.replaceAll((ignored, position) -> {
+            if (!position.safePreClaimHold()) return position;
+            rearmed.incrementAndGet();
+            return position.withState(LocalOrderPosition.State.CLAIM_READY, now);
+        });
+        if (rearmed.get() > 0 && !persistAndAllocate()) {
+            orderPositions.clear();
+            orderPositions.putAll(before);
+            persistAndAllocate();
+            throw new IllegalStateException("safe held-order rechecks could not be persisted");
+        }
+        return Math.toIntExact(rearmed.get());
+    }
+
     void recordClaimed(String itemId, int totalClaimed, boolean direct) {
         if (itemId == null) return;
         AtomicBoolean freedOrderSlot = new AtomicBoolean();
@@ -215,6 +235,7 @@ final class CandidateFeedClient implements AutoCloseable {
             return next;
         });
         if (freedOrderSlot.get()) {
+            activeOrderItems.remove(itemId);
             usedSlots.updateAndGet(value -> packSlots(Math.max(0, unpackOrder(value) - 1), unpackAuction(value)));
         }
         requirePositionPersistence();
@@ -282,7 +303,6 @@ final class CandidateFeedClient implements AutoCloseable {
         // opens the verified personal-order menu and blocks an exact item match
         // before any transactional control is used.
         activeOrderItems.clear();
-        activeOrderItems.addAll(orderPositions.keySet());
         persistAndAllocate();
         // Recheck only the strongest newly available item. Enqueuing all twenty
         // as manual watches would starve market discovery; opening or arming any
@@ -382,6 +402,22 @@ final class CandidateFeedClient implements AutoCloseable {
         persistAndAllocate();
     }
 
+    void reconcilePersonalOrders(Set<String> observedItemIds, int occupiedSlots, Map<String, Integer> progressUpdates) {
+        Set<String> observed = validatedPersonalOrderSnapshot(observedItemIds, occupiedSlots);
+        if (progressUpdates == null || !observed.containsAll(progressUpdates.keySet())
+                || progressUpdates.entrySet().stream().anyMatch(entry -> entry.getKey() == null
+                || !ITEM_ID.matcher(entry.getKey()).matches() || entry.getValue() == null || entry.getValue() < 0)) {
+            throw new IllegalArgumentException("invalid tracked-order progress reconciliation");
+        }
+        Instant now = Instant.now();
+        progressUpdates.forEach((itemId, delivered) -> orderPositions.computeIfPresent(itemId,
+                (ignored, position) -> position.verified(delivered, now)));
+        activeOrderItems.clear();
+        activeOrderItems.addAll(liveOrderLocks(observed, orderPositions.keySet()));
+        usedSlots.updateAndGet(value -> packSlots(occupiedSlots, unpackAuction(value)));
+        persistAndAllocate();
+    }
+
     void setDiagnostics(boolean enabled) { diagnostics.set(enabled); ClientConfig.saveDiagnostics(enabled); }
 
     void diagnostic(String event, String code, Map<String, String> fields) {
@@ -398,7 +434,6 @@ final class CandidateFeedClient implements AutoCloseable {
         pendingBalanceUntilMillis.set(System.currentTimeMillis() + 10_000);
         pendingRefundFloor.set(-1);
         usedSlots.updateAndGet(value -> packSlots(Math.min(20, unpackOrder(value) + 1), unpackAuction(value)));
-        activeOrderItems.add(candidate.itemId());
         balanceSource.set("local pending order");
         requirePositionPersistence();
         enqueueDiagnostic("order_workflow", "submitted", 0, Map.of("candidate_state", candidate.state(),
@@ -408,14 +443,6 @@ final class CandidateFeedClient implements AutoCloseable {
     void recordOrderVerified(OrderPlan plan, int deliveredQuantity) {
         if (plan == null) return;
         orderPositions.computeIfPresent(plan.itemId(), (ignored, position) -> position.verified(deliveredQuantity, Instant.now()));
-        activeOrderItems.add(plan.itemId());
-        requirePositionPersistence();
-    }
-
-    void recordObservedOrderProgress(String itemId, int deliveredQuantity) {
-        if (itemId == null || !ITEM_ID.matcher(itemId).matches()) return;
-        orderPositions.computeIfPresent(itemId, (ignored, position) -> position.verified(deliveredQuantity, Instant.now()));
-        activeOrderItems.add(itemId);
         requirePositionPersistence();
     }
 
@@ -426,7 +453,6 @@ final class CandidateFeedClient implements AutoCloseable {
         if (complete.matches()) {
             matchingPosition(complete.group(1)).ifPresent(position -> {
                 orderPositions.computeIfPresent(position.itemId(), (ignored, current) -> current.completed(Instant.now()));
-                activeOrderItems.add(position.itemId());
                 persistAndAllocate();
                 enqueueDiagnostic("order_position", "complete", 0, Map.of("item_id", position.itemId(),
                         "route", "ORDER_TO_AUCTION", "reason_code", "server_completion_message"));
@@ -482,7 +508,8 @@ final class CandidateFeedClient implements AutoCloseable {
             if (encoded.length > MAX_RESPONSE_BYTES) throw new IllegalStateException("candidate feed exceeds 1 MiB");
             if (response.statusCode() != 200) throw new IllegalStateException("backend returned HTTP " + response.statusCode());
             DecodedFeed feed = decode(encoded); candidates.set(feed.candidates()); generatedAt.set(feed.generatedAt()); etag = response.headers().firstValue("ETag").orElse("");
-            PortfolioAllocator.Allocation next = allocator.allocate(feed.candidates(), balance(), usedOrderSlots(), usedAuctionSlots(), activeOrderItems);
+            PortfolioAllocator.Allocation next = allocator.allocate(feed.candidates(), balance(), usedOrderSlots(),
+                    usedAuctionSlots(), duplicateLockedItemIds());
             allocation.set(next); status.set(new Status("ready", Instant.now(), "connected", feed.version(), feed.candidates().size()));
             emitNew(next);
         }
@@ -578,12 +605,35 @@ final class CandidateFeedClient implements AutoCloseable {
     }
 
     private boolean persistAndAllocate() {
-        Set<String> tracked = java.util.stream.Stream.concat(activeOrderItems.stream(), orderPositions.keySet().stream())
-                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        Set<String> liveOrders = Set.copyOf(activeOrderItems);
         boolean saved = positionStore.save(orderPositions.values());
-        ClientConfig.saveLocalState(balance(), usedOrderSlots(), usedAuctionSlots(), tracked);
-        allocation.set(allocator.allocate(candidates(), balance(), usedOrderSlots(), usedAuctionSlots(), tracked));
+        ClientConfig.saveLocalState(balance(), usedOrderSlots(), usedAuctionSlots(), liveOrders);
+        allocation.set(allocator.allocate(candidates(), balance(), usedOrderSlots(), usedAuctionSlots(), duplicateLockedItemIds()));
         return saved;
+    }
+
+    private Set<String> duplicateLockedItemIds() {
+        java.util.LinkedHashSet<String> locked = new java.util.LinkedHashSet<>(activeOrderItems);
+        locked.addAll(orderPositions.keySet());
+        return Set.copyOf(locked);
+    }
+
+    static Set<String> liveOrderLocks(Set<String> configuredItems, Set<String> durablePositionItems) {
+        if (configuredItems == null || durablePositionItems == null) {
+            throw new IllegalArgumentException("order lock sets are required");
+        }
+        java.util.LinkedHashSet<String> live = new java.util.LinkedHashSet<>(configuredItems);
+        live.removeAll(durablePositionItems);
+        return Set.copyOf(live);
+    }
+
+    static Set<String> validatedPersonalOrderSnapshot(Set<String> observedItemIds, int occupiedSlots) {
+        if (observedItemIds == null || occupiedSlots < 0 || occupiedSlots > 20
+                || observedItemIds.size() > occupiedSlots
+                || observedItemIds.stream().anyMatch(value -> value == null || !ITEM_ID.matcher(value).matches())) {
+            throw new IllegalArgumentException("invalid personal-order reconciliation");
+        }
+        return Set.copyOf(observedItemIds);
     }
 
     private void requirePositionPersistence() {
