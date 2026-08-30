@@ -9,7 +9,7 @@ import { EgressMismatchError, minecraftConnect, proxyAgent, verifyEgress } from 
 import { redactSensitiveText } from './redaction.js'
 import { SafeNavigator, type WindowView } from './safe-navigation.js'
 import { loadSchemas } from './schemas.js'
-import { backendRetryDelay, minecraftReconnectDelay, taskResultForFailure, type TaskFailureClass } from './task-policy.js'
+import { backendRetryDelay, guardedInteractionDelay, minecraftReconnectDelay, taskResultForFailure, type TaskFailureClass } from './task-policy.js'
 import { PARSER_VERSION, SCHEMA_VERSION, type ItemView, type MenuSchema, type ObserverTask, type RuntimeConfig, type ScanBatch } from './types.js'
 import { beginServerWindowUpdate, WindowClosedError, type WindowUpdateSource } from './window-update.js'
 
@@ -32,6 +32,7 @@ const PROFILE_REVALIDATION_RUNTIME_MS = 4_000
 // Cached-token logins still resolve this wait as soon as the server spawns.
 const MICROSOFT_LOGIN_TIMEOUT_MS = 10 * 60_000
 const INTENTIONAL_ROTATION_GRACE_MS = 60_000
+const INVALID_SEQUENCE_GUARD_MS = 15 * 60_000
 
 class ObserverRuntime {
   private bot: Bot | undefined
@@ -47,6 +48,7 @@ class ObserverRuntime {
   private connected = false
   private mostPerItemConfirmedAt = 0
   private reconnectNotBefore = 0
+  private sequenceGuardUntil = 0
 
   constructor(private readonly config: RuntimeConfig) {
     this.backend = new BackendClient(new URL(config.backendUrl), config.observerToken, config.account.id)
@@ -99,7 +101,8 @@ class ObserverRuntime {
         message = safeMessage(error)
         const failure: TaskFailureClass = error instanceof SchemaHoldError ? 'schema_hold'
           : error instanceof ReconnectRequiredError ? 'reconnect_required'
-            : error instanceof MenuSessionEndedError ? 'menu_session_ended' : 'other'
+            : error instanceof MenuSessionEndedError ? 'menu_session_ended'
+              : error instanceof MenuResetRequiredError ? 'menu_reset_required' : 'other'
         status = taskResultForFailure(task.kind, task.priority, failure)
         this.log(status === 'complete' ? 'task_complete' : 'task_failed', `reason=${message}`)
         // A closed or non-opening /orders menu can leave the player connection
@@ -153,7 +156,12 @@ class ObserverRuntime {
     this.bot = bot
     bot.on('kicked', reason => {
       if (this.bot === bot) this.connected = false
-      this.report(new Error(`kicked: ${safeText(reason, 200)}`))
+      const safeReason = safeText(reason, 200)
+      if (/invalid sequence/i.test(safeReason)) {
+        this.sequenceGuardUntil = Date.now() + INVALID_SEQUENCE_GUARD_MS
+        this.log('sequence_guard_armed', `extra_click_delay_ms=250 duration_ms=${INVALID_SEQUENCE_GUARD_MS}`)
+      }
+      this.report(new Error(`kicked: ${safeReason}`))
     })
     bot._client.once('session', () => { restoreAuthenticationFetch(); this.log('microsoft_session_ready') })
     bot.once('login', () => this.log('minecraft_login_accepted'))
@@ -201,7 +209,8 @@ class ObserverRuntime {
     if (!this.connected || !bot?.player) throw new Error('observer is not connected')
     if (task.parser_schema !== SCHEMA_VERSION) throw new Error('backend requested an unsupported parser schema')
     const navigator = new SafeNavigator(botAdapter(bot), this.schemas)
-    const clickDelay = task.kind === 'focused_watch' ? FOCUSED_CLICK_DELAY_MS : DISCOVERY_CLICK_DELAY_MS
+    const baseClickDelay = task.kind === 'focused_watch' ? FOCUSED_CLICK_DELAY_MS : DISCOVERY_CLICK_DELAY_MS
+    const clickDelay = guardedInteractionDelay(baseClickDelay, this.sequenceGuardUntil, Date.now())
     let window: NonNullable<Bot['currentWindow']>
     if (task.kind === 'focused_watch' && task.signature) {
       // A previous focused task can leave an item-filtered page open. It uses
@@ -302,7 +311,11 @@ class ObserverRuntime {
       }
       if (task.kind === 'focused_watch') {
         if (submittedOrders.length > 0) {
-          if (![...schema.controls.values()].some(rule => rule.kind === 'refresh')) throw new SchemaHoldError('focused-watch refresh control is unavailable')
+          if (![...schema.controls.values()].some(rule => rule.kind === 'refresh') || !navigator.controlAvailable('refresh')) {
+            this.writeCapture(task.id, captured.hash, captured.title, captured.views)
+            if (bot.currentWindow) bot.closeWindow(bot.currentWindow)
+            throw new MenuResetRequiredError('focused-watch refresh control disappeared; captured and reset menu')
+          }
           if (Date.now() >= taskDeadline) {
             if (bot.currentWindow) bot.closeWindow(bot.currentWindow)
             return
@@ -332,7 +345,11 @@ class ObserverRuntime {
       // Continuously refresh the highest unit-reward page. Each refresh is an
       // independent observation and can immediately yield to API-ranked work.
       if (scan.page !== 1) throw new ReconnectRequiredError(`top-page discovery opened unexpectedly at page ${scan.page}`)
-      if (!navigator.controlAvailable('refresh')) throw new SchemaHoldError('top-page refresh control is unavailable')
+      if (!navigator.controlAvailable('refresh')) {
+        this.writeCapture(task.id, captured.hash, captured.title, captured.views)
+        if (bot.currentWindow) bot.closeWindow(bot.currentWindow)
+        throw new MenuResetRequiredError('top-page refresh control disappeared; captured and reset menu')
+      }
       this.log('top_page_refresh_clicking')
       await sleep(clickDelay)
       this.ensureConnected(bot)
@@ -465,6 +482,7 @@ function parsePage(title: string, fallback: number): number {
 class SchemaHoldError extends Error {}
 class ReconnectRequiredError extends Error {}
 class MenuSessionEndedError extends Error {}
+class MenuResetRequiredError extends Error {}
 
 function safeText(value: unknown, limit: number): string {
   return redactSensitiveText(value).replace(/[\r\n\0]/g, ' ').trim().slice(0, limit)

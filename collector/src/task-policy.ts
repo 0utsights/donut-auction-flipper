@@ -1,6 +1,6 @@
 import type { TaskKind } from './types.js'
 
-export type TaskFailureClass = 'schema_hold' | 'reconnect_required' | 'menu_session_ended' | 'other'
+export type TaskFailureClass = 'schema_hold' | 'reconnect_required' | 'menu_session_ended' | 'menu_reset_required' | 'other'
 export type TaskResultStatus = 'complete' | 'retry' | 'failed'
 
 export function backendRetryDelay(failures: number): number {
@@ -14,10 +14,17 @@ export function minecraftReconnectDelay(backoffMilliseconds: number, reconnectNo
 export function taskResultForFailure(kind: TaskKind, priority: number, failure: TaskFailureClass): TaskResultStatus {
   if (failure === 'schema_hold') return 'failed'
   if (failure === 'reconnect_required') return 'complete'
+  if (failure === 'menu_reset_required') return kind === 'focused_watch' && priority >= 100 ? 'retry' : 'complete'
   // An automatic focused task that loses its menu must not immediately lease
   // itself again from page one and monopolize the only observer. Completing it
   // applies the normal per-item cooldown; a later discovery pass can requeue it.
   // Priority 100 is a live player request and may retry within its short watch.
   if (failure === 'menu_session_ended' && kind === 'focused_watch' && priority < 100) return 'complete'
   return 'retry'
+}
+
+export function guardedInteractionDelay(baseMilliseconds: number, guardUntil: number, now: number, penaltyMilliseconds = 250): number {
+  if (![baseMilliseconds, guardUntil, now, penaltyMilliseconds].every(Number.isFinite)
+    || baseMilliseconds < 0 || penaltyMilliseconds < 0) throw new Error('invalid interaction delay')
+  return baseMilliseconds + (guardUntil > now ? penaltyMilliseconds : 0)
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { backendRetryDelay, minecraftReconnectDelay, taskResultForFailure } from './task-policy.js'
+import { backendRetryDelay, guardedInteractionDelay, minecraftReconnectDelay, taskResultForFailure } from './task-policy.js'
 
 test('automatic focused menu failures cool down instead of monopolizing the observer', () => {
   assert.equal(taskResultForFailure('focused_watch', 75, 'menu_session_ended'), 'complete')
@@ -13,6 +13,15 @@ test('schema and planned-rotation outcomes retain fail-closed semantics', () => 
   assert.equal(taskResultForFailure('focused_watch', 75, 'schema_hold'), 'failed')
   assert.equal(taskResultForFailure('focused_watch', 75, 'reconnect_required'), 'complete')
   assert.equal(taskResultForFailure('focused_watch', 75, 'other'), 'retry')
+  assert.equal(taskResultForFailure('discovery', 10, 'menu_reset_required'), 'complete')
+  assert.equal(taskResultForFailure('focused_watch', 75, 'menu_reset_required'), 'complete')
+  assert.equal(taskResultForFailure('focused_watch', 100, 'menu_reset_required'), 'retry')
+})
+
+test('temporarily slows menu interaction after an invalid-sequence kick', () => {
+  assert.equal(guardedInteractionDelay(500, 20_000, 10_000), 750)
+  assert.equal(guardedInteractionDelay(500, 10_000, 10_000), 500)
+  assert.throws(() => guardedInteractionDelay(-1, 0, 0), /invalid interaction delay/)
 })
 
 test('backend retry stays bounded without forcing a Minecraft reconnect', () => {
