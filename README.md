@@ -61,7 +61,7 @@ Requirements: Minecraft 1.21.11, Java 21, Fabric Loader 0.19.2+, and Fabric API.
 gradle -p minecraft/client-mod clean test build
 ```
 
-Copy the remapped JAR from `minecraft/client-mod/build/libs/` to the instance's `mods` directory. The verified build is checked in at `outputs/donut-market-flips-2.1.0-alpha.32.jar`. Press `N` or run `/dn`.
+Copy the remapped JAR from `minecraft/client-mod/build/libs/` to the instance's `mods` directory. The verified build is checked in at `outputs/donut-market-flips-2.1.0-alpha.33.jar`. Press `N` or run `/dn`.
 
 The generated `config/donut-network.properties` contains:
 

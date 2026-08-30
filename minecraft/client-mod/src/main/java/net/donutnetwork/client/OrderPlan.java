@@ -101,6 +101,11 @@ record OrderPlan(String candidateId, String signature, String itemId, String ite
         return cents == 0 ? Long.toString(dollars) : dollars + "." + String.format(Locale.ROOT, "%02d", cents);
     }
 
+    /** Donut escrows and displays the order total in whole dollars, rounded up. */
+    long reviewTotalCents() {
+        return Math.multiplyExact(escrowDollars, 100);
+    }
+
     String itemPathQuery() {
         int separator = itemId.indexOf(':');
         return separator < 0 ? itemId : itemId.substring(separator + 1);

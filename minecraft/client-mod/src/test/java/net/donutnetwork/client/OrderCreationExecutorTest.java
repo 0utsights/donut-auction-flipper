@@ -49,6 +49,13 @@ class OrderCreationExecutorTest {
         assertFalse(OrderCreationExecutor.isCreateOrderControl("minecraft:black_stained_glass_pane", "Decoration"));
     }
 
+    @Test void acceptsOnlyTheCapturedEditOrderCancellationControl() {
+        assertTrue(OrderCreationExecutor.isCancelOrderControl("minecraft:red_terracotta", "Cancel"));
+        assertTrue(OrderCreationExecutor.isCancelOrderControl("minecraft:red_terracotta", "Cancel Order"));
+        assertFalse(OrderCreationExecutor.isCancelOrderControl("minecraft:red_terracotta", "Confirm"));
+        assertFalse(OrderCreationExecutor.isCancelOrderControl("minecraft:barrier", "Cancel"));
+    }
+
     @Test void skipsOnlyCandidateSpecificChangesBeforeServerNavigation() {
         assertTrue(OrderCreationExecutor.isSkippablePreTransactionChange("armed candidate changed or disappeared"));
         assertTrue(OrderCreationExecutor.isSkippablePreTransactionChange("allocated stack count was reduced"));

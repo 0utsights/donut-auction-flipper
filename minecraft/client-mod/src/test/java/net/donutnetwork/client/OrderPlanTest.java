@@ -65,6 +65,17 @@ class OrderPlanTest {
         assertEquals(192, plan.quantity());
         assertEquals(19_392, plan.totalCents());
         assertEquals(194, plan.escrowDollars());
+        assertEquals(19_400, plan.reviewTotalCents());
+    }
+
+    @Test void verifiesTheWholeDollarEscrowShownForAOneItemFractionalBid() {
+        OrderPlan plan = OrderPlan.from(candidate(1, 13_061, 131));
+        assertEquals("130.61", plan.priceInput());
+        assertEquals(13_061, plan.totalCents());
+        assertEquals(13_100, plan.reviewTotalCents());
+        String review = "Price: $130.61 each Amount: 1 Total: $131";
+        assertTrue(OrderPlan.textContainsMoney(review, plan.unitRewardCents()));
+        assertTrue(OrderPlan.textContainsMoney(review, plan.reviewTotalCents()));
     }
 
     @Test void rejectsMoreStacksThanConservativeVolume() {

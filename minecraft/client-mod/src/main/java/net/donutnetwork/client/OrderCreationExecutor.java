@@ -554,7 +554,9 @@ final class OrderCreationExecutor {
         if (!OrderPlan.textContainsQuantity(corpus, plan.quantity())) {
             failCandidate(client, "review amount does not match the armed quantity"); return;
         }
-        if (!OrderPlan.textContainsMoney(corpus, plan.unitRewardCents()) || !OrderPlan.textContainsMoney(corpus, plan.totalCents())) {
+        if (!OrderPlan.textContainsMoney(corpus, plan.unitRewardCents()) || !OrderPlan.textContainsMoney(corpus, plan.reviewTotalCents())) {
+            LOGGER.warn("Order review economics mismatch: item={}; expected_unit_cents={}; expected_escrow_cents={}; review={}",
+                    plan.itemId(), plan.unitRewardCents(), plan.reviewTotalCents(), safe(corpus));
             failCandidate(client, "review price or total does not match the armed economics"); return;
         }
         CandidateFeedClient.Candidate current = feed.candidate(plan.candidateId()).orElseThrow(() -> new IllegalStateException("candidate disappeared"));
@@ -705,10 +707,10 @@ final class OrderCreationExecutor {
         if (!(screen instanceof GenericContainerScreen) || !title(screen).equals("Orders -> Edit Order")) {
             abort(client, "unexpected order-management screen: " + title(screen)); return;
         }
-        List<Integer> controls = controlSlots(client, "cancel order");
+        List<Integer> controls = cancelOrderControlSlots(client);
         if (controls.size() != 1) {
             LOGGER.warn("Cancellation control not proven: {}", menuFingerprint(client));
-            abort(client, "exactly one Cancel Order control was not present; no cancellation was attempted"); return;
+            abort(client, "exactly one verified cancellation control was not present; no cancellation was attempted"); return;
         }
         clickSlot(client, controls.getFirst());
         cancelConfirmationSent = false;
@@ -944,7 +946,8 @@ final class OrderCreationExecutor {
         closeScreen(client);
         String ignored = itemID == null || itemID.isBlank() ? "one item" : itemID;
         if (autoQueue.isEmpty()) {
-            message = "ignored " + ignored + " for this session; waiting for other reviewed candidates";
+            message = "ignored " + ignored + " for this session: " + safe(reason)
+                    + "; waiting for other reviewed candidates";
         } else {
             message = "ignored " + ignored + " for this session: " + safe(reason)
                     + "; " + autoQueue.size() + " remain";
@@ -1126,6 +1129,25 @@ final class OrderCreationExecutor {
 
     private static List<Integer> controlSlots(MinecraftClient client, String exactLabel) {
         return controlSlots(client, Set.of(exactLabel));
+    }
+
+    private static List<Integer> cancelOrderControlSlots(MinecraftClient client) {
+        if (!(client.player.currentScreenHandler instanceof GenericContainerScreenHandler handler)) return List.of();
+        int limit = Math.min(handler.getInventory().size(), handler.slots.size());
+        List<Integer> result = new ArrayList<>();
+        for (int index = 0; index < limit; index++) {
+            ItemStack stack = handler.getSlot(index).getStack();
+            if (stack.isEmpty()) continue;
+            Identifier id = Registries.ITEM.getId(stack.getItem());
+            if (id != null && isCancelOrderControl(id.toString(), stack.getName().getString())) result.add(index);
+        }
+        return List.copyOf(result);
+    }
+
+    static boolean isCancelOrderControl(String itemId, String label) {
+        if (!"minecraft:red_terracotta".equals(itemId)) return false;
+        String normalized = OrderPlan.normalizeLabel(label);
+        return normalized.equals("cancel") || normalized.equals("cancel order");
     }
 
     private static List<Integer> controlSlots(MinecraftClient client, Set<String> exactLabels) {
