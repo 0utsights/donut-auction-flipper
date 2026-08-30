@@ -108,7 +108,7 @@ docker compose -f compose.yaml -f compose.second-pc.yaml up -d auction-server or
 
 For a collector-only or backend-only update, pass `collector` or `backend` to the build script. The script keeps dependency caches under the ignored `.second-pc-cache/` directory, so repeated validated deployments do not redownload the complete Go and npm dependency sets.
 
-From the player PC, run `scripts/second-pc-tunnel.ps1`. The existing Fabric and browser URL remains `http://127.0.0.1:8080`; SSH encrypts and authenticates the hop, and the backend is never bound to LAN. Enabling tailnet HTTPS later allows replacing this tunnel with the normal Caddy deployment.
+From the player PC, run `scripts/install-second-pc-tunnel-task.ps1` once. It installs a hidden per-user logon task that supervises `scripts/second-pc-tunnel.ps1`, checks the real `/healthz` response, and reconnects with bounded backoff whenever the SSH forward or second PC is temporarily unavailable. The existing Fabric and browser URL remains `http://127.0.0.1:8080`; SSH encrypts and authenticates the hop, and the backend is never bound to LAN. Remove it with `Unregister-ScheduledTask -TaskName DonutMarketBackendTunnel -Confirm:$false`. Enabling tailnet HTTPS later allows replacing this tunnel with the normal Caddy deployment.
 
 ## Configuration
 
