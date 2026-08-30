@@ -14,15 +14,18 @@ final class AutoOrderConsentScreen extends Screen {
     private final FlipFeedClient auctions;
     private final CandidateFeedClient candidates;
     private final OrderCreationExecutor executor;
+    private final AuctionExitExecutor exitExecutor;
     private String validation = "";
     private String renderedKey = "";
 
-    AutoOrderConsentScreen(Screen parent, FlipFeedClient auctions, CandidateFeedClient candidates, OrderCreationExecutor executor) {
-        super(Text.literal("Enable automatic buy orders"));
+    AutoOrderConsentScreen(Screen parent, FlipFeedClient auctions, CandidateFeedClient candidates,
+                           OrderCreationExecutor executor, AuctionExitExecutor exitExecutor) {
+        super(Text.literal("Enable automatic order-to-auction flipping"));
         this.parent = parent;
         this.auctions = auctions;
         this.candidates = candidates;
         this.executor = executor;
+        this.exitExecutor = exitExecutor;
     }
 
     @Override protected void init() {
@@ -38,7 +41,10 @@ final class AutoOrderConsentScreen extends Screen {
                 () -> {
                     OrderCreationExecutor.ArmResult result = executor.enableAuto(client);
                     validation = result.message();
-                    if (result.armed()) client.setScreen(null); else clearAndInit();
+                    if (result.armed()) {
+                        exitExecutor.enable(client);
+                        client.setScreen(null);
+                    } else clearAndInit();
                 }, readiness.message());
         // The blocker button deliberately remains clickable so it explains why
         // consent cannot proceed instead of appearing mysteriously inert.
@@ -71,7 +77,7 @@ final class AutoOrderConsentScreen extends Screen {
 
         MarketUi.drawBackdrop(context, width, height);
         context.createNewRootLayer();
-        MarketUi.drawPanel(context, left, top, panelWidth, panelHeight, "DONUT MARKET", "AUTOMATIC ORDERS", "SESSION ONLY", MarketUi.ACCENT_BRIGHT);
+        MarketUi.drawPanel(context, left, top, panelWidth, panelHeight, "DONUT MARKET", "CONTINUOUS AUTO FLIPS", "SESSION ONLY", MarketUi.ACCENT_BRIGHT);
         MarketUi.drawCard(context, left + 16, top + 55, panelWidth - 32, 43);
         context.drawTextWithShadow(textRenderer, Text.literal(state), left + 28, top + 65, stateColor);
         context.drawTextWithShadow(textRenderer, Text.literal(MarketUi.trim(readiness.message(), 69)), left + 28, top + 80, MarketUi.MUTED);
@@ -98,10 +104,10 @@ final class AutoOrderConsentScreen extends Screen {
                     left + 28, top + 216, MarketUi.MUTED);
         }
 
-        context.drawTextWithShadow(textRenderer, Text.literal("EVERY ORDER"), left + 18, top + 230, MarketUi.MUTED);
-        context.drawTextWithShadow(textRenderer, Text.literal("Fresh proof  •  exact item  •  rank #1  •  duplicate check  •  frozen cap"),
+        context.drawTextWithShadow(textRenderer, Text.literal("EVERY CYCLE"), left + 18, top + 230, MarketUi.MUTED);
+        context.drawTextWithShadow(textRenderer, Text.literal("Fresh proof  •  rank #1 order  •  exact claim  •  current auction quote"),
                 left + 28, top + 246, MarketUi.TEXT);
-        String note = validation.isBlank() ? "Future READY allocations are queued until Stop Auto or a safety stop." : validation;
+        String note = validation.isBlank() ? "New READY orders and completed exits keep running until Stop Auto." : validation;
         context.drawTextWithShadow(textRenderer, Text.literal(MarketUi.trim(note, 74)), left + 28, top + 261,
                 validation.isBlank() ? MarketUi.MUTED : stateColor);
         context.createNewRootLayer();

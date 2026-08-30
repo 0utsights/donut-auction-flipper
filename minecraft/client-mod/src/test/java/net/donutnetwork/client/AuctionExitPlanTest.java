@@ -72,6 +72,20 @@ class AuctionExitPlanTest {
         }
     }
 
+    @Test void currentAuctionQuoteReplacesTheFrozenOrderTimeExitPrice() {
+        LocalOrderPosition position = position(64, 64, 2, 30_000);
+        AuctionExitPlan plan = AuctionExitPlan.from(position, 45_000, 42_000, 1_000);
+        assertEquals(90_000, plan.grossTargetDollars());
+        assertEquals(44_000, plan.listings().getFirst().listPriceDollars());
+        assertEquals(44_000, plan.listings().get(1).listPriceDollars());
+    }
+
+    @Test void dynamicQuoteStillRejectsAnExitThatBecameUnprofitable() {
+        LocalOrderPosition position = position(64, 64, 1, 30_000);
+        assertThrows(IllegalArgumentException.class,
+                () -> AuctionExitPlan.from(position, 2_000, 1_000, 1_000));
+    }
+
     private static LocalOrderPosition position(int batchQuantity, int maxStackSize, int batches, long target) {
         Instant now = Instant.parse("2026-08-29T12:00:00Z");
         int total = Math.multiplyExact(batchQuantity, batches);

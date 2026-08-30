@@ -53,13 +53,16 @@ final class DonutScreen extends Screen {
             String stopLabel = orderExecutor.autoRemaining() == 0 ? "STOP AUTO" : "STOP AUTO (" + orderExecutor.autoRemaining() + ")";
             addDrawableChild(MarketUi.button(stopLabel, layout.left + 16, footer, 130, 22,
                     MarketUi.ButtonStyle.DANGER,
-                    () -> { orderExecutor.disableAuto(client, "automatic order queue stopped by player"); clearAndInit(); },
-                    "Stop the automatic queue and cancel any in-progress order wizard."));
+                    () -> {
+                        orderExecutor.disableAuto(client, "automatic flipping stopped by player");
+                        exitExecutor.disable(client, "automatic flipping stopped by player");
+                        clearAndInit();
+                    }, "Stop automatic orders and auction exits."));
         } else {
-            addDrawableChild(MarketUi.button("AUTO ORDERS", layout.left + 16, footer, 130, 22,
+            addDrawableChild(MarketUi.button("AUTO FLIP", layout.left + 16, footer, 130, 22,
                     MarketUi.ButtonStyle.PRIMARY,
-                    () -> client.setScreen(new AutoOrderConsentScreen(this, auctions, candidates, orderExecutor)),
-                    "Open session consent and see any exact readiness blocker."));
+                    () -> client.setScreen(new AutoOrderConsentScreen(this, auctions, candidates, orderExecutor, exitExecutor)),
+                    "Enable the continuous order-to-auction session."));
         }
         if (orderExecutor.status().active()) {
             addDrawableChild(MarketUi.button("STOP ORDER", layout.left + 152, footer, 92, 22, MarketUi.ButtonStyle.DANGER,

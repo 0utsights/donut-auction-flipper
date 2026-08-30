@@ -1,5 +1,7 @@
 # Progress
 
+- Fabric's next build unifies automatic orders and exits behind `Auto Flip`. Verified cancellation now restores the exact pre-submit local balance even when the rounded sidebar cannot expose the refund. Transient connectivity/freshness failures retry; item-specific failures quarantine or `HOLD` only the affected position. Completed-order progress is refreshed from `Your Orders` every 15 seconds, full-order immediate collection is supported, exit prices are rebuilt from a fresh official-API exact-quantity quote, and a full 18-slot auction book is reconciled through `Your Items` rather than remaining permanently blocked.
+
 Last updated: 2026-08-29
 
 ## Implemented on `codex/auction-orders`

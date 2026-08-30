@@ -29,6 +29,13 @@ record AuctionExitPlan(String itemId, String itemName, Mode mode, int totalQuant
     }
 
     static AuctionExitPlan from(LocalOrderPosition position, long undercutDollars) {
+        return from(position, position == null ? 0 : position.targetListPrice(),
+                position == null ? 0 : position.expectedProceedsPerBatch(), undercutDollars);
+    }
+
+    /** Build an exit from a current official-API valuation, not the quote frozen when the order was created. */
+    static AuctionExitPlan from(LocalOrderPosition position, long currentTargetListPrice,
+                                long currentExpectedProceedsPerBatch, long undercutDollars) {
         if (position == null || position.deliveredQuantity() != position.totalQuantity()
                 || position.state() == LocalOrderPosition.State.PENDING_VERIFICATION
                 || position.state() == LocalOrderPosition.State.ACTIVE
@@ -37,13 +44,16 @@ record AuctionExitPlan(String itemId, String itemName, Mode mode, int totalQuant
             throw new IllegalArgumentException("auction exits require a completely filled, claim-ready order");
         }
         if (undercutDollars < 0) throw new IllegalArgumentException("undercut cannot be negative");
-        long gross = Math.multiplyExact(position.targetListPrice(), position.batches());
+        if (currentTargetListPrice <= 0 || currentExpectedProceedsPerBatch <= 0) {
+            throw new IllegalArgumentException("current auction exit quote is invalid");
+        }
+        long gross = Math.multiplyExact(currentTargetListPrice, position.batches());
         int physicalSlots = ceilingDivide(position.totalQuantity(), position.maxStackSize());
         Mode mode = physicalSlots >= SHULKER_SLOT_THRESHOLD ? Mode.SHULKER : Mode.DIRECT;
         List<Listing> listings = mode == Mode.SHULKER
                 ? shulkerListings(position, gross, undercutDollars)
-                : directListings(position, undercutDollars);
-        long conservativeProceeds = Math.multiplyExact(position.expectedProceedsPerBatch(), position.batches());
+                : directListings(position, currentTargetListPrice, undercutDollars);
+        long conservativeProceeds = Math.multiplyExact(currentExpectedProceedsPerBatch, position.batches());
         long totalUndercut = Math.multiplyExact(undercutDollars, listings.size());
         if (conservativeProceeds <= Math.addExact(position.escrowDollars(), totalUndercut)) {
             throw new IllegalArgumentException("conservative exit profit does not cover listing undercuts");
@@ -53,15 +63,15 @@ record AuctionExitPlan(String itemId, String itemName, Mode mode, int totalQuant
                 physicalSlots, shulkers, gross, undercutDollars, listings);
     }
 
-    private static List<Listing> directListings(LocalOrderPosition position, long undercut) {
-        if (position.targetListPrice() <= undercut) {
+    private static List<Listing> directListings(LocalOrderPosition position, long targetListPrice, long undercut) {
+        if (targetListPrice <= undercut) {
             throw new IllegalArgumentException("direct listing target does not cover the configured undercut");
         }
         List<Listing> result = new ArrayList<>(position.batches());
         for (int index = 0; index < position.batches(); index++) {
             result.add(new Listing(index + 1, position.batchQuantity(),
-                    ceilingDivide(position.batchQuantity(), position.maxStackSize()), position.targetListPrice(),
-                    position.targetListPrice() - undercut, false));
+                    ceilingDivide(position.batchQuantity(), position.maxStackSize()), targetListPrice,
+                    targetListPrice - undercut, false));
         }
         return List.copyOf(result);
     }

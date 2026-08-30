@@ -70,6 +70,15 @@ class OrderCreationExecutorTest {
         assertFalse(OrderCreationExecutor.isRebasablePreTransactionChange("auction exit is stale"));
     }
 
+    @Test void continuousSessionWaitsThroughTransientDataAndBalanceGaps() {
+        assertTrue(OrderCreationExecutor.isTransientWaitError("focused order observation is not fresh yet"));
+        assertTrue(OrderCreationExecutor.isTransientWaitError("backend candidate feed is not ready"));
+        assertTrue(OrderCreationExecutor.isTransientWaitError("candidate feed is stale"));
+        assertTrue(OrderCreationExecutor.isTransientWaitError("auction exit is stale"));
+        assertTrue(OrderCreationExecutor.isTransientWaitError("waiting for the live scoreboard balance or a manual override"));
+        assertFalse(OrderCreationExecutor.isTransientWaitError("review item does not match the armed item"));
+    }
+
     @Test void recognizesOnlyTheExpectedServerTextInputDescriptor() {
         assertTrue(OrderCreationExecutor.recognizedTextInputDescriptor("search", "Item", Set.of("search")));
         assertTrue(OrderCreationExecutor.recognizedTextInputDescriptor("value", "Price per item", Set.of("price")));

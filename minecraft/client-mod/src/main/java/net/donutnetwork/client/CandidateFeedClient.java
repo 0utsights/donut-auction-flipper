@@ -78,6 +78,15 @@ final class CandidateFeedClient implements AutoCloseable {
     private final AtomicLong pendingBalanceCeiling = new AtomicLong(Long.MAX_VALUE);
     private final AtomicLong pendingBalanceUntilMillis = new AtomicLong();
     private final AtomicLong pendingRefundFloor = new AtomicLong(-1);
+    /**
+     * Exact pre-submit local balances for orders created by this running client.
+     * Donut rounds the sidebar to compact units (for example $126M), so a
+     * legitimate cancellation refund can be smaller than the visible rounding
+     * bucket.  The verified disappearance of that exact, still-unfilled order
+     * restores this already-known local value; a later scoreboard sample remains
+     * authoritative.
+     */
+    private final ConcurrentHashMap<String, Long> preSubmitBalances = new ConcurrentHashMap<>();
     private final AtomicLong usedSlots;
     private final Set<String> activeOrderItems = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<String, LocalOrderPosition> orderPositions = new ConcurrentHashMap<>();
@@ -126,7 +135,7 @@ final class CandidateFeedClient implements AutoCloseable {
     String balanceSource() { return balanceSource.get(); }
     boolean balanceUsableForOrders() {
         String source = balanceSource.get();
-        return !source.equals("saved fallback") && !source.equals("waiting for cancellation refund");
+        return !source.equals("saved fallback") && !source.startsWith("waiting for cancellation");
     }
     int usedOrderSlots() { return unpackOrder(usedSlots.get()); }
     int usedAuctionSlots() { return unpackAuction(usedSlots.get()); }
@@ -138,6 +147,22 @@ final class CandidateFeedClient implements AutoCloseable {
 
     Optional<Candidate> candidate(String id) {
         return candidates.get().stream().filter(value -> value.id().equals(id)).findFirst();
+    }
+
+    Optional<Candidate> currentExitCandidate(LocalOrderPosition position, Instant now, Duration maximumAuctionAge) {
+        if (position == null || now == null || maximumAuctionAge == null || maximumAuctionAge.isNegative()) {
+            return Optional.empty();
+        }
+        return candidates.get().stream()
+                .filter(value -> value.route().equals("ORDER_TO_AUCTION"))
+                .filter(value -> value.itemId().equals(position.itemId())
+                        && value.signature().equals(position.signature())
+                        && value.quantity() == position.batchQuantity())
+                .filter(value -> !value.auctionFreshAt().equals(Instant.EPOCH)
+                        && !value.auctionFreshAt().isAfter(now)
+                        && Duration.between(value.auctionFreshAt(), now).compareTo(maximumAuctionAge) <= 0)
+                .filter(value -> value.targetListPrice() > 0 && value.expectedProceeds() > 0)
+                .max(java.util.Comparator.comparing(Candidate::auctionFreshAt));
     }
 
     boolean isAllocated(String id) {
@@ -233,15 +258,20 @@ final class CandidateFeedClient implements AutoCloseable {
 
     void recordOrderCancelled(String itemId) {
         if (itemId == null || !ITEM_ID.matcher(itemId).matches()) return;
+        Long preSubmit = preSubmitBalances.remove(itemId);
         activeOrderItems.remove(itemId);
         orderPositions.remove(itemId);
         usedSlots.updateAndGet(value -> packSlots(Math.max(activeOrderItems.size(), unpackOrder(value) - 1), unpackAuction(value)));
-        // Do not invent a refund amount. The scoreboard is authoritative and
-        // will restore the balance after Donut confirms the cancellation.
+        // The server menu has proven the exact unfilled order absent. Restore
+        // the exact pre-submit local value when this process created it. This
+        // avoids waiting forever when the compact sidebar hides the refund in
+        // the same K/M/B display bucket. A subsequent scoreboard value still
+        // replaces this local reconciliation normally.
+        if (preSubmit != null) balance.updateAndGet(current -> reconciledCancellationBalance(current, preSubmit));
         pendingBalanceCeiling.set(Long.MAX_VALUE);
         pendingBalanceUntilMillis.set(0);
-        pendingRefundFloor.set(balance.get());
-        balanceSource.set("waiting for cancellation refund");
+        pendingRefundFloor.set(-1);
+        balanceSource.set(preSubmit == null ? "waiting for cancellation scoreboard" : "verified cancellation refund");
         persistAndAllocate();
         enqueueDiagnostic("order_workflow", "cancelled", 0, Map.of("item_id", itemId,
                 "route", "ORDER_TO_AUCTION", "reason_code", "verified_absent_after_cancel"));
@@ -330,7 +360,7 @@ final class CandidateFeedClient implements AutoCloseable {
                 pendingBalanceUntilMillis.set(0);
             }
         }
-        if (balanceSource.get().equals("waiting for cancellation refund")) {
+        if (balanceSource.get().startsWith("waiting for cancellation")) {
             long floor = pendingRefundFloor.get();
             if (floor >= 0 && effective <= floor) return;
             pendingRefundFloor.set(-1);
@@ -346,6 +376,12 @@ final class CandidateFeedClient implements AutoCloseable {
         persistAndAllocate();
     }
 
+    void reconcileUsedAuctionSlots(int observed) {
+        if (observed < 0 || observed > 18) throw new IllegalArgumentException("observed auction slots must be between 0 and 18");
+        usedSlots.updateAndGet(value -> packSlots(unpackOrder(value), observed));
+        persistAndAllocate();
+    }
+
     void setDiagnostics(boolean enabled) { diagnostics.set(enabled); ClientConfig.saveDiagnostics(enabled); }
 
     void diagnostic(String event, String code, Map<String, String> fields) {
@@ -355,7 +391,9 @@ final class CandidateFeedClient implements AutoCloseable {
     void recordOrderSubmitted(Candidate candidate, OrderPlan plan) {
         LocalOrderPosition position = LocalOrderPosition.submitted(candidate, plan, Instant.now());
         orderPositions.put(position.itemId(), position);
-        long afterEscrow = balance.updateAndGet(value -> Math.max(0, value - plan.escrowDollars()));
+        long beforeEscrow = balance.getAndUpdate(value -> Math.max(0, value - plan.escrowDollars()));
+        preSubmitBalances.put(position.itemId(), beforeEscrow);
+        long afterEscrow = balance.get();
         pendingBalanceCeiling.set(afterEscrow);
         pendingBalanceUntilMillis.set(System.currentTimeMillis() + 10_000);
         pendingRefundFloor.set(-1);
@@ -371,6 +409,13 @@ final class CandidateFeedClient implements AutoCloseable {
         if (plan == null) return;
         orderPositions.computeIfPresent(plan.itemId(), (ignored, position) -> position.verified(deliveredQuantity, Instant.now()));
         activeOrderItems.add(plan.itemId());
+        requirePositionPersistence();
+    }
+
+    void recordObservedOrderProgress(String itemId, int deliveredQuantity) {
+        if (itemId == null || !ITEM_ID.matcher(itemId).matches()) return;
+        orderPositions.computeIfPresent(itemId, (ignored, position) -> position.verified(deliveredQuantity, Instant.now()));
+        activeOrderItems.add(itemId);
         requirePositionPersistence();
     }
 
@@ -620,6 +665,11 @@ final class CandidateFeedClient implements AutoCloseable {
 
     static Status connectedNotModified(Status previous, Instant now) {
         return new Status("ready", now, "connected", previous.version(), previous.candidateCount());
+    }
+
+    static long reconciledCancellationBalance(long current, long preSubmit) {
+        if (current < 0 || preSubmit < 0) throw new IllegalArgumentException("balance cannot be negative");
+        return Math.max(current, preSubmit);
     }
 
     private static long orderEscrow(long unitRewardCents, int quantity) {

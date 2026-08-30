@@ -121,4 +121,11 @@ class CandidateFeedClientTest {
         assertTrue(CandidateFeedClient.parseSidebarBalance("not$ 143M").isEmpty());
         assertTrue(CandidateFeedClient.parseSidebarBalance("$ 999999999999999999999T").isEmpty());
     }
+
+    @Test void verifiedCancellationRestoresKnownPreSubmitBalanceWithoutDoubleCrediting() {
+        assertEquals(150_000_000L, CandidateFeedClient.reconciledCancellationBalance(126_000_000L, 150_000_000L));
+        assertEquals(151_000_000L, CandidateFeedClient.reconciledCancellationBalance(151_000_000L, 150_000_000L));
+        assertThrows(IllegalArgumentException.class,
+                () -> CandidateFeedClient.reconciledCancellationBalance(-1, 1));
+    }
 }

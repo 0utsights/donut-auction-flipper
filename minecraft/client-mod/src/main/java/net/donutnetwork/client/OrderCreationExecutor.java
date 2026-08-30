@@ -251,10 +251,18 @@ final class OrderCreationExecutor {
         if (phase == Phase.ABORTED) return;
         OrderPlan currentPlan = plan != null ? plan : lastSubmittedPlan;
         if (currentPlan == null) { abort(client, "order workflow lost its checked plan"); return; }
-        if (client.player == null || client.getNetworkHandler() == null) { abort(client, "disconnected during the armed order workflow"); return; }
+        if (client.player == null || client.getNetworkHandler() == null) {
+            if (autoEnabled) pauseAutoForConnection(client, "disconnected; automatic orders will resume after reconnect");
+            else abort(client, "disconnected during the armed order workflow");
+            return;
+        }
         Instant now = Instant.now();
         String serverError = serverError(client);
-        if (!serverError.isEmpty()) { abort(client, serverError); return; }
+        if (!serverError.isEmpty()) {
+            if (autoEnabled) pauseAutoForConnection(client, serverError);
+            else abort(client, serverError);
+            return;
+        }
         if (Duration.between(armedAt, now).compareTo(WORKFLOW_TIMEOUT) > 0) {
             failCandidate(client, "order workflow timed out");
             return;
@@ -269,10 +277,13 @@ final class OrderCreationExecutor {
                 transition(Phase.ORDER_BOARD, "opening verified order board");
                 delay();
             } else if (Duration.between(phaseAt, now).compareTo(FRESH_WAIT) > 0) {
-                if (autoEnabled && (error.equals(FOCUSED_STALE) || isSkippablePreTransactionChange(error))) {
+                if (autoEnabled && isTransientWaitError(error)) {
+                    feed.candidate(plan.candidateId()).ifPresent(feed::focus);
+                    phaseAt = now;
+                    message = error + "; automatic session is still waiting";
+                } else if (autoEnabled && isSkippablePreTransactionChange(error)) {
                     quarantineCurrentAuto(client, error);
-                }
-                else abort(client, error);
+                } else abort(client, error);
             }
             return;
         }
@@ -335,6 +346,12 @@ final class OrderCreationExecutor {
     private void maybeStartAuto(MinecraftClient client) {
         Instant now = Instant.now();
         if (!autoEnabled || now.isBefore(nextAutoAttempt) || client.currentScreen != null) return;
+        String connectionError = serverError(client);
+        if (!connectionError.isEmpty()) {
+            message = connectionError + "; automatic session is waiting";
+            nextAutoAttempt = now.plusSeconds(2);
+            return;
+        }
         boolean wasEmpty = autoQueue.isEmpty();
         int added = refreshAutoQueue();
         if (autoQueue.isEmpty()) {
@@ -916,10 +933,34 @@ final class OrderCreationExecutor {
         if (phase == Phase.IDLE || phase == Phase.ABORTED) return;
         String safeReason = safe(reason);
         LOGGER.warn("Order workflow aborted in {}: {}; screen={}", phase, safeReason, describeScreen(client.currentScreen));
+        if (autoEnabled) {
+            feed.diagnostic("order_workflow", "held_continue", Map.of("candidate_state", phase.name(),
+                    "route", "ORDER_TO_AUCTION", "reason_code", "item_failure_session_continues"));
+            quarantineCurrentAuto(client, safeReason);
+            return;
+        }
         feed.diagnostic("order_workflow", "aborted", Map.of("candidate_state", phase.name(), "route", "ORDER_TO_AUCTION", "reason_code", "workflow_abort"));
         phase = Phase.ABORTED; message = safeReason; plan = null; autoEnabled = false; clearAutoQueueState();
         closeScreen(client);
         tell(client, "Order creation stopped safely: " + safeReason);
+    }
+
+    private void pauseAutoForConnection(MinecraftClient client, String reason) {
+        // Once Create Order has been sent, retrying the same item could create a
+        // duplicate. Keep its durable lock and move on after reconnect. Before
+        // submission, retain the queue entry and simply restart its wizard.
+        if (lastSubmittedPlan != null) {
+            quarantineCurrentAuto(client, reason + "; submitted item remains locked for reconciliation");
+            return;
+        }
+        plan = null;
+        retrying = false;
+        pendingRepriceUnitCents = 0;
+        cancelConfirmationSent = false;
+        phase = Phase.IDLE;
+        nextAutoAttempt = Instant.now().plusSeconds(3);
+        closeScreen(client);
+        message = safe(reason);
     }
 
     private void quarantineCurrentAuto(MinecraftClient client, String reason) {
@@ -988,6 +1029,14 @@ final class OrderCreationExecutor {
                 || error.equals("candidate no longer belongs to the local portfolio")
                 || error.equals("allocated stack count was reduced")
                 || error.equals("order exceeds deployable balance after reserve"));
+    }
+
+    static boolean isTransientWaitError(String error) {
+        return error != null && (error.equals(FOCUSED_STALE)
+                || error.equals("backend candidate feed is not ready")
+                || error.equals("candidate feed is stale")
+                || error.equals("auction exit is stale")
+                || error.equals("waiting for the live scoreboard balance or a manual override"));
     }
 
     private void transition(Phase next, String detail) { phase = next; phaseAt = Instant.now(); message = detail; }

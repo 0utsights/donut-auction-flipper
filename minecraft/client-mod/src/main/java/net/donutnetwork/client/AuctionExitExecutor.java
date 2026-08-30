@@ -46,6 +46,7 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.HashMap;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
@@ -63,7 +64,8 @@ final class AuctionExitExecutor {
         CLAIM_BOARD, CLAIM_YOUR_ORDERS, CLAIM_MANAGE, CLAIM_COLLECT, CLAIM_TRANSFER,
         PACKAGE_PREPARE, PACKAGE_PLACE, PACKAGE_OPEN, PACKAGE_LOAD, PACKAGE_CLOSE,
         PACKAGE_BREAK, PACKAGE_PICKUP, LIST_PREPARE, LIST_COMMAND, LIST_CONFIRM,
-        LIST_VERIFY_BOARD, LIST_VERIFY_ITEMS, WAITING, ABORTED
+        LIST_VERIFY_BOARD, LIST_VERIFY_ITEMS, SLOTS_BOARD, SLOTS_ITEMS,
+        TRACK_BOARD, TRACK_YOUR_ORDERS, WAITING, ABORTED
     }
 
     record Status(Phase phase, String message, boolean enabled, String itemName,
@@ -74,9 +76,13 @@ final class AuctionExitExecutor {
     private static final Logger LOGGER = LoggerFactory.getLogger("donut-network-client");
     private static final Pattern AUCTION_TITLE = Pattern.compile("^Auction \\(Page [0-9]+\\)$");
     private static final Pattern ORDERS_TITLE = Pattern.compile("^Orders \\(Page [0-9]+\\)$");
+    private static final Pattern REQUESTED_QUANTITY = Pattern.compile(
+            "(?i)(?:^|\\D)([0-9][0-9,]*(?:\\.[0-9]+)?)([KMBT]?)\\s+requested(?:\\D|$)");
     private static final Duration SCREEN_TIMEOUT = Duration.ofSeconds(8);
     private static final Duration WORKFLOW_TIMEOUT = Duration.ofMinutes(4);
     private static final Duration SUPPLY_MAX_AGE = Duration.ofSeconds(15);
+    private static final Duration EXIT_QUOTE_MAX_AGE = Duration.ofSeconds(15);
+    private static final Duration ORDER_RECONCILE_INTERVAL = Duration.ofSeconds(15);
     private static final Duration LISTING_RECEIPT_TIMEOUT = Duration.ofSeconds(8);
     private static final long ACTION_DELAY_NANOS = Duration.ofMillis(350).toNanos();
 
@@ -107,6 +113,11 @@ final class AuctionExitExecutor {
     private int filledShulkerCountBefore;
     private StackAssembler assembler;
 	private LocalOrderPosition.State stateBeforeSupplyPurchase;
+    private long currentExpectedProceedsPerBatch;
+    private Instant nextWorkflowAttempt = Instant.EPOCH;
+    private final Map<String, Integer> recoverableFailures = new HashMap<>();
+    private boolean resumeAfterSlotReconcile;
+    private Instant lastOrderReconcile = Instant.EPOCH;
 
     AuctionExitExecutor(CandidateFeedClient feed) { this.feed = feed; }
 
@@ -165,11 +176,16 @@ final class AuctionExitExecutor {
     void tick(MinecraftClient client) {
         if (!enabled) return;
         if (client.player == null || client.getNetworkHandler() == null || client.interactionManager == null) {
-            abort(client, "disconnected during the automatic exit session");
+            pauseForConnection(client, "disconnected; automatic exits will resume after reconnect");
+            return;
+        }
+        String connectionError = serverError(client);
+        if (!connectionError.isEmpty()) {
+            pauseForConnection(client, connectionError + "; automatic exits are waiting");
             return;
         }
         if (phase == Phase.IDLE || phase == Phase.WAITING || phase == Phase.ABORTED) {
-            if (phase == Phase.ABORTED) return;
+            if (phase == Phase.ABORTED || Instant.now().isBefore(nextWorkflowAttempt)) return;
             if (phase == Phase.WAITING && position != null) {
                 workflowAt = Instant.now();
                 transition(Phase.PREFLIGHT, "rechecking paused exit prerequisites");
@@ -180,11 +196,11 @@ final class AuctionExitExecutor {
         if (System.nanoTime() < nextActionAt) return;
         Instant now = Instant.now();
         if (Duration.between(workflowAt, now).compareTo(WORKFLOW_TIMEOUT) > 0) {
-            abort(client, "exit workflow timed out");
+            recover(client, "exit workflow timed out");
             return;
         }
         if (Duration.between(phaseAt, now).compareTo(SCREEN_TIMEOUT) > 0 && expectsServerScreen()) {
-            abort(client, "server screen did not advance before its deadline");
+            recover(client, "server screen did not advance before its deadline");
             return;
         }
         try {
@@ -211,22 +227,29 @@ final class AuctionExitExecutor {
                 case LIST_CONFIRM -> listConfirm(client);
                 case LIST_VERIFY_BOARD -> listVerifyBoard(client);
                 case LIST_VERIFY_ITEMS -> listVerifyItems(client);
+                case SLOTS_BOARD -> reconcileSlotsBoard(client);
+                case SLOTS_ITEMS -> reconcileSlotsItems(client);
+                case TRACK_BOARD -> reconcileOrdersBoard(client);
+                case TRACK_YOUR_ORDERS -> reconcileTrackedOrders(client);
                 default -> { }
             }
         } catch (RuntimeException error) {
-            abort(client, "screen or inventory verification failed: " + safe(error.getMessage()));
+            recover(client, "screen or inventory verification failed: " + safe(error.getMessage()));
         }
     }
 
     private boolean startNext(MinecraftClient client) {
         if (feed.usedAuctionSlots() >= 18) {
-            phase = Phase.WAITING;
-            message = "waiting for a free auction slot (18/18 locally used)";
-            return false;
+            beginSlotReconcile(client, false);
+            return true;
         }
         Optional<LocalOrderPosition> next = feed.orderPositions().stream()
                 .filter(AuctionExitExecutor::canResume).findFirst();
         if (next.isEmpty()) {
+            if (Duration.between(lastOrderReconcile, Instant.now()).compareTo(ORDER_RECONCILE_INTERVAL) >= 0) {
+                beginOrderReconcile(client);
+                return true;
+            }
             phase = Phase.WAITING;
             message = "waiting for a tracked order to complete";
             return false;
@@ -271,6 +294,18 @@ final class AuctionExitExecutor {
         if (!vanillaSignature(position)) {
             throw new IllegalStateException("automatic exits currently require a vanilla item signature; modifiers need manual review");
         }
+        Optional<CandidateFeedClient.Candidate> quote = feed.currentExitCandidate(position, Instant.now(), EXIT_QUOTE_MAX_AGE);
+        if (quote.isEmpty()) {
+            phase = Phase.WAITING;
+            message = "waiting for a fresh exact-quantity auction exit quote for " + position.itemName();
+            nextWorkflowAttempt = Instant.now().plusSeconds(2);
+            return;
+        }
+        CandidateFeedClient.Candidate current = quote.get();
+        plan = AuctionExitPlan.from(position, current.targetListPrice(), current.expectedProceeds(),
+                AuctionExitPlan.DEFAULT_UNDERCUT_DOLLARS);
+        currentExpectedProceedsPerBatch = current.expectedProceeds();
+        selectNextListing();
 		if (position.state() == LocalOrderPosition.State.SUPPLY_PENDING
 				|| (position.state() == LocalOrderPosition.State.CLAIM_PENDING && position.claimedQuantity() < desiredClaimCumulative)
                 || (position.state() == LocalOrderPosition.State.PACKAGE_PENDING && position.packagedQuantity() < desiredPackageCumulative)
@@ -278,8 +313,7 @@ final class AuctionExitExecutor {
             throw new IllegalStateException("an irreversible action was interrupted before its receipt; reconcile this position manually");
         }
         if (feed.usedAuctionSlots() >= 18) {
-            phase = Phase.WAITING;
-            message = "waiting for a free auction slot";
+            beginSlotReconcile(client, true);
             return;
         }
         if (plan.mode() == AuctionExitPlan.Mode.SHULKER
@@ -306,7 +340,10 @@ final class AuctionExitExecutor {
             transition(plan.mode() == AuctionExitPlan.Mode.SHULKER ? Phase.PACKAGE_PREPARE : Phase.LIST_PREPARE,
                     plan.mode() == AuctionExitPlan.Mode.SHULKER ? "ready to package claimed items" : "ready to list claimed items");
         } else {
-            int neededSlots = ceilingDivide(desiredClaimCumulative - position.claimedQuantity(), position.maxStackSize());
+            int claimQuantity = plan.mode() == AuctionExitPlan.Mode.DIRECT
+                    ? position.totalQuantity() - position.claimedQuantity()
+                    : desiredClaimCumulative - position.claimedQuantity();
+            int neededSlots = ceilingDivide(claimQuantity, position.maxStackSize());
             if (freeInventorySlots(client.player.getInventory()) < neededSlots) {
                 phase = Phase.WAITING;
                 message = "free " + neededSlots + " inventory slots to collect the next exact exit batch";
@@ -456,7 +493,10 @@ final class AuctionExitExecutor {
         int gained = countPlainItem(client.player.getInventory(), position.itemId()) - itemCountBefore;
         int needed = desiredClaimCumulative - position.claimedQuantity();
         if (gained > 0) {
-            if (gained != needed) throw new IllegalStateException("immediate Collect moved an unexpected item quantity");
+            int remainingOrder = position.totalQuantity() - position.claimedQuantity();
+            if (!validImmediateClaim(gained, needed, remainingOrder)) {
+                throw new IllegalStateException("immediate Collect moved an unexpected item quantity");
+            }
             acceptClaim(client, gained);
             return;
         }
@@ -621,8 +661,7 @@ final class AuctionExitExecutor {
 
     private void listPrepare(MinecraftClient client) {
         if (feed.usedAuctionSlots() >= 18) {
-            phase = Phase.WAITING;
-            message = "waiting for a free auction slot";
+            beginSlotReconcile(client, true);
             return;
         }
         closeScreen(client);
@@ -705,6 +744,7 @@ final class AuctionExitExecutor {
         feed.recordListed(position.itemId(), desiredListingCumulative);
         Optional<LocalOrderPosition> updated = feed.orderPosition(position.itemId());
         if (updated.isEmpty()) {
+            recoverableFailures.remove(position.itemId());
             tell(client, "Completed all " + plan.listings().size() + " verified auction exits for " + position.itemName() + ".");
             clearCurrent();
             phase = Phase.WAITING;
@@ -717,6 +757,117 @@ final class AuctionExitExecutor {
         closeScreen(client);
         transition(Phase.PREFLIGHT, "preparing exit " + listing.sequence() + " of " + plan.listings().size());
         delay();
+    }
+
+    private void beginSlotReconcile(MinecraftClient client, boolean resumeCurrentExit) {
+        if (client.currentScreen != null) closeScreen(client);
+        resumeAfterSlotReconcile = resumeCurrentExit && position != null;
+        workflowAt = Instant.now();
+        client.getNetworkHandler().sendChatCommand("auction");
+        transition(Phase.SLOTS_BOARD, "reconciling the 18 live auction slots");
+        delay();
+    }
+
+    private void beginOrderReconcile(MinecraftClient client) {
+        if (client.currentScreen != null) closeScreen(client);
+        workflowAt = Instant.now();
+        client.getNetworkHandler().sendChatCommand("orders");
+        transition(Phase.TRACK_BOARD, "refreshing tracked order fill progress");
+        delay();
+    }
+
+    private void reconcileOrdersBoard(MinecraftClient client) {
+        if (!(client.currentScreen instanceof GenericContainerScreen) || !ORDERS_TITLE.matcher(title(client.currentScreen)).matches()) return;
+        ItemStack control = genericHandler(client).getSlot(51).getStack();
+        if (!label(control).equals("your orders")) {
+            throw new IllegalStateException("Your Orders reconciliation control did not match slot 51");
+        }
+        clickSlot(client, 51, 0, SlotActionType.PICKUP);
+        transition(Phase.TRACK_YOUR_ORDERS, "reading exact tracked-order progress");
+        delay();
+    }
+
+    private void reconcileTrackedOrders(MinecraftClient client) {
+        if (!(client.currentScreen instanceof GenericContainerScreen)
+                || !title(client.currentScreen).equals("Orders -> Your Orders")) return;
+        GenericContainerScreenHandler handler = genericHandler(client);
+        int updated = 0;
+        for (LocalOrderPosition tracked : feed.orderPositions()) {
+            if (tracked.state() == LocalOrderPosition.State.HOLD || tracked.state() == LocalOrderPosition.State.EXITED) continue;
+            List<ItemStack> matches = new ArrayList<>();
+            int limit = Math.min(handler.getInventory().size(), handler.slots.size());
+            for (int slot = 0; slot < limit; slot++) {
+                ItemStack row = handler.getSlot(slot).getStack();
+                if (itemMatches(row, tracked.itemId())
+                        && textContainsRequested(stackText(row), tracked.totalQuantity())
+                        && OrderPlan.textContainsUnitReward(stackText(row), tracked.unitRewardCents())) {
+                    matches.add(row);
+                }
+            }
+            if (matches.size() > 1) {
+                feed.recordExitState(tracked.itemId(), LocalOrderPosition.State.HOLD);
+                continue;
+            }
+            if (matches.size() != 1) continue;
+            Optional<OrderPlan.OrderProgress> progress = OrderPlan.firstOrderProgress(stackText(matches.getFirst()));
+            if (progress.isEmpty() || progress.get().total() != tracked.totalQuantity()) continue;
+            feed.recordObservedOrderProgress(tracked.itemId(), progress.get().delivered());
+            updated++;
+        }
+        lastOrderReconcile = Instant.now();
+        feed.diagnostic("auction_exit", "orders_reconciled", Map.of("candidate_state", "tracked",
+                "route", "ORDER_TO_AUCTION", "reason_code", "personal_menu_progress_refresh"));
+        closeScreen(client);
+        phase = Phase.WAITING;
+        message = updated == 0 ? "tracked orders checked; waiting for fills"
+                : "updated " + updated + " tracked order" + (updated == 1 ? "" : "s") + " from Your Orders";
+        nextWorkflowAttempt = Instant.now().plusSeconds(1);
+    }
+
+    private void reconcileSlotsBoard(MinecraftClient client) {
+        if (!(client.currentScreen instanceof GenericContainerScreen) || !AUCTION_TITLE.matcher(title(client.currentScreen)).matches()) return;
+        ItemStack control = genericHandler(client).getSlot(51).getStack();
+        if (!label(control).equals("your items")) {
+            throw new IllegalStateException("Your Items reconciliation control did not match slot 51");
+        }
+        clickSlot(client, 51, 0, SlotActionType.PICKUP);
+        transition(Phase.SLOTS_ITEMS, "counting current personal auction listings");
+        delay();
+    }
+
+    private void reconcileSlotsItems(MinecraftClient client) {
+        if (!(client.currentScreen instanceof GenericContainerScreen)
+                || !OrderPlan.normalizeLabel(title(client.currentScreen)).contains("your items")) return;
+        GenericContainerScreenHandler handler = genericHandler(client);
+        int occupied = countPersonalAuctionRows(handler);
+        feed.reconcileUsedAuctionSlots(occupied);
+        closeScreen(client);
+        boolean resume = resumeAfterSlotReconcile && position != null;
+        resumeAfterSlotReconcile = false;
+        nextWorkflowAttempt = Instant.now().plusSeconds(occupied >= 18 ? 10 : 1);
+        if (resume) {
+            phase = Phase.WAITING;
+            message = occupied >= 18
+                    ? "all 18 auction slots are still occupied; checking again automatically"
+                    : "auction slot opened; resuming the current exit";
+        } else {
+            clearCurrent();
+            phase = Phase.WAITING;
+            message = occupied >= 18
+                    ? "all 18 auction slots are still occupied; checking again automatically"
+                    : "auction slots reconciled; looking for the next completed order";
+        }
+    }
+
+    static int countPersonalAuctionRows(GenericContainerScreenHandler handler) {
+        if (handler == null) throw new IllegalArgumentException("personal auction handler is required");
+        int limit = Math.min(45, Math.min(handler.getInventory().size(), handler.slots.size()));
+        int occupied = 0;
+        for (int slot = 0; slot < limit; slot++) {
+            if (!handler.getSlot(slot).getStack().isEmpty()) occupied++;
+        }
+        if (occupied > 18) throw new IllegalStateException("personal auction grid contains more than 18 occupied rows");
+        return occupied;
     }
 
     private boolean listingInventoryDecreased(MinecraftClient client) {
@@ -745,7 +896,8 @@ final class AuctionExitExecutor {
     private boolean expectsServerScreen() {
         return switch (phase) {
             case BUY_SELECT, BUY_CONFIRM, CLAIM_BOARD, CLAIM_YOUR_ORDERS, CLAIM_MANAGE, CLAIM_COLLECT,
-                    LIST_CONFIRM, LIST_VERIFY_BOARD, LIST_VERIFY_ITEMS -> true;
+                    LIST_CONFIRM, LIST_VERIFY_BOARD, LIST_VERIFY_ITEMS, SLOTS_BOARD, SLOTS_ITEMS,
+                    TRACK_BOARD, TRACK_YOUR_ORDERS -> true;
             default -> false;
         };
     }
@@ -758,6 +910,54 @@ final class AuctionExitExecutor {
 
     private void delay() { nextActionAt = System.nanoTime() + ACTION_DELAY_NANOS; }
 
+    private void recover(MinecraftClient client, String reason) {
+        if (!enabled) {
+            abort(client, reason);
+            return;
+        }
+        String safeReason = safe(reason);
+        if (position == null || !irreversibleState(position.state())) {
+            String itemId = position == null ? "" : position.itemId();
+            int failures = itemId.isBlank() ? 1 : recoverableFailures.merge(itemId, 1, Integer::sum);
+            if (failures < 3) {
+                LOGGER.warn("Auction exit will retry after recoverable failure in {}: {}", phase, safeReason);
+                feed.diagnostic("auction_exit", "retry", Map.of("candidate_state", phase.name(),
+                        "route", "ORDER_TO_AUCTION", "reason_code", "recoverable_retry"));
+                clearCurrent();
+                phase = Phase.WAITING;
+                message = safeReason + "; retrying automatically (" + failures + "/3)";
+                nextWorkflowAttempt = Instant.now().plusSeconds(Math.min(15, failures * 3L));
+                closeScreen(client);
+                return;
+            }
+        }
+        abort(client, safeReason);
+    }
+
+    private void pauseForConnection(MinecraftClient client, String reason) {
+        if (position != null && irreversibleState(position.state())) {
+            abort(client, reason + "; the in-flight item requires reconciliation");
+            return;
+        }
+        clearCurrent();
+        phase = Phase.WAITING;
+        message = safe(reason);
+        nextWorkflowAttempt = Instant.now().plusSeconds(3);
+        closeScreen(client);
+    }
+
+    static boolean irreversibleState(LocalOrderPosition.State state) {
+        return state == LocalOrderPosition.State.SUPPLY_PENDING
+                || state == LocalOrderPosition.State.CLAIM_PENDING
+                || state == LocalOrderPosition.State.PACKAGE_PENDING
+                || state == LocalOrderPosition.State.LISTING_PENDING;
+    }
+
+    static boolean validImmediateClaim(int gained, int neededForNextListing, int remainingOrder) {
+        return gained > 0 && neededForNextListing > 0 && remainingOrder >= neededForNextListing
+                && gained >= neededForNextListing && gained <= remainingOrder;
+    }
+
     private void abort(MinecraftClient client, String reason) {
         String safeReason = safe(reason);
         LOGGER.warn("Auction exit aborted in {}: {}", phase, safeReason);
@@ -769,15 +969,24 @@ final class AuctionExitExecutor {
             }
         }
         feed.diagnostic("auction_exit", "aborted", Map.of("candidate_state", phase.name(), "route", "ORDER_TO_AUCTION", "reason_code", "workflow_abort"));
-        enabled = false;
-        phase = Phase.ABORTED;
-        message = safeReason;
+        boolean continueSession = enabled;
         assembler = null;
         closeScreen(client);
         String recovery = placedShulker != null
                 ? " Check the shulker or dropped package around " + placedShulker.getX() + ", " + placedShulker.getY() + ", " + placedShulker.getZ() + " manually."
                 : "";
-        tell(client, "Automatic exit stopped safely: " + safeReason + recovery);
+        if (continueSession) {
+            String held = position == null ? "this exit" : position.itemName();
+            clearCurrent();
+            phase = Phase.WAITING;
+            message = "held " + held + ": " + safeReason + "; continuing with other completed orders";
+            nextWorkflowAttempt = Instant.now().plusSeconds(3);
+            tell(client, "Automatic exit held " + held + " for review and will continue with other items: " + safeReason + recovery);
+        } else {
+            phase = Phase.ABORTED;
+            message = safeReason;
+            tell(client, "Automatic exit stopped safely: " + safeReason + recovery);
+        }
     }
 
     private void clearCurrent() {
@@ -787,6 +996,8 @@ final class AuctionExitExecutor {
         desiredPackageCumulative = 0; desiredListingCumulative = 0; shulkerSpendThisWorkflow = 0;
         filledShulkerCountBefore = 0;
 		stateBeforeSupplyPurchase = null;
+        currentExpectedProceedsPerBatch = 0;
+        resumeAfterSlotReconcile = false;
     }
 
     private String serverError(MinecraftClient client) {
@@ -809,7 +1020,9 @@ final class AuctionExitExecutor {
     }
 
     private long conservativeProfitAfterUndercuts() {
-        long proceeds = Math.multiplyExact(position.expectedProceedsPerBatch(), position.batches());
+        long proceedsPerBatch = currentExpectedProceedsPerBatch > 0
+                ? currentExpectedProceedsPerBatch : position.expectedProceedsPerBatch();
+        long proceeds = Math.multiplyExact(proceedsPerBatch, position.batches());
         long undercuts = Math.multiplyExact(plan.undercutDollars(), plan.listings().size());
         return Math.subtractExact(Math.subtractExact(proceeds, position.escrowDollars()), undercuts);
     }
@@ -985,9 +1198,23 @@ final class AuctionExitExecutor {
         return OrderPlan.normalizeLabel(value).replace(' ', '_');
     }
 
-    private static boolean textContainsRequested(String value, int quantity) {
-        String compact = value == null ? "" : value.replace(",", "");
-        return Pattern.compile("(?i)(?:^|\\D)" + quantity + "\\s+requested(?:\\D|$)").matcher(compact).find();
+    static boolean textContainsRequested(String value, int quantity) {
+        Matcher matcher = REQUESTED_QUANTITY.matcher(value == null ? "" : value);
+        while (matcher.find()) {
+            try {
+                java.math.BigDecimal multiplier = switch (matcher.group(2).toUpperCase(Locale.ROOT)) {
+                    case "K" -> java.math.BigDecimal.valueOf(1_000L);
+                    case "M" -> java.math.BigDecimal.valueOf(1_000_000L);
+                    case "B" -> java.math.BigDecimal.valueOf(1_000_000_000L);
+                    case "T" -> java.math.BigDecimal.valueOf(1_000_000_000_000L);
+                    default -> java.math.BigDecimal.ONE;
+                };
+                long parsed = new java.math.BigDecimal(matcher.group(1).replace(",", ""))
+                        .multiply(multiplier).setScale(0, java.math.RoundingMode.UNNECESSARY).longValueExact();
+                if (parsed == quantity) return true;
+            } catch (ArithmeticException | NumberFormatException ignored) { }
+        }
+        return false;
     }
 
     private static Optional<Long> firstMoney(ItemStack stack) {
