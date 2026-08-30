@@ -7,6 +7,10 @@ export function backendRetryDelay(failures: number): number {
   return Math.min(30_000, 1_000 * 2 ** Math.min(5, Math.max(0, failures - 1)))
 }
 
+export function minecraftReconnectDelay(backoffMilliseconds: number, reconnectNotBefore: number, now: number): number {
+  return Math.max(backoffMilliseconds, Math.max(0, reconnectNotBefore - now))
+}
+
 export function taskResultForFailure(kind: TaskKind, priority: number, failure: TaskFailureClass): TaskResultStatus {
   if (failure === 'schema_hold') return 'failed'
   if (failure === 'reconnect_required') return 'complete'

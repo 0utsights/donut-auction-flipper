@@ -9,7 +9,7 @@ import { EgressMismatchError, minecraftConnect, proxyAgent, verifyEgress } from 
 import { redactSensitiveText } from './redaction.js'
 import { SafeNavigator, type WindowView } from './safe-navigation.js'
 import { loadSchemas } from './schemas.js'
-import { backendRetryDelay, taskResultForFailure, type TaskFailureClass } from './task-policy.js'
+import { backendRetryDelay, minecraftReconnectDelay, taskResultForFailure, type TaskFailureClass } from './task-policy.js'
 import { PARSER_VERSION, SCHEMA_VERSION, type ItemView, type MenuSchema, type ObserverTask, type RuntimeConfig, type ScanBatch } from './types.js'
 import { beginServerWindowUpdate, WindowClosedError, type WindowUpdateSource } from './window-update.js'
 
@@ -31,6 +31,7 @@ const PROFILE_REVALIDATION_RUNTIME_MS = 4_000
 // enough to complete it instead of killing the process and rotating the code.
 // Cached-token logins still resolve this wait as soon as the server spawns.
 const MICROSOFT_LOGIN_TIMEOUT_MS = 10 * 60_000
+const INTENTIONAL_ROTATION_GRACE_MS = 60_000
 
 class ObserverRuntime {
   private bot: Bot | undefined
@@ -45,6 +46,7 @@ class ObserverRuntime {
   private activePage = 0
   private connected = false
   private mostPerItemConfirmedAt = 0
+  private reconnectNotBefore = 0
 
   constructor(private readonly config: RuntimeConfig) {
     this.backend = new BackendClient(new URL(config.backendUrl), config.observerToken, config.account.id)
@@ -108,6 +110,7 @@ class ObserverRuntime {
         if (error instanceof MenuSessionEndedError && this.connected) this.log('orders_menu_reopen_scheduled')
         if (rotate && this.connected) {
           this.connected = false
+          this.reconnectNotBefore = Date.now() + INTENTIONAL_ROTATION_GRACE_MS
           this.bot?.quit('collector connection rotation')
         }
         reconnect = rotate || !this.connected
@@ -183,9 +186,14 @@ class ObserverRuntime {
     // accumulate exponential backoff. Total reconnects remains diagnostic.
     if (plannedRotation || Date.now() - this.connectedAt >= 60_000) this.reconnectStreak = 0
     this.reconnectStreak++
-    const delay = Math.min(60_000, 1_000 * 2 ** Math.min(6, this.reconnectStreak - 1))
+    const backoff = Math.min(60_000, 1_000 * 2 ** Math.min(6, this.reconnectStreak - 1))
+    const delay = minecraftReconnectDelay(backoff, this.reconnectNotBefore, Date.now())
+    if (delay > backoff) this.log('minecraft_reconnect_grace', `delay_ms=${delay}`)
     await sleep(delay)
-    if (!this.stopping) await this.connect()
+    if (!this.stopping) {
+      this.reconnectNotBefore = 0
+      await this.connect()
+    }
   }
 
   private async execute(task: ObserverTask): Promise<string | undefined> {
