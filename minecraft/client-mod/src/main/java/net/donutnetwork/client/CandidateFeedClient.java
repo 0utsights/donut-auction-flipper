@@ -49,6 +49,11 @@ final class CandidateFeedClient implements AutoCloseable {
     private static final Pattern SIDEBAR_BALANCE = Pattern.compile("(?i)^\\s*\\$\\s*([0-9][0-9,]*(?:\\.[0-9]+)?)([KMBT]?)\\s*$");
     private static final Pattern COMPLETE_ORDER = Pattern.compile("(?i)^Your (.{1,128}?) order is complete!{0,3}$");
     private static final Pattern ITEM_DELIVERY = Pattern.compile("(?i)^.{1,64}? delivered you ([0-9][0-9,]*) (.{1,128})$");
+    private static final Set<String> DIAGNOSTIC_EVENTS = Set.of(
+            "startup", "connection", "latency", "decision", "error", "outcome", "shutdown");
+    private static final Set<String> DIAGNOSTIC_FIELDS = Set.of(
+            "state", "candidate_state", "exception_class", "endpoint", "http_status", "model_version", "reason_code", "route");
+    private static final long FOCUS_REQUEST_COOLDOWN_MILLIS = 12_000;
     private static final String MOD_VERSION = FabricLoader.getInstance().getModContainer("donut-network-client")
             .map(container -> container.getMetadata().getVersion().getFriendlyString()).orElse("unknown");
 
@@ -87,6 +92,7 @@ final class CandidateFeedClient implements AutoCloseable {
      * authoritative.
      */
     private final ConcurrentHashMap<String, Long> preSubmitBalances = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> focusRequestUntil = new ConcurrentHashMap<>();
     private final AtomicLong usedSlots;
     private final Set<String> activeOrderItems = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<String, LocalOrderPosition> orderPositions = new ConcurrentHashMap<>();
@@ -484,12 +490,23 @@ final class CandidateFeedClient implements AutoCloseable {
     }
 
     void focus(Candidate candidate) {
+        if (candidate == null) return;
+        long now = System.currentTimeMillis();
+        Long blockedUntil = focusRequestUntil.putIfAbsent(candidate.signature(), now + FOCUS_REQUEST_COOLDOWN_MILLIS);
+        if (blockedUntil != null && blockedUntil > now) return;
+        focusRequestUntil.put(candidate.signature(), now + FOCUS_REQUEST_COOLDOWN_MILLIS);
         scheduler.execute(() -> {
             try {
                 JsonObject body = new JsonObject(); body.addProperty("signature", candidate.signature());
+                // Fabric needs one bounded verification burst, not a minute of
+                // immediate re-leases that starves every other market.
+                body.addProperty("duration_seconds", 15);
                 sendJson("/api/v1/watches", "POST", body.toString());
                 enqueueDiagnostic("decision", "focus", 0, Map.of("candidate_state", candidate.state(), "route", candidate.route(), "reason_code", "user_focus"));
-            } catch (Exception error) { LOGGER.warn("Could not start focused watch: {}", safeMessage(error)); }
+            } catch (Exception error) {
+                focusRequestUntil.remove(candidate.signature());
+                LOGGER.warn("Could not start focused watch: {}", safeMessage(error));
+            }
         });
     }
 
@@ -642,10 +659,31 @@ final class CandidateFeedClient implements AutoCloseable {
 
     private void enqueueDiagnostic(String event, String code, long duration, Map<String, String> fields) {
         if (!diagnostics.get() || diagnosticQueue.size() >= 100) return;
+        String safeEvent = normalizeDiagnosticEvent(event);
         JsonObject value = new JsonObject(); value.addProperty("install_id", config.installId()); value.addProperty("version", MOD_VERSION);
-        value.addProperty("event", event); if (!code.isBlank()) value.addProperty("code", code); if (duration > 0) value.addProperty("duration_ms", duration);
-        JsonObject encodedFields = new JsonObject(); fields.forEach(encodedFields::addProperty); value.add("fields", encodedFields); value.addProperty("created_at", Instant.now().toString());
+        value.addProperty("event", safeEvent); if (!code.isBlank()) value.addProperty("code", code); if (duration > 0) value.addProperty("duration_ms", duration);
+        JsonObject encodedFields = new JsonObject(); sanitizeDiagnosticFields(fields).forEach(encodedFields::addProperty);
+        value.add("fields", encodedFields); value.addProperty("created_at", Instant.now().toString());
         diagnosticQueue.add(value);
+    }
+
+    static String normalizeDiagnosticEvent(String event) {
+        if (event != null && DIAGNOSTIC_EVENTS.contains(event)) return event;
+        if ("order_position".equals(event)) return "outcome";
+        return "decision";
+    }
+
+    static Map<String, String> sanitizeDiagnosticFields(Map<String, String> fields) {
+        if (fields == null || fields.isEmpty()) return Map.of();
+        Map<String, String> result = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : fields.entrySet()) {
+            String value = entry.getValue();
+            if (!DIAGNOSTIC_FIELDS.contains(entry.getKey()) || value == null || value.length() > 128
+                    || value.contains("\r") || value.contains("\n") || value.contains("://")) continue;
+            result.put(entry.getKey(), value);
+            if (result.size() == 8) break;
+        }
+        return Map.copyOf(result);
     }
 
     private void flushDiagnosticsSafely() {
@@ -653,6 +691,12 @@ final class CandidateFeedClient implements AutoCloseable {
         JsonArray batch = new JsonArray(); List<JsonObject> removed = new ArrayList<>();
         while (batch.size() < 50) { JsonObject value = diagnosticQueue.poll(); if (value == null) break; batch.add(value); removed.add(value); }
         try { sendJson("/api/v1/client/diagnostics", "POST", batch.toString()); }
+        catch (BackendHttpException error) {
+            // A malformed event must not poison the queue forever and suppress
+            // every later runtime diagnostic. Retry only statuses that can heal.
+            if (error.status >= 429) for (JsonObject value : removed) if (diagnosticQueue.size() < 100) diagnosticQueue.add(value);
+            else LOGGER.warn("Dropped a diagnostic batch rejected with HTTP {}", error.status);
+        }
         catch (Exception error) { for (JsonObject value : removed) if (diagnosticQueue.size() < 100) diagnosticQueue.add(value); }
     }
 
@@ -660,7 +704,14 @@ final class CandidateFeedClient implements AutoCloseable {
         HttpRequest request = request(config.backend().resolve(path)).header("Content-Type", "application/json")
                 .method(method, HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8)).build();
         HttpResponse<InputStream> response = http.send(request, HttpResponse.BodyHandlers.ofInputStream());
-        try (InputStream ignored = response.body()) { if (response.statusCode() < 200 || response.statusCode() >= 300) throw new IllegalStateException("backend returned HTTP " + response.statusCode()); }
+        try (InputStream ignored = response.body()) {
+            if (response.statusCode() < 200 || response.statusCode() >= 300) throw new BackendHttpException(response.statusCode());
+        }
+    }
+
+    private static final class BackendHttpException extends Exception {
+        private final int status;
+        private BackendHttpException(int status) { super("backend returned HTTP " + status); this.status = status; }
     }
 
     private HttpRequest.Builder request(URI endpoint) {

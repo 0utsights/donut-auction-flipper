@@ -218,6 +218,20 @@ func TestFocusedScansKeepFastCandidateRefresh(t *testing.T) {
 	}
 }
 
+func TestFocusedWatchLifetimeSupportsBoundedFabricVerification(t *testing.T) {
+	if got, ok := focusedWatchLifetime(15); !ok || got != 15*time.Second {
+		t.Fatalf("bounded Fabric watch=%s valid=%v", got, ok)
+	}
+	if got, ok := focusedWatchLifetime(0); !ok || got != time.Minute {
+		t.Fatalf("default dashboard watch=%s valid=%v", got, ok)
+	}
+	for _, invalid := range []int{-1, 1, 9, 61} {
+		if _, ok := focusedWatchLifetime(invalid); ok {
+			t.Fatalf("invalid watch duration %d was accepted", invalid)
+		}
+	}
+}
+
 func TestFastCollectionPublishesNewestPageFromStoredHistory(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	item := market.Item{ID: "minecraft:diamond", Quantity: 1, DisplayName: "Diamond"}

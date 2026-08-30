@@ -79,6 +79,15 @@ class OrderCreationExecutorTest {
         assertFalse(OrderCreationExecutor.isTransientWaitError("review item does not match the armed item"));
     }
 
+    @Test void waitDiagnosticsPreserveTheActualPreflightGate() {
+        assertEquals("focused_stale", OrderCreationExecutor.waitReasonCode("focused order observation is not fresh yet"));
+        assertEquals("auction_stale", OrderCreationExecutor.waitReasonCode("auction exit is stale"));
+        assertEquals("candidate_changed", OrderCreationExecutor.waitReasonCode("armed candidate changed or disappeared"));
+        assertEquals("balance_unavailable", OrderCreationExecutor.waitReasonCode(
+                "waiting for the live scoreboard balance or a manual override"));
+        assertEquals("preflight_rejected", OrderCreationExecutor.waitReasonCode("unexpected"));
+    }
+
     @Test void recognizesOnlyTheExpectedServerTextInputDescriptor() {
         assertTrue(OrderCreationExecutor.recognizedTextInputDescriptor("search", "Item", Set.of("search")));
         assertTrue(OrderCreationExecutor.recognizedTextInputDescriptor("value", "Price per item", Set.of("price")));

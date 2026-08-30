@@ -72,9 +72,15 @@ final class OrderCreationExecutor {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("donut-network-client");
     private static final Duration FEED_MAX_AGE = Duration.ofSeconds(3);
-    private static final Duration ORDER_MAX_AGE = Duration.ofSeconds(6);
-    private static final Duration AUCTION_MAX_AGE = Duration.ofSeconds(15);
-    private static final Duration FRESH_WAIT = Duration.ofSeconds(20);
+    // The backend already rejects unstable order markets. Keep the execution
+    // quote aligned with its 30-second focused-price horizon instead of making
+    // a safe sample race through an arbitrary six-second client window.
+    private static final Duration ORDER_MAX_AGE = Duration.ofSeconds(30);
+    private static final Duration AUCTION_MAX_AGE = Duration.ofSeconds(20);
+    private static final Duration FOCUS_RETRY = Duration.ofSeconds(12);
+    private static final Duration FRESH_WAIT_TIMEOUT = Duration.ofSeconds(45);
+    private static final Duration MARKET_CHANGE_GRACE = Duration.ofSeconds(3);
+    private static final Duration AUTO_RETRY_COOLDOWN = Duration.ofSeconds(30);
     private static final Duration WORKFLOW_TIMEOUT = Duration.ofMinutes(3);
     private static final Duration SCREEN_TIMEOUT = Duration.ofSeconds(8);
     private static final String FOCUSED_STALE = "focused order observation is not fresh yet";
@@ -105,6 +111,8 @@ final class OrderCreationExecutor {
     private String message = "idle";
     private Instant armedAt = Instant.EPOCH;
     private Instant phaseAt = Instant.EPOCH;
+    private Instant nextFocusAt = Instant.EPOCH;
+    private String lastWaitError = "";
     private long nextActionAt;
     private long sessionSpent;
     private OrderPlan lastSubmittedPlan;
@@ -114,6 +122,7 @@ final class OrderCreationExecutor {
     private final Map<String, Long> autoEscrowCaps = new LinkedHashMap<>();
     private final Map<String, String> autoItemIds = new LinkedHashMap<>();
     private final Set<String> autoSessionRejectedItems = new LinkedHashSet<>();
+    private final Map<String, Instant> autoDeferredUntil = new LinkedHashMap<>();
     private long currentEscrowCap;
     private long minimumProfitDollars;
     private long pendingRepriceUnitCents;
@@ -197,6 +206,8 @@ final class OrderCreationExecutor {
         rankSortAttempts = 0;
         retrying = false;
         armedAt = now;
+        nextFocusAt = now.plus(FOCUS_RETRY);
+        lastWaitError = "";
         transition(Phase.WAIT_FRESH, "waiting for a current focused order sample");
         feed.focus(selection.candidate());
         feed.diagnostic("order_workflow", "armed", Map.of("candidate_state", selection.candidate().state(), "route", selection.candidate().route(), "reason_code", "explicit_local_arm"));
@@ -264,26 +275,37 @@ final class OrderCreationExecutor {
             return;
         }
         if (Duration.between(armedAt, now).compareTo(WORKFLOW_TIMEOUT) > 0) {
-            failCandidate(client, "order workflow timed out");
+            String detail = phase == Phase.WAIT_FRESH && !lastWaitError.isBlank()
+                    ? "order workflow timed out while " + lastWaitError : "order workflow timed out";
+            failCandidate(client, detail);
             return;
         }
         if (phase == Phase.WAIT_FRESH) {
-            String error = liveError(plan, now, true);
+            String error = liveError(plan, now, !autoEnabled);
             if (autoEnabled && !retrying && isRebasablePreTransactionChange(error) && tryRebaseCurrentAuto(now)) {
-                error = liveError(plan, now, true);
+                error = liveError(plan, now, false);
             }
             if (error.isEmpty()) {
+                lastWaitError = "";
                 client.getNetworkHandler().sendChatCommand("orders");
                 transition(Phase.ORDER_BOARD, "opening verified order board");
                 delay();
-            } else if (Duration.between(phaseAt, now).compareTo(FRESH_WAIT) > 0) {
-                if (autoEnabled && isTransientWaitError(error)) {
+            } else {
+                recordWaitReason(error, now);
+                Duration waiting = Duration.between(phaseAt, now);
+                if (autoEnabled && isTransientWaitError(error) && !now.isBefore(nextFocusAt)) {
                     feed.candidate(plan.candidateId()).ifPresent(feed::focus);
-                    phaseAt = now;
-                    message = error + "; automatic session is still waiting";
-                } else if (autoEnabled && isSkippablePreTransactionChange(error)) {
-                    quarantineCurrentAuto(client, error);
-                } else abort(client, error);
+                    nextFocusAt = now.plus(FOCUS_RETRY);
+                    message = error + "; requested another bounded verification sample";
+                }
+                if (autoEnabled && isTransientWaitError(error) && waiting.compareTo(FRESH_WAIT_TIMEOUT) > 0) {
+                    deferCurrentAuto(client, error + " after " + waiting.toSeconds() + "s");
+                } else if (autoEnabled && isSkippablePreTransactionChange(error)
+                        && waiting.compareTo(MARKET_CHANGE_GRACE) > 0) {
+                    deferCurrentAuto(client, error);
+                } else if (!autoEnabled && waiting.compareTo(FRESH_WAIT_TIMEOUT) > 0) {
+                    abort(client, error + " after " + waiting.toSeconds() + "s");
+                }
             }
             return;
         }
@@ -301,7 +323,7 @@ final class OrderCreationExecutor {
             default -> false;
         };
         if (!verifying) {
-            String error = liveError(currentPlan, now, true);
+            String error = liveError(currentPlan, now, !autoEnabled);
             if (!error.isEmpty()) {
                 if (autoEnabled && (error.equals(FOCUSED_STALE) || isSkippablePreTransactionChange(error))) {
                     quarantineCurrentAuto(client, error);
@@ -355,11 +377,10 @@ final class OrderCreationExecutor {
         boolean wasEmpty = autoQueue.isEmpty();
         int added = refreshAutoQueue();
         if (autoQueue.isEmpty()) {
-            message = autoSessionRejectedItems.isEmpty()
+            message = autoSessionRejectedItems.isEmpty() && autoDeferredUntil.isEmpty()
                     ? "automatic order session active; waiting for reviewed candidates"
-                    : "automatic order session active; " + autoSessionRejectedItems.size()
-                            + " item" + (autoSessionRejectedItems.size() == 1 ? " is" : "s are")
-                            + " ignored until this session ends";
+                    : "automatic order session active; " + autoSessionRejectedItems.size() + " ignored for this session, "
+                            + autoDeferredUntil.size() + " cooling down for a later retry";
             nextAutoAttempt = now.plusSeconds(1);
             return;
         }
@@ -370,21 +391,31 @@ final class OrderCreationExecutor {
         Optional<PortfolioAllocator.Selection> current = feed.allocation().selections().stream()
                 .filter(selection -> selection.candidate().id().equals(candidateID)
                         && !feed.hasActiveOrder(selection.candidate().itemId())).findFirst();
-        if (current.isEmpty()) { quarantineCurrentAuto(client, "reviewed allocation changed or disappeared"); return; }
+        if (current.isEmpty()) { deferCurrentAuto(client, "reviewed allocation changed or disappeared"); return; }
         long cap = autoEscrowCaps.getOrDefault(candidateID, 0L);
         int authorizedBatches = authorizedBatches(current.get().batches(), current.get().candidate().acquisitionCost(), cap);
-        if (authorizedBatches <= 0) { quarantineCurrentAuto(client, "reviewed escrow no longer covers this item"); return; }
+        if (authorizedBatches <= 0) { deferCurrentAuto(client, "reviewed escrow no longer covers this item"); return; }
         PortfolioAllocator.Selection next = new PortfolioAllocator.Selection(current.get().candidate(), authorizedBatches);
         ArmResult result = arm(next);
-        if (!result.armed()) quarantineCurrentAuto(client, result.message());
+        if (!result.armed()) {
+            if (isTransientWaitError(result.message()) || isSkippablePreTransactionChange(result.message())) {
+                deferCurrentAuto(client, result.message());
+            } else {
+                quarantineCurrentAuto(client, result.message());
+            }
+        }
     }
 
     private int refreshAutoQueue() {
+        Instant now = Instant.now();
+        autoDeferredUntil.entrySet().removeIf(entry -> !entry.getValue().isAfter(now));
         List<PortfolioAllocator.Selection> eligible = feed.allocation().selections().stream()
                 .filter(selection -> !feed.hasActiveOrder(selection.candidate().itemId())).toList();
+        Set<String> unavailable = new HashSet<>(autoSessionRejectedItems);
+        unavailable.addAll(autoDeferredUntil.keySet());
         List<PortfolioAllocator.Selection> additions = autoQueueAdditions(eligible,
                 feed.allocation().availableOrderSlots(), Set.copyOf(autoQueue), new HashSet<>(autoItemIds.values()),
-                autoSessionRejectedItems);
+                unavailable);
         for (PortfolioAllocator.Selection selection : additions) {
             String candidateID = selection.candidate().id();
             autoQueue.addLast(candidateID);
@@ -426,24 +457,27 @@ final class OrderCreationExecutor {
     /**
      * A focused watch can legitimately replace a candidate's economics while
      * this workflow is waiting. Automatic consent authorizes the market and a
-     * maximum escrow, not stale price inputs, so adopt only the current READY
-     * allocation for the exact same canonical item and never exceed that cap.
+     * maximum escrow, not stale price inputs. Once an item is armed, optimizer
+     * re-ranking must not invalidate it merely because another market moved
+     * ahead. Adopt the current READY candidate for the exact same canonical
+     * market, bounded by current executable volume and the original escrow cap.
      */
     private boolean tryRebaseCurrentAuto(Instant now) {
         if (!autoEnabled || plan == null || autoQueue.isEmpty()) return false;
         String queuedID = autoQueue.getFirst();
         long escrowCap = autoEscrowCaps.getOrDefault(queuedID, 0L);
-        Optional<PortfolioAllocator.Selection> currentValue = feed.allocation().selections().stream()
-                .filter(selection -> selection.candidate().itemId().equals(plan.itemId())
-                        && selection.candidate().signature().equals(plan.signature())
-                        && !feed.hasActiveOrder(selection.candidate().itemId()))
+        Optional<CandidateFeedClient.Candidate> currentValue = feed.candidates().stream()
+                .filter(candidate -> candidate.route().equals("ORDER_TO_AUCTION") && candidate.state().equals("READY")
+                        && candidate.itemId().equals(plan.itemId()) && candidate.signature().equals(plan.signature())
+                        && !feed.hasActiveOrder(candidate.itemId()))
+                .sorted(java.util.Comparator.comparing(CandidateFeedClient.Candidate::focusedFreshAt).reversed())
                 .findFirst();
         if (currentValue.isEmpty()) return false;
-        PortfolioAllocator.Selection current = currentValue.get();
-        CandidateFeedClient.Candidate candidate = current.candidate();
+        CandidateFeedClient.Candidate candidate = currentValue.get();
         if (candidate.focusedFreshAt().isBefore(armedAt.minusSeconds(1))
                 || age(candidate.focusedFreshAt(), now).compareTo(ORDER_MAX_AGE) > 0) return false;
-        int batches = authorizedBatches(current.batches(), candidate.acquisitionCost(), escrowCap);
+        int batches = authorizedBatches(Math.min(plan.batches(), candidate.executableBatches()),
+                candidate.acquisitionCost(), escrowCap);
         if (batches <= 0) return false;
 
         OrderPlan refreshed;
@@ -452,10 +486,10 @@ final class OrderCreationExecutor {
         } catch (IllegalArgumentException | ArithmeticException error) {
             return false;
         }
-        if (!liveError(refreshed, now, true).isEmpty()) return false;
+        if (!liveError(refreshed, now, false).isEmpty()) return false;
 
         plan = refreshed;
-        minimumProfitDollars = Math.max(1, current.conservativeProfit());
+        minimumProfitDollars = Math.max(1, new PortfolioAllocator.Selection(candidate, batches).conservativeProfit());
         if (!queuedID.equals(refreshed.candidateId())) {
             autoQueue.removeFirst();
             autoEscrowCaps.remove(queuedID);
@@ -805,6 +839,8 @@ final class OrderCreationExecutor {
         pendingRepriceUnitCents = 0;
         retrying = true;
         armedAt = Instant.now();
+        nextFocusAt = armedAt.plus(FOCUS_RETRY);
+        lastWaitError = "";
         feed.candidate(plan.candidateId()).ifPresent(feed::focus);
         closeScreen(client);
         transition(Phase.WAIT_FRESH, "waiting for refund, fresh auction exit, and the bounded replacement bid");
@@ -886,6 +922,7 @@ final class OrderCreationExecutor {
         autoEscrowCaps.clear();
         autoItemIds.clear();
         autoSessionRejectedItems.clear();
+        autoDeferredUntil.clear();
     }
 
     private String liveError(OrderPlan expected, Instant now, boolean requireAllocation) {
@@ -899,7 +936,8 @@ final class OrderCreationExecutor {
         Optional<CandidateFeedClient.Candidate> currentValue = feed.candidate(expected.candidateId());
         if (currentValue.isEmpty() || !expected.matches(currentValue.get())) return "armed candidate changed or disappeared";
         CandidateFeedClient.Candidate current = currentValue.get();
-        if (age(current.focusedFreshAt(), now).compareTo(ORDER_MAX_AGE) > 0) return FOCUSED_STALE;
+        if (current.focusedFreshAt().isBefore(armedAt.minusSeconds(1))
+                || age(current.focusedFreshAt(), now).compareTo(ORDER_MAX_AGE) > 0) return FOCUSED_STALE;
         if (age(current.auctionFreshAt(), now).compareTo(AUCTION_MAX_AGE) > 0) return "auction exit is stale";
         if (requireAllocation && !feed.isAllocated(current.id())) return "candidate no longer belongs to the local portfolio";
         if (requireAllocation && feed.allocatedBatches(current.id()) < expected.batches()) return "allocated stack count was reduced";
@@ -908,6 +946,36 @@ final class OrderCreationExecutor {
         if (allocation.availableOrderSlots() < 1) return "local order slots are exhausted";
         if (expected.escrowDollars() > allocation.deployable()) return "order exceeds deployable balance after reserve";
         return "";
+    }
+
+    private void recordWaitReason(String error, Instant now) {
+        message = "preflight waiting: " + error;
+        if (error.equals(lastWaitError)) return;
+        lastWaitError = error;
+        CandidateFeedClient.Candidate current = plan == null ? null : feed.candidate(plan.candidateId()).orElse(null);
+        long focusedAge = current == null ? -1 : age(current.focusedFreshAt(), now).toSeconds();
+        long auctionAge = current == null ? -1 : age(current.auctionFreshAt(), now).toSeconds();
+        LOGGER.info("Order preflight waiting: item={}; reason={}; focused_age_s={}; auction_age_s={}; allocated={}; feed_state={}",
+                plan == null ? "none" : plan.itemId(), error, focusedAge, auctionAge,
+                current != null && feed.isAllocated(current.id()), feed.status().state());
+        feed.diagnostic("decision", "order_wait", Map.of("candidate_state", phase.name(),
+                "route", "ORDER_TO_AUCTION", "reason_code", waitReasonCode(error)));
+    }
+
+    static String waitReasonCode(String error) {
+        if (error == null || error.isBlank()) return "ready";
+        if (error.equals(FOCUSED_STALE)) return "focused_stale";
+        if (error.equals("auction exit is stale")) return "auction_stale";
+        if (error.equals("candidate feed is stale")) return "feed_stale";
+        if (error.equals("backend candidate feed is not ready")) return "feed_not_ready";
+        if (error.equals("waiting for the live scoreboard balance or a manual override")) return "balance_unavailable";
+        if (error.equals("armed candidate changed or disappeared")) return "candidate_changed";
+        if (error.equals("candidate no longer belongs to the local portfolio")) return "portfolio_changed";
+        if (error.equals("allocated stack count was reduced")) return "allocation_reduced";
+        if (error.equals("an order for this item is already active or pending")) return "duplicate_locked";
+        if (error.equals("local order slots are exhausted")) return "order_slots_full";
+        if (error.equals("order exceeds deployable balance after reserve")) return "balance_cap";
+        return "preflight_rejected";
     }
 
     private String serverError(MinecraftClient client) {
@@ -964,10 +1032,21 @@ final class OrderCreationExecutor {
     }
 
     private void quarantineCurrentAuto(MinecraftClient client, String reason) {
+        releaseCurrentAuto(client, reason, true);
+    }
+
+    private void deferCurrentAuto(MinecraftClient client, String reason) {
+        releaseCurrentAuto(client, reason, false);
+    }
+
+    private void releaseCurrentAuto(MinecraftClient client, String reason, boolean rejectForSession) {
         Phase failedPhase = phase;
         String skipped = autoQueue.peekFirst();
         String itemID = plan != null ? plan.itemId() : autoItemIds.get(skipped);
-        if (itemID != null && !itemID.isBlank()) autoSessionRejectedItems.add(itemID);
+        if (itemID != null && !itemID.isBlank()) {
+            if (rejectForSession) autoSessionRejectedItems.add(itemID);
+            else autoDeferredUntil.put(itemID, Instant.now().plus(AUTO_RETRY_COOLDOWN));
+        }
         List<String> removed = autoItemIds.entrySet().stream()
                 .filter(entry -> itemID != null && itemID.equals(entry.getValue()))
                 .map(Map.Entry::getKey).toList();
@@ -982,19 +1061,22 @@ final class OrderCreationExecutor {
         retrying = false;
         pendingRepriceUnitCents = 0;
         cancelConfirmationSent = false;
+        lastWaitError = "";
+        nextFocusAt = Instant.EPOCH;
         phase = Phase.IDLE;
         nextAutoAttempt = Instant.now().plusSeconds(1);
         closeScreen(client);
         String ignored = itemID == null || itemID.isBlank() ? "one item" : itemID;
+        String disposition = rejectForSession ? "ignored " + ignored + " for this session"
+                : "deferred " + ignored + " for " + AUTO_RETRY_COOLDOWN.toSeconds() + "s";
         if (autoQueue.isEmpty()) {
-            message = "ignored " + ignored + " for this session: " + safe(reason)
-                    + "; waiting for other reviewed candidates";
+            message = disposition + ": " + safe(reason) + "; waiting for other reviewed candidates";
         } else {
-            message = "ignored " + ignored + " for this session: " + safe(reason)
-                    + "; " + autoQueue.size() + " remain";
+            message = disposition + ": " + safe(reason) + "; " + autoQueue.size() + " remain";
         }
-        feed.diagnostic("order_workflow", "auto_item_quarantined", Map.of("candidate_state", failedPhase.name(),
-                "route", "ORDER_TO_AUCTION", "reason_code", "item_failed_for_session"));
+        feed.diagnostic("decision", rejectForSession ? "auto_item_quarantined" : "auto_item_deferred",
+                Map.of("candidate_state", failedPhase.name(), "route", "ORDER_TO_AUCTION",
+                        "reason_code", rejectForSession ? "item_failed_for_session" : "transient_retry_cooldown"));
         tell(client, message);
     }
 

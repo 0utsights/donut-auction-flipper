@@ -197,6 +197,9 @@ func researchSchedulingTier(candidate Candidate) int {
 func (s *System) AddWatch(ctx context.Context, signature string) (Watch, error) {
 	return s.store.AddWatch(ctx, signature, time.Minute)
 }
+func (s *System) AddWatchFor(ctx context.Context, signature string, lifetime time.Duration) (Watch, error) {
+	return s.store.AddWatch(ctx, signature, lifetime)
+}
 func (s *System) DeleteWatch(ctx context.Context, id string) error {
 	return s.store.DeleteWatch(ctx, id)
 }

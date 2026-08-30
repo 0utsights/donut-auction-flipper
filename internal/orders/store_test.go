@@ -858,6 +858,23 @@ func TestSharedFocusedWatchDoesNotDuplicateOrPrematurelyStopTask(t *testing.T) {
 	}
 }
 
+func TestBoundedFabricWatchUsesRequestedLifetime(t *testing.T) {
+	system, err := NewSystem(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	now := time.Date(2026, 8, 30, 16, 0, 0, 0, time.UTC)
+	system.store.now = func() time.Time { return now }
+	watch, err := system.AddWatchFor(context.Background(), "minecraft:spider_eye", 15*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !watch.CreatedAt.Equal(now) || !watch.ExpiresAt.Equal(now.Add(15*time.Second)) {
+		t.Fatalf("bounded watch=%+v", watch)
+	}
+}
+
 func TestDeletingWatchLetsLeasedTaskFinish(t *testing.T) {
 	system, err := NewSystem(Config{})
 	if err != nil {

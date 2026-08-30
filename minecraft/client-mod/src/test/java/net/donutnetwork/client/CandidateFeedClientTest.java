@@ -4,11 +4,23 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class CandidateFeedClientTest {
+    @Test void runtimeDiagnosticsAreNormalizedBeforeBatching() {
+        assertEquals("decision", CandidateFeedClient.normalizeDiagnosticEvent("order_workflow"));
+        assertEquals("outcome", CandidateFeedClient.normalizeDiagnosticEvent("order_position"));
+        assertEquals("error", CandidateFeedClient.normalizeDiagnosticEvent("error"));
+        assertEquals(Map.of("candidate_state", "WAIT_FRESH", "route", "ORDER_TO_AUCTION"),
+                CandidateFeedClient.sanitizeDiagnosticFields(Map.of(
+                        "candidate_state", "WAIT_FRESH", "route", "ORDER_TO_AUCTION",
+                        "item_id", "minecraft:spider_eye", "chat", "private")));
+        assertTrue(CandidateFeedClient.sanitizeDiagnosticFields(Map.of("endpoint", "http://secret.invalid")).isEmpty());
+    }
+
     @Test void separatesDurablePositionLocksFromLiveServerOrderLocks() {
         assertEquals(Set.of("minecraft:totem_of_undying"), CandidateFeedClient.liveOrderLocks(
                 Set.of("minecraft:netherite_scrap", "minecraft:totem_of_undying"),

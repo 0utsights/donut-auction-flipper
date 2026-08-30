@@ -89,7 +89,8 @@ type TaskResult struct {
 }
 
 type WatchRequest struct {
-	Signature string `json:"signature"`
+	Signature       string `json:"signature"`
+	DurationSeconds int    `json:"duration_seconds,omitempty"`
 }
 
 type Watch struct {

@@ -181,8 +181,9 @@ func (s *Server) addWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	value.Signature = strings.TrimSpace(value.Signature)
-	if !safeSignature(value.Signature) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid signature"})
+	lifetime, validLifetime := focusedWatchLifetime(value.DurationSeconds)
+	if !safeSignature(value.Signature) || !validLifetime {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid focused watch request"})
 		return
 	}
 	found := false
@@ -196,12 +197,22 @@ func (s *Server) addWatch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "candidate signature is not available"})
 		return
 	}
-	watch, err := s.orders.AddWatch(r.Context(), value.Signature)
+	watch, err := s.orders.AddWatchFor(r.Context(), value.Signature, lifetime)
 	if err != nil {
 		s.orderError(w, "add focused watch", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, watch)
+}
+
+func focusedWatchLifetime(seconds int) (time.Duration, bool) {
+	if seconds == 0 {
+		return time.Minute, true
+	}
+	if seconds < 10 || seconds > 60 {
+		return 0, false
+	}
+	return time.Duration(seconds) * time.Second, true
 }
 
 func (s *Server) deleteWatch(w http.ResponseWriter, r *http.Request) {
