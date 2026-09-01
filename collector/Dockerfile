@@ -1,11 +1,11 @@
-FROM node:22-alpine AS build
+FROM node:26-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json tsconfig.json ./
 RUN npm ci
 COPY src ./src
 RUN npm test && npm prune --omit=dev
 
-FROM node:22-alpine
+FROM node:26-alpine
 RUN addgroup -g 10001 collector && adduser -D -u 10001 -G collector collector && mkdir -p /app /data/profiles /data/captures && chown -R collector:collector /app /data
 WORKDIR /app
 COPY --from=build /app/package.json /app/package-lock.json ./
