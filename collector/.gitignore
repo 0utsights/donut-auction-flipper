@@ -1,6 +1,8 @@
 node_modules/
 dist/
-accounts.json
+accounts*.json
+!accounts.example.json
+!accounts.container.example.json
 profiles/
 captures/
 *.log

@@ -1,5 +1,16 @@
-.env
+.env*
+!.env.example
 data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.pem
+*.pfx
+*.p12
+*.key
+config/donut-network.properties
 *.tmp
 *.exe
 *.test

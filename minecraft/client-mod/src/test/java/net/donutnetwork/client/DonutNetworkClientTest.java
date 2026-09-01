@@ -19,10 +19,10 @@ class DonutNetworkClientTest {
         scoreboard.setObjectiveSlot(ScoreboardDisplaySlot.SIDEBAR, fallback);
         Team team = scoreboard.addTeam("red_team");
         team.setColor(Formatting.RED);
-        scoreboard.addScoreHolderToTeam("Outsights", team);
+        scoreboard.addScoreHolderToTeam("TestPlayer", team);
         scoreboard.setObjectiveSlot(ScoreboardDisplaySlot.fromFormatting(Formatting.RED), red);
 
-        assertSame(red, DonutNetworkClient.visibleSidebarObjective(scoreboard, "Outsights"));
+        assertSame(red, DonutNetworkClient.visibleSidebarObjective(scoreboard, "TestPlayer"));
         assertSame(fallback, DonutNetworkClient.visibleSidebarObjective(scoreboard, "SomeoneElse"));
     }
 

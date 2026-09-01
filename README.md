@@ -1,12 +1,17 @@
 # Donut Auction + Order Flipper
 
+[![CI](https://github.com/0utsights/donut-auction-flipper/actions/workflows/ci.yml/badge.svg)](https://github.com/0utsights/donut-auction-flipper/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A functionality-first market system with three permanent roles:
 
 - **Mineflayer observers** read DonutSMP order menus and submit evidence. They cannot trade.
 - **Go backend** reads the official auction API, coordinates observers, retains SQLite evidence, and scores order/auction routes.
 - **Fabric client** receives scored candidates, keeps each player's balance and slot usage local, allocates 20 order and 18 auction slots, creates explicitly authorized orders, and can claim/package/list completed tracked orders through verified server screens.
 
-The stable API auction-only release remains at branch `codex/auction-only` and tag `auction-only-v1.0.0`. This branch, `codex/auction-orders`, is the research/production path for combined order and auction evidence. No fake rows are generated.
+This is an unofficial research and client-automation project. Use it only where the server operator and account owner permit it. Mineflayer is structurally read-only; Fabric economic actions remain disabled until the player explicitly authorizes the current session and all live checks pass.
+
+The stable API auction-only release remains at branch `codex/auction-only` and tag `auction-only-v1.0.0`. `main` is the combined order and auction research/production path. No fake rows are generated. See [architecture](docs/architecture.md), [API](docs/api.md), [security](SECURITY.md), and [publication scope](docs/publication.md).
 
 ## Local backend
 
@@ -45,7 +50,7 @@ Configure one entry per Microsoft account in `collector/accounts.json`. Every ac
 
 The checked-in schema was verified against the real 1.21.11 Donut order menu. It permits only the exact `Orders` refresh book and `Next page` arrow fingerprints. A changed or unknown layout is captured under `collector/captures/`, reported as `schema_hold`, and never clicked. The parser marks only a conservative allowlist of unmodified base commodities as signature-complete. Enchanted, damaged, named, container-bearing, potion, map, music-disc, tool, armor, and otherwise variant-sensitive rows remain `RESEARCH` and cannot receive a priority rank. Purchase, fulfillment, creation, confirmation, cancellation, claim, listing, and inventory-transfer operations are absent from the collector interface.
 
-The collector paces server-confirmed discovery clicks at 750ms. Focused watches use a separate 500ms minimum lane, plus the backend's requested freshness delay, and locate an assigned item only by traversing the verified next-page control. Each discovery connection performs one pass through the server-reported last page, then rotates cleanly instead of reusing stale server state. A 1,000-page runaway guard fails closed if pagination is ever cyclic or malformed. A pass opens `/orders` once and paginates only through verified controls.
+The collector paces server-confirmed discovery clicks at 750ms. Focused watches use a separate 500ms minimum lane plus the backend's requested freshness delay. Discovery continuously refreshes page one after proving the global `Most Per Item` sort; the official auction API prioritizes canonical items for exact `/order <item_id>` focused searches. Every filtered result must prove page one, canonical identity, completeness, and descending reward. The collector does not crawl arbitrary deep pages in the normal path.
 
 Navigation accepts a page only after the server sends a matching window update; Mineflayer's optimistic local click state is never submitted as a new page. After login transfers settle, the stationary observer also suspends Mineflayer's idle movement ticks. This avoids Donut's 1.21.x `Invalid sequence` disconnect while preserving keepalives, teleport handling, chat, and window packets. Transient disconnects renew the same leased task and retry; only a schema hold permanently stops discovery.
 
@@ -108,7 +113,7 @@ docker compose -f compose.yaml -f compose.second-pc.yaml up -d auction-server or
 
 For a collector-only or backend-only update, pass `collector` or `backend` to the build script. The script keeps dependency caches under the ignored `.second-pc-cache/` directory, so repeated validated deployments do not redownload the complete Go and npm dependency sets.
 
-From the player PC, run `scripts/install-second-pc-tunnel-task.ps1` once. It installs a hidden per-user task that starts at logon, is watchdog-triggered every five minutes if it ever exits, supervises `scripts/second-pc-tunnel.ps1`, checks the real `/healthz` response, and reconnects with bounded backoff whenever the SSH forward or second PC is temporarily unavailable. Overlapping watchdog starts are ignored while the task is already running. The existing Fabric and browser URL remains `http://127.0.0.1:8080`; SSH encrypts and authenticates the hop, and the backend is never bound to LAN. Remove it with `Unregister-ScheduledTask -TaskName DonutMarketBackendTunnel -Confirm:$false`. Enabling tailnet HTTPS later allows replacing this tunnel with the normal Caddy deployment.
+From the player PC, run `scripts/install-second-pc-tunnel-task.ps1 -RemoteHost <host> -RemoteUser <user> -IdentityFile <private-key>` once. It installs a hidden per-user task that starts at logon, is watchdog-triggered every five minutes if it ever exits, supervises `scripts/second-pc-tunnel.ps1`, checks the real `/healthz` response, and reconnects with bounded backoff whenever the SSH forward or second PC is temporarily unavailable. Overlapping watchdog starts are ignored while the task is already running. The existing Fabric and browser URL remains `http://127.0.0.1:8080`; SSH encrypts and authenticates the hop, and the backend is never bound to LAN. Remove it with `Unregister-ScheduledTask -TaskName DonutMarketBackendTunnel -Confirm:$false`. Enabling tailnet HTTPS later allows replacing this tunnel with the normal Caddy deployment.
 
 ## Configuration
 
@@ -140,4 +145,4 @@ npm audit --omit=dev
 gradle -p ../minecraft/client-mod clean test build
 ```
 
-See [architecture](docs/architecture.md), [API](docs/api.md), and [decisions](DECISIONS.md).
+See [architecture](docs/architecture.md), [API](docs/api.md), [decisions](DECISIONS.md), and the complete [progress/review log](PROGRESS.md).

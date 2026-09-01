@@ -1,7 +1,11 @@
 [CmdletBinding()]
 param(
-    [string]$RemoteHost = '192.168.137.2',
-    [string]$RemoteUser = 'jayzdayz',
+    [Parameter(Mandatory)]
+    [ValidatePattern('^[A-Za-z0-9._:-]+$')]
+    [string]$RemoteHost,
+    [Parameter(Mandatory)]
+    [ValidatePattern('^[A-Za-z0-9._-]+$')]
+    [string]$RemoteUser,
     [string]$IdentityFile = "$env:USERPROFILE\.ssh\clanskiller_secondpc_ed25519",
     [ValidateRange(2, 60)]
     [int]$HealthIntervalSeconds = 5,
@@ -11,6 +15,9 @@ param(
 $ErrorActionPreference = 'Stop'
 if (-not (Test-Path -LiteralPath $IdentityFile)) {
     throw "SSH identity file not found: $IdentityFile"
+}
+if ($IdentityFile.Contains('"')) {
+    throw 'SSH identity path cannot contain a quote'
 }
 
 function Test-DonutBackend {

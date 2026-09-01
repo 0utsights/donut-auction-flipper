@@ -49,7 +49,7 @@ Unknown screens fail closed. A checked-in schema must match title, listing slots
 
 ## Order evidence and candidates
 
-SQLite WAL retains complete/incomplete scans, normalized order rows, proven quantity decreases, observers, leases, watches, diagnostics, and candidate evidence. Raw scans expire after seven days, derived fills after 90 days, diagnostics after 14 days, and daily database backups after seven days.
+SQLite WAL retains complete/incomplete scans, normalized order rows, proven quantity decreases, observers, leases, watches, diagnostics, and candidate evidence. Raw scans expire after 24 hours, derived fills after 90 days, diagnostics after 14 days, and daily database backups after seven days.
 
 An order disappearance is not a fill. A fill event requires a decrease in the same observer/order key. Evidence graduates through:
 

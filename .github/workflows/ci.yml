@@ -22,8 +22,24 @@ jobs:
       - uses: gradle/actions/setup-gradle@v6
         with: { gradle-version: '9.7.0' }
       - run: gradle -p minecraft/client-mod clean test build --no-daemon
+  collector:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: collector
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.x'
+          cache: npm
+          cache-dependency-path: collector/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm audit --omit=dev
   container:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - run: docker build .
+      - run: docker build collector

@@ -1,12 +1,23 @@
 [CmdletBinding()]
 param(
-    [string]$TaskName = 'DonutMarketBackendTunnel'
+    [string]$TaskName = 'DonutMarketBackendTunnel',
+    [Parameter(Mandatory)]
+    [ValidatePattern('^[A-Za-z0-9._:-]+$')]
+    [string]$RemoteHost,
+    [Parameter(Mandatory)]
+    [ValidatePattern('^[A-Za-z0-9._-]+$')]
+    [string]$RemoteUser,
+    [string]$IdentityFile = "$env:USERPROFILE\.ssh\donut_second_pc_ed25519"
 )
 
 $ErrorActionPreference = 'Stop'
 $supervisor = (Resolve-Path (Join-Path $PSScriptRoot 'second-pc-tunnel.ps1')).Path
 $powerShell = (Get-Command powershell.exe -ErrorAction Stop).Source
-$arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$supervisor`""
+if (-not (Test-Path -LiteralPath $IdentityFile) -or $IdentityFile.Contains('"')) {
+    throw 'IdentityFile must name an existing SSH key and cannot contain a quote'
+}
+$arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$supervisor`" " +
+    "-RemoteHost `"$RemoteHost`" -RemoteUser `"$RemoteUser`" -IdentityFile `"$IdentityFile`""
 $action = New-ScheduledTaskAction -Execute $powerShell -Argument $arguments -WorkingDirectory (Split-Path $supervisor)
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 $watchdogTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
